@@ -1,0 +1,10 @@
+[package]
+name = "filter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+alloy-primitives.workspace = true
+eyre.workspace = true

@@ -1,0 +1,63 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/model",
+    "crates/discover",
+    "crates/filter",
+    "crates/eth-p2p",
+    "crates/era",
+    "crates/chain",
+    "crates/corpus",
+    "crates/directory",
+    "crates/ipc",
+    "crates/univ3",
+    "crates/peer",
+    "crates/spike",
+    "crates/ingest",
+    "crates/headers",
+    "crates/peers",
+    "bins/era",
+    "bins/univ3",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+repository = "https://github.com/TheFrozenFire/ratatoskr"
+
+[workspace.dependencies]
+alloy-consensus = "2.5"
+alloy-primitives = { version = "1.6.1", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+eyre = "0.6"
+futures = "0.3"
+rand = "0.8"
+chain = { path = "crates/chain" }
+corpus = { path = "crates/corpus" }
+directory = { path = "crates/directory" }
+discover = { path = "crates/discover" }
+era = { path = "crates/era" }
+eth-p2p = { path = "crates/eth-p2p" }
+filter = { path = "crates/filter" }
+ipc = { path = "crates/ipc" }
+model = { path = "crates/model" }
+univ3 = { path = "crates/univ3" }
+# Libraries for one outbound devp2p socket. Not the reth node.
+reth-chainspec = { git = "https://github.com/paradigmxyz/reth", tag = "v2.10.0" }
+reth-discv4 = { git = "https://github.com/paradigmxyz/reth", tag = "v2.10.0" }
+reth-dns-discovery = { git = "https://github.com/paradigmxyz/reth", tag = "v2.10.0" }
+reth-ecies = { git = "https://github.com/paradigmxyz/reth", tag = "v2.10.0" }
+reth-net-nat = { git = "https://github.com/paradigmxyz/reth", tag = "v2.10.0" }
+reth-eth-wire = { git = "https://github.com/paradigmxyz/reth", tag = "v2.10.0" }
+reth-eth-wire-types = { git = "https://github.com/paradigmxyz/reth", tag = "v2.10.0" }
+reth-ethereum-forks = { git = "https://github.com/paradigmxyz/reth", tag = "v2.10.0" }
+reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v2.10.0" }
+reth-network-peers = { git = "https://github.com/paradigmxyz/reth", tag = "v2.10.0" }
+secp256k1 = { version = "0.30", features = ["global-context", "recovery", "rand"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time", "io-util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

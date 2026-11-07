@@ -1,0 +1,36 @@
+# Ratatoskr
+
+Ratatoskr enumerates DeFi assets and venues from historical EVM logs.
+
+Discovery walks event streams and records identities. A later, separate process reads on-chain state (reserves, ticks, balances) for identities discovery already found. This repository does not sync chain state and does not run a node.
+
+SHiNode is the reference for fetching Ethereum receipts over devp2p. Ratatoskr does not fork it. The first transport is one outbound Ethereum execution-layer session. Portal Network and other EVM devp2p networks come after that session works.
+
+## Spike
+
+`ratatoskr-spike` dials mainnet peers, reads one recent block of receipts, classifies the logs, prints the hits, and exits.
+
+```
+cargo run -p spike
+cargo run -p spike -- --enode 'enode://<pubkey>@<ip>:<port>' --block 10000835
+```
+
+With no `--enode`, the process reads the mainnet DNS node list and dials peers that publish a TCP port. Most of them are full and disconnect. The process keeps dialing until one serves the block. With no `--block`, it reads 32 blocks behind that peer's reported head. The process listens on no port.
+
+The offline half of the same path is `cargo test -p discover`. Those tests classify logs without a network.
+
+`ratatoskr-peer` keeps a few outbound sessions open and answers on `~/.config/ratatoskr/peer.sock`. The node key is `~/.config/ratatoskr/node.key`.
+
+```
+cargo run -p peer
+cargo run -p peer -- --fetch
+cargo run -p peer -- --status
+```
+
+`ratatoskr-ingest` asks that process for receipt batches and writes them to `~/.local/share/ratatoskr/corpus.redb`. It walks the Uniswap v3 launch week (block 12369621) and the Uniswap v4 PoolManager launch (block 21688329) when a connected peer still serves those heights, then a recent window, and stops around 10GiB.
+
+`ratatoskr-univ3` reads that corpus and writes pool identities to `~/.local/share/ratatoskr/univ3-pools.redb`. Each row is the pool address, token pair, fee, and tick spacing from `PoolCreated` on the canonical factory. Tick liquidity is not in the row. A later RPC call addresses the pool directly.
+
+`ratatoskr-headers` asks the peer process for header ranges only and writes `~/.local/share/ratatoskr/headers.redb`. Each row is the block hash, parent hash, receipts root, and logs bloom. The chain has to link back to mainnet genesis. A restart continues from the saved cursor. Receipts are not downloaded.
+
+See [docs/architecture.md](docs/architecture.md) for the two pipelines and the exact spike sequence.

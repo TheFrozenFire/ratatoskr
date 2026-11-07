@@ -1,0 +1,19 @@
+[package]
+name = "peers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ratatoskr-peers"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+eyre.workspace = true
+directory.workspace = true
+eth-p2p.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

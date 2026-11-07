@@ -1,0 +1,11 @@
+[package]
+name = "discover"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+alloy-primitives.workspace = true
+model.workspace = true
+serde.workspace = true

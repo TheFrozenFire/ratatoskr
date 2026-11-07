@@ -1,0 +1,19 @@
+[package]
+name = "univ3-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ratatoskr-univ3"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+eyre.workspace = true
+corpus.workspace = true
+univ3.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

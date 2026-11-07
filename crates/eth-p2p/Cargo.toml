@@ -1,0 +1,29 @@
+[package]
+name = "eth-p2p"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+alloy-consensus.workspace = true
+alloy-primitives.workspace = true
+eyre.workspace = true
+futures.workspace = true
+rand.workspace = true
+corpus.workspace = true
+model.workspace = true
+reth-chainspec.workspace = true
+reth-discv4.workspace = true
+reth-dns-discovery.workspace = true
+reth-ecies.workspace = true
+reth-net-nat.workspace = true
+reth-eth-wire.workspace = true
+reth-eth-wire-types.workspace = true
+reth-ethereum-forks.workspace = true
+reth-ethereum-primitives.workspace = true
+reth-network-peers.workspace = true
+secp256k1.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+zstd = "0.13"
