@@ -310,19 +310,27 @@ pub fn split_detail(detail: &PoolDetail) -> Result<(Vec<u8>, MutableWrite), Stri
     ))
 }
 
+/// Rebuild a pool from stored rows.
+///
+/// Product immutables do not carry kind or id. `kind` and `id` are the entity
+/// key, and they are stamped onto the product so quotes and curves use it.
 pub fn join_detail(
     immutable: &[u8],
     mutable_body: &[u8],
     ticks: &[TickWord],
+    kind: u8,
+    id: B256,
 ) -> Result<PoolDetail, String> {
     if immutable.is_empty() {
         return Err("immutable".into());
     }
     match immutable[0] {
-        1 => Ok(PoolDetail::ConstantProduct(decode_product(
-            immutable,
-            mutable_body,
-        )?)),
+        1 => {
+            let mut pool = decode_product(immutable, mutable_body)?;
+            pool.kind = kind;
+            pool.id = id;
+            Ok(PoolDetail::ConstantProduct(pool))
+        }
         2 => {
             let mut pool = decode_concentrated(immutable, mutable_body)?;
             pool.ticks = ticks.to_vec();
@@ -408,7 +416,8 @@ pub fn estimate(
             let immutable = reader.bytes()?;
             let body = reader.bytes()?;
             reader.finish()?;
-            join_detail(&immutable, &body, &[])?.quote(token_in, token_out, amount_in)
+            join_detail(&immutable, &body, &[], curve.kind, curve.id)?
+                .quote(token_in, token_out, amount_in)
         }
         2 => {
             let mut reader = Reader::new(&payload[1..]);
@@ -417,7 +426,9 @@ pub fn estimate(
             let zero_for_one = reader.ladder()?;
             let one_for_zero = reader.ladder()?;
             reader.finish()?;
-            let PoolDetail::Concentrated(pool) = join_detail(&immutable, &body, &[])? else {
+            let PoolDetail::Concentrated(pool) =
+                join_detail(&immutable, &body, &[], curve.kind, curve.id)?
+            else {
                 return Err("ladder pool".into());
             };
             quote_ladder(
@@ -1211,8 +1222,9 @@ async fn drive_details<S: EntityStore>(
             follow.push(job);
             if next == STAGE_CURVE && !canonical {
                 if let Ok(curve) = derive_curve(&detail, stored.generation) {
-                    store.put_curve(&curve).await?;
-                    follow.pop();
+                    if store.put_curve(&curve).await.is_ok() {
+                        follow.pop();
+                    }
                 }
             }
         }
@@ -1251,7 +1263,7 @@ async fn drive_ticks<S: EntityStore>(
             done.push((job.stage, job.kind, job.id));
             continue;
         }
-        let detail = match join_detail(&immutable, &mutable.body, &[]) {
+        let detail = match join_detail(&immutable, &mutable.body, &[], job.kind, job.id) {
             Ok(detail) => detail,
             Err(err) => {
                 keep_or_drop(job, err, give_up_after, &mut done, &mut failed, notes);
@@ -1394,19 +1406,30 @@ async fn drive_curves<S: EntityStore>(
             done.push((job.stage, job.kind, job.id));
             continue;
         }
-        let detail = match join_detail(&immutable, &mutable.body, &state.ticks) {
+        let detail = match join_detail(&immutable, &mutable.body, &state.ticks, job.kind, job.id) {
             Ok(detail) => detail,
             Err(err) => {
                 keep_or_drop(job, err, give_up_after, &mut done, &mut failed, notes);
                 continue;
             }
         };
-        match derive_curve(&detail, mutable.generation) {
-            Ok(curve) => store.put_curve(&curve).await?,
+        let curve = match derive_curve(&detail, mutable.generation) {
+            Ok(curve) => curve,
             Err(err) => {
                 keep_or_drop(job, err, give_up_after, &mut done, &mut failed, notes);
                 continue;
             }
+        };
+        if let Err(err) = store.put_curve(&curve).await {
+            keep_or_drop(
+                job,
+                err.to_string(),
+                give_up_after,
+                &mut done,
+                &mut failed,
+                notes,
+            );
+            continue;
         }
         done.push((job.stage, job.kind, job.id));
     }
@@ -2952,6 +2975,57 @@ mod tests {
         assert_eq!(catalog.claim_work(STAGE_CURVE, 4, 1, 10).unwrap().len(), 0);
         assert!(catalog.reconcile(1).unwrap() >= 1);
         assert_eq!(catalog.claim_work(STAGE_CURVE, 4, 1, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_stored_product_curve_uses_the_row_kind() {
+        let (_dir, catalog) = open();
+        let sample = row(3);
+        let mut pancake = product();
+        let PoolDetail::ConstantProduct(pool) = &mut pancake else {
+            panic!("product");
+        };
+        pool.kind = crate::catalog::PANCAKE_V2;
+        pool.id = sample.id;
+        pool.fee_pips = None;
+        let (immutable, mut mutable) = split_detail(&pancake).unwrap();
+        assert!(!immutable
+            .windows(32)
+            .any(|word| word == sample.id.as_slice()));
+        catalog
+            .put_immutable(&[ImmutableRow {
+                kind: crate::catalog::PANCAKE_V2,
+                id: sample.id,
+                body: immutable.clone(),
+            }])
+            .unwrap();
+        mutable.kind = crate::catalog::PANCAKE_V2;
+        mutable.id = sample.id;
+        mutable.block = 8;
+        let stored = catalog.put_mutable(&mutable).unwrap();
+        let joined = join_detail(&immutable, &mutable.body, &[], mutable.kind, mutable.id).unwrap();
+        let PoolDetail::ConstantProduct(read) = &joined else {
+            panic!("joined");
+        };
+        assert_eq!(read.kind, crate::catalog::PANCAKE_V2);
+        assert_eq!(read.id, sample.id);
+        let curve = derive_curve(&joined, stored.generation).unwrap();
+        assert_eq!(curve.kind, crate::catalog::PANCAKE_V2);
+        assert_eq!(curve.id, sample.id);
+        catalog.put_curve(&curve).unwrap();
+        let amount = U256::from(10_000_000u64);
+        let token_in = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let token_out = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        let quoted = estimate(&curve, stored.generation, token_in, token_out, amount).unwrap();
+        let direct = joined.quote(token_in, token_out, amount).unwrap();
+        assert_eq!(quoted, direct);
+        let mut unstamped = pancake;
+        let PoolDetail::ConstantProduct(pool) = &mut unstamped else {
+            panic!("product");
+        };
+        pool.kind = 0;
+        let wrong = unstamped.quote(token_in, token_out, amount).unwrap();
+        assert_ne!(quoted.amount_out, wrong.amount_out);
     }
 
     #[test]
