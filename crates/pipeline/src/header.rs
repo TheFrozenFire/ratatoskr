@@ -46,7 +46,8 @@ where
 
     async fn run(self, sink: &mut dyn Sink, mut stop: watch::Receiver<bool>) -> eyre::Result<()> {
         let mut next = self.store.header_cursor().await?;
-        info!(next, "header chain open");
+        // Target `headers` matches the binary filter when `RUST_LOG` is unset.
+        info!(target: "headers", next, "header chain open");
         loop {
             if *stop.borrow() {
                 return Ok(());
@@ -56,7 +57,7 @@ where
                 Err(_) => None,
             };
             let Some(head) = head else {
-                warn!("waiting for a peer head");
+                warn!(target: "headers", "waiting for a peer head");
                 if wait_or_stop(&mut stop, 2).await {
                     return Ok(());
                 }
@@ -64,7 +65,7 @@ where
             };
             let tip = head.saturating_sub(TIP_LAG);
             if next > tip {
-                info!(next, head, "caught up");
+                info!(target: "headers", next, head, "caught up");
                 if wait_or_stop(&mut stop, 15).await {
                     return Ok(());
                 }
@@ -130,6 +131,7 @@ where
                                 };
                                 let secs = started.elapsed().as_secs_f32().max(0.001);
                                 info!(
+                                    target: "headers",
                                     from,
                                     to,
                                     blocks,
@@ -144,7 +146,7 @@ where
                                 }
                             }
                             SinkReply::Rejected { reason } => {
-                                warn!(next, err = %reason, "header batch rejected");
+                                warn!(target: "headers", next, err = %reason, "header batch rejected");
                                 if wait_or_stop(&mut stop, 2).await {
                                     return Ok(());
                                 }
@@ -153,7 +155,7 @@ where
                         }
                     }
                     Err(err) => {
-                        warn!(next, %err, "header batch failed");
+                        warn!(target: "headers", next, %err, "header batch failed");
                         let pause = if is_wait(&err) { 2 } else { 5 };
                         if wait_or_stop(&mut stop, pause).await {
                             return Ok(());

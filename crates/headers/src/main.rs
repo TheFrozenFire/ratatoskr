@@ -1,7 +1,9 @@
 //! Sync mainnet headers from `ratatoskr-peer` into `headers.redb`.
 //!
-//! Peers only serve headers by block range. [`pipeline::HeaderSource`] stores
-//! the batch and checks the links. This process opens only the header file.
+//! Peers only serve headers by block range. [`pipeline::HeaderSource`] fetches
+//! batches and submits them. The sink appends through [`chain::HeaderChain`],
+//! which checks genesis and parents. This process does not check parents itself
+//! and opens only the header file.
 
 use clap::Parser;
 use eyre::WrapErr;
