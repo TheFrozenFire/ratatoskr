@@ -10,6 +10,7 @@
 
 mod catalog;
 mod decode;
+mod detail;
 mod entity;
 mod history;
 mod import;
@@ -17,11 +18,13 @@ mod lens;
 mod lists;
 mod logs;
 mod rpc;
+mod tick;
 
 pub use catalog::{
     decode_body, decode_row, encode_body, encode_row, kind_name, Catalog, Put, ReceiptBody,
     VenueRow, PANCAKE_V3, SUSHI_V3, UNI_V3, V3_FORK,
 };
+pub use detail::{load_details, DetailQuery, PoolDetail, Quote};
 pub use entity::EntityStore;
 pub use history::BloomScan;
 pub use logs::Walk;

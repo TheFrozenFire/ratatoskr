@@ -7,7 +7,11 @@ use alloy_primitives::{Address, U256};
 use eyre::{eyre, WrapErr};
 use serde_json::{json, Value};
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::time::Duration;
+
+/// Suggested cap from the `eth_getStorageValues` execution-api draft.
+const STORAGE_CHUNK: usize = 1024;
 
 pub fn default_call_rpcs() -> Vec<String> {
     vec![
@@ -54,6 +58,8 @@ pub struct Rpc {
     urls: Vec<String>,
     next: Cell<usize>,
     id: Cell<u64>,
+    /// Cleared after a provider rejects `eth_getStorageValues`. Later reads skip the method.
+    prefer_storage_values: Cell<bool>,
 }
 
 impl Rpc {
@@ -73,7 +79,76 @@ impl Rpc {
             urls,
             next: Cell::new(0),
             id: Cell::new(1),
+            prefer_storage_values: Cell::new(true),
         })
+    }
+
+    /// Slot values in request order, via `eth_getStorageValues`.
+    ///
+    /// A provider that does not implement the method returns [`StorageError::Unsupported`].
+    /// Callers then read those words with the tick lens. `eth_getStorageAt` is not a fallback:
+    /// each call is one word, one compute unit, and a separate state lookup.
+    pub fn storage_words(&self, reads: &[(Address, U256)]) -> Result<Vec<U256>, StorageError> {
+        if reads.is_empty() {
+            return Ok(Vec::new());
+        }
+        if !self.prefer_storage_values.get() {
+            return Err(StorageError::Unsupported);
+        }
+        let mut out = Vec::with_capacity(reads.len());
+        for chunk in reads.chunks(STORAGE_CHUNK) {
+            match self.storage_values_call(chunk) {
+                Ok(words) => out.extend(words),
+                Err(StorageError::Unsupported) => {
+                    self.prefer_storage_values.set(false);
+                    return Err(StorageError::Unsupported);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(out)
+    }
+
+    fn storage_values_call(&self, chunk: &[(Address, U256)]) -> Result<Vec<U256>, StorageError> {
+        let mut grouped: BTreeMap<Address, Vec<U256>> = BTreeMap::new();
+        for (account, slot) in chunk {
+            grouped.entry(*account).or_default().push(*slot);
+        }
+        let mut map = serde_json::Map::new();
+        for (account, slots) in &grouped {
+            let hexes = slots
+                .iter()
+                .map(|slot| format!("{slot:#x}"))
+                .collect::<Vec<_>>();
+            map.insert(account.to_string(), json!(hexes));
+        }
+        let response = self
+            .exchange("eth_getStorageValues", json!([map, "latest"]))
+            .map_err(StorageError::Failed)?;
+        if values_unsupported(&response) {
+            return Err(StorageError::Unsupported);
+        }
+        let Some(result) = response.result.as_ref() else {
+            return Err(StorageError::Failed(eyre!(
+                "eth_getStorageValues: {}",
+                response.error_message
+            )));
+        };
+        let parsed = values_by_address(result).map_err(StorageError::Failed)?;
+        let mut out = Vec::with_capacity(chunk.len());
+        let mut cursors: BTreeMap<Address, usize> = BTreeMap::new();
+        for (account, _) in chunk {
+            let words = parsed.get(account).ok_or_else(|| {
+                StorageError::Failed(eyre!("eth_getStorageValues omitted {account}"))
+            })?;
+            let cursor = cursors.entry(*account).or_insert(0);
+            let word = words.get(*cursor).copied().ok_or_else(|| {
+                StorageError::Failed(eyre!("eth_getStorageValues short for {account}"))
+            })?;
+            *cursor += 1;
+            out.push(word);
+        }
+        Ok(out)
     }
 
     /// `to` is omitted for a creation-code lens.
@@ -140,6 +215,50 @@ impl Rpc {
         let text = response.text().wrap_err_with(|| format!("read {url}"))?;
         parse_response(status, &text).wrap_err_with(|| format!("{url} http {status}"))
     }
+}
+
+#[derive(Debug)]
+pub enum StorageError {
+    Unsupported,
+    Failed(eyre::Report),
+}
+
+fn values_unsupported(response: &RpcResponse) -> bool {
+    let message = response.error_message.to_lowercase();
+    message.contains("unsupported method")
+        || message.contains("method not found")
+        || message.contains("method does not exist")
+        || response.error_code == Some(-32601)
+}
+
+fn values_by_address(result: &Value) -> eyre::Result<BTreeMap<Address, Vec<U256>>> {
+    let Value::Object(map) = result else {
+        return Err(eyre!("storage values result"));
+    };
+    let mut out = BTreeMap::new();
+    for (key, value) in map {
+        let account: Address = key.parse().map_err(|_| eyre!("storage address {key}"))?;
+        let Value::Array(words) = value else {
+            return Err(eyre!("storage values for {account}"));
+        };
+        let mut parsed = Vec::with_capacity(words.len());
+        for word in words {
+            let Value::String(text) = word else {
+                return Err(eyre!("storage word"));
+            };
+            parsed.push(word_u256(text)?);
+        }
+        out.insert(account, parsed);
+    }
+    Ok(out)
+}
+
+fn word_u256(text: &str) -> eyre::Result<U256> {
+    let bytes = unhex(text)?;
+    if bytes.len() != 32 {
+        return Err(eyre!("storage word width {}", bytes.len()));
+    }
+    Ok(U256::from_be_slice(&bytes))
 }
 
 fn call_bytes(response: RpcResponse) -> eyre::Result<CallBytes> {
@@ -220,6 +339,28 @@ pub fn unhex(text: &str) -> eyre::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn storage_values_keep_slot_order_per_address() {
+        let text = r#"{"0x00000000000000000000000000000000000000aa":["0x0000000000000000000000000000000000000000000000000000000000000001","0x0000000000000000000000000000000000000000000000000000000000000002"],"0x00000000000000000000000000000000000000bb":["0x0000000000000000000000000000000000000000000000000000000000000003"]}"#;
+        let parsed = values_by_address(&serde_json::from_str(text).unwrap()).unwrap();
+        let aa: Address = "0x00000000000000000000000000000000000000aa"
+            .parse()
+            .unwrap();
+        assert_eq!(parsed[&aa][1], U256::from(2));
+    }
+
+    #[test]
+    fn alchemy_rejects_storage_values_as_unsupported() {
+        let response = RpcResponse {
+            http_status: 200,
+            result: None,
+            error_code: Some(-32600),
+            error_message: "Unsupported method: eth_getStorageValues on ETH_MAINNET".into(),
+            error_data: None,
+        };
+        assert!(values_unsupported(&response));
+    }
 
     #[test]
     fn error_data_object_is_the_revert_payload() {
