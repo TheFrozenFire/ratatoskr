@@ -1,0 +1,17 @@
+[package]
+name = "pipeline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+eyre.workspace = true
+model.workspace = true
+store.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+venues.workspace = true
+
+[dev-dependencies]
+alloy-primitives.workspace = true
