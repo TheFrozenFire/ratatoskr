@@ -860,6 +860,20 @@ impl Catalog {
         Ok(())
     }
 
+    /// Remove one quote row. The snapshot and the curve stay.
+    pub fn delete_quote(&self, kind: u8, id: B256) -> eyre::Result<bool> {
+        let mut write = self.entities.begin_write()?;
+        write.set_durability(Durability::Immediate);
+        let removed = {
+            let mut quotes = write.open_table(QUOTES)?;
+            let key = entity_key(kind, &id);
+            let removed = quotes.remove(key.as_slice())?.is_some();
+            removed
+        };
+        write.commit()?;
+        Ok(removed)
+    }
+
     pub fn read_state(&self, kind: u8, id: B256) -> eyre::Result<PoolState> {
         let venue = self.read_venue(kind, id)?;
         let read = self.entities.begin_read()?;

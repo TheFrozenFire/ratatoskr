@@ -55,6 +55,9 @@ struct Args {
     /// Load chain quote samples from a JSONL extract into `--data-dir` and exit.
     #[arg(long)]
     import_fit: Option<PathBuf>,
+    /// Delete quote rows that stopped on a transport or decode failure, then exit.
+    #[arg(long)]
+    drop_partial_quotes: bool,
     /// JSON-RPC URL for venue lists. Repeat to rotate.
     #[arg(long)]
     rpc: Vec<String>,
@@ -125,10 +128,24 @@ async fn supervise(args: Args) -> eyre::Result<()> {
     if args.import_fit.is_some() && args.data_dir.is_none() {
         return Err(eyre::eyre!("--import-fit needs --data-dir"));
     }
+    if args.drop_partial_quotes && args.data_dir.is_none() {
+        return Err(eyre::eyre!("--drop-partial-quotes needs --data-dir"));
+    }
     if let Some(dir) = &args.data_dir {
         refuse_live(dir)?;
     }
     let paths = paths_from(args.data_dir.as_deref())?;
+    if args.drop_partial_quotes {
+        let venues_path = paths.venues.clone();
+        let dropped = tokio::task::spawn_blocking(move || {
+            let catalog = venues::Catalog::open(&venues_path)?;
+            venues::drop_partial_quotes(&catalog)
+        })
+        .await
+        .wrap_err("drop partial quotes")??;
+        println!("dropped {dropped}");
+        return Ok(());
+    }
     if let Some(path) = args.import_fit.clone() {
         let venues_path = paths.venues.clone();
         let report = tokio::task::spawn_blocking(move || {

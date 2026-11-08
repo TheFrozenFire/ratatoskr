@@ -276,6 +276,38 @@ pub fn export_curve_fit(catalog: &Catalog, out: &Path) -> eyre::Result<FitReport
 
 /// Store quote rows from a JSONL extract. Lines already match a stored row
 /// are counted in `resumed` and left in place. A partial last line is skipped.
+/// Drop quote rows whose samples stopped on a transport or decode failure.
+///
+/// A protocol revert, a missing quoter, and an amount the quoter cannot
+/// accept are finished reads and stay. The curve and the snapshot stay.
+pub fn drop_partial_quotes(catalog: &Catalog) -> eyre::Result<u64> {
+    let mut dropped = 0_u64;
+    for kind in 1..=METRIC {
+        let mut after = None;
+        loop {
+            let page = catalog.page_venues(kind, after, PAGE)?;
+            if page.is_empty() {
+                break;
+            }
+            let full = page.len() == PAGE;
+            after = page.last().map(|row| row.id);
+            for row in &page {
+                let state = catalog.read_state(row.kind, row.id)?;
+                let Some(quote) = state.quotes else {
+                    continue;
+                };
+                if payload_is_partial(&quote.payload) && catalog.delete_quote(row.kind, row.id)? {
+                    dropped += 1;
+                }
+            }
+            if !full {
+                break;
+            }
+        }
+    }
+    Ok(dropped)
+}
+
 pub fn import_curve_fit(catalog: &Catalog, path: &Path) -> eyre::Result<FitReport> {
     let text = std::fs::read_to_string(path)?;
     let mut report = FitReport::default();
@@ -1455,6 +1487,34 @@ fn clip(text: &str) -> String {
     text.chars().take(160).collect()
 }
 
+fn payload_is_partial(payload: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<Value>(payload) else {
+        return true;
+    };
+    let Some(directions) = value.get("directions").and_then(Value::as_array) else {
+        return true;
+    };
+    directions.iter().any(|dir| {
+        dir.get("samples")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(|sample| {
+                sample
+                    .get("chain_error")
+                    .and_then(Value::as_str)
+                    .is_some_and(retryable_quote_error)
+            })
+    })
+}
+
+fn retryable_quote_error(error: &str) -> bool {
+    matches!(
+        error,
+        "Unexpected error" | "rpc error" | "aggregate decode" | "quote failed"
+    ) || error.starts_with("bisection lost")
+}
+
 fn payload_of(plan: &PoolPlan) -> Vec<u8> {
     let body = json!({
         "pairs_capped": plan.pairs_capped,
@@ -2022,6 +2082,15 @@ mod tests {
 
     fn hex_of(bytes: &[u8]) -> String {
         hex_prefix(bytes)
+    }
+
+    #[test]
+    fn a_transport_error_makes_the_quote_row_partial() {
+        let partial = br#"{"directions":[{"samples":[{"chain_error":"Unexpected error"}]}]}"#;
+        let finished = br#"{"directions":[{"samples":[{"chain_error":"TF"},{"chain_out":"1"}]}]}"#;
+        assert!(payload_is_partial(partial));
+        assert!(!payload_is_partial(finished));
+        assert!(payload_is_partial(b"not json"));
     }
 
     #[test]
