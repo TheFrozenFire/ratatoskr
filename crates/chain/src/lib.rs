@@ -98,6 +98,49 @@ impl HeaderChain {
     pub fn default_path() -> PathBuf {
         data_dir().join("headers.redb")
     }
+
+    /// Open a chain another process may be appending to. Callers only read.
+    pub fn open(path: &Path) -> eyre::Result<Self> {
+        let db = Database::open(path).wrap_err("open header chain")?;
+        Ok(Self { db })
+    }
+
+    /// Visit headers in `[from, to)` as one snapshot.
+    ///
+    /// `to` is the cursor: the first block not stored. The callback sees every
+    /// stored header in order. A hole is an error, because a missing bloom
+    /// must not be treated as a miss.
+    pub fn visit<F>(&self, from: u64, to: u64, mut visit: F) -> eyre::Result<u64>
+    where
+        F: FnMut(&HeaderRecord) -> eyre::Result<()>,
+    {
+        if from > to {
+            return Err(eyre::eyre!("header range {from}..{to} is backwards"));
+        }
+        let read = self.db.begin_read()?;
+        let table = read.open_table(HEADERS)?;
+        let mut seen = 0_u64;
+        for item in table.range(from..to)? {
+            let (number, value) = item?;
+            let number = number.value();
+            let record = decode_header_record(value.value()).map_err(|err| eyre::eyre!(err))?;
+            if record.number != number {
+                return Err(eyre::eyre!(
+                    "header key {number} stores block {}",
+                    record.number
+                ));
+            }
+            visit(&record)?;
+            seen += 1;
+        }
+        let span = to - from;
+        if seen != span {
+            return Err(eyre::eyre!(
+                "header chain has {seen} rows for {span} blocks starting at {from}"
+            ));
+        }
+        Ok(seen)
+    }
 }
 
 fn meta_get(db: &Database, key: &str) -> eyre::Result<Option<u64>> {
@@ -149,7 +192,11 @@ mod tests {
     fn block_zero_must_be_mainnet_genesis() {
         let (chain, path) = temp_chain();
         let err = chain
-            .append(&[record(0, B256::repeat_byte(1), B256::ZERO)], 0, B256::ZERO)
+            .append(
+                &[record(0, B256::repeat_byte(1), B256::ZERO)],
+                0,
+                B256::ZERO,
+            )
             .unwrap_err();
         assert!(err.to_string().contains("mainnet genesis"));
         let genesis = record(0, MAINNET_GENESIS_HASH, B256::ZERO);
@@ -157,6 +204,14 @@ mod tests {
         assert_eq!(stored.hash, MAINNET_GENESIS_HASH);
         assert_eq!(chain.cursor().unwrap(), 1);
         assert_eq!(chain.parent_hash(1).unwrap(), MAINNET_GENESIS_HASH);
+        let mut seen = Vec::new();
+        chain
+            .visit(0, 1, |header| {
+                seen.push(header.number);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(seen, vec![0]);
         drop(chain);
         let _ = std::fs::remove_file(&path);
     }
@@ -176,7 +231,11 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("parent does not match"));
         chain
-            .append(&[record(1, child, MAINNET_GENESIS_HASH)], 1, MAINNET_GENESIS_HASH)
+            .append(
+                &[record(1, child, MAINNET_GENESIS_HASH)],
+                1,
+                MAINNET_GENESIS_HASH,
+            )
             .unwrap();
         assert_eq!(chain.cursor().unwrap(), 2);
         drop(chain);

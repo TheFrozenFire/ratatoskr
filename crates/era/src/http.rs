@@ -84,7 +84,10 @@ impl EraHttp {
             .redirect(reqwest::redirect::Policy::limited(3))
             .build()
             .wrap_err("build http client")?;
-        Ok(Self { client, stats: Arc::new(Stats::default()) })
+        Ok(Self {
+            client,
+            stats: Arc::new(Stats::default()),
+        })
     }
 
     pub fn transfer(&self) -> Transfer {
@@ -134,7 +137,9 @@ impl EraHttp {
             .ok_or_else(|| eyre!("mirror did not return the era1 object length"))?;
         let bytes = response.bytes().await.wrap_err("length probe body")?;
         self.stats.requests.fetch_add(1, Ordering::Relaxed);
-        self.stats.catalog.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+        self.stats
+            .catalog
+            .fetch_add(bytes.len() as u64, Ordering::Relaxed);
         Ok(total)
     }
 
@@ -152,7 +157,10 @@ impl EraHttp {
         let bytes = self.request(url, Some((start, end)), bucket).await?;
         let want = end - start + 1;
         if bytes.len() as u64 != want {
-            return Err(eyre!("range {start}-{end} returned {} bytes, wanted {want}", bytes.len()));
+            return Err(eyre!(
+                "range {start}-{end} returned {} bytes, wanted {want}",
+                bytes.len()
+            ));
         }
         Ok(bytes)
     }
@@ -197,7 +205,10 @@ impl EraHttp {
         }
         if range.is_none() && !status.is_success() {
             let retry = status.as_u16() == 429 || status.is_server_error();
-            return Err(Attempt { retry, report: eyre!("GET returned HTTP {status}") });
+            return Err(Attempt {
+                retry,
+                report: eyre!("GET returned HTTP {status}"),
+            });
         }
         if let Some(length) = response.content_length() {
             if let Some((start, end)) = range {
@@ -231,7 +242,11 @@ impl EraHttp {
         };
         let mut current = self.stats.version.load(Ordering::Relaxed);
         loop {
-            let next = if current == 0 { code } else { current.min(code) };
+            let next = if current == 0 {
+                code
+            } else {
+                current.min(code)
+            };
             match self.stats.version.compare_exchange_weak(
                 current,
                 next,
@@ -251,10 +266,16 @@ struct Attempt {
 }
 
 fn fatal(report: eyre::Report) -> Attempt {
-    Attempt { retry: false, report }
+    Attempt {
+        retry: false,
+        report,
+    }
 }
 
 fn retriable_reqwest(err: reqwest::Error) -> Attempt {
     let retry = err.is_timeout() || err.is_connect() || err.is_request();
-    Attempt { retry, report: eyre::Report::from(err) }
+    Attempt {
+        retry,
+        report: eyre::Report::from(err),
+    }
 }

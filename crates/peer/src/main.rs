@@ -9,12 +9,12 @@
 use directory as catalog;
 
 use clap::Parser;
-use eyre::WrapErr;
 use discover::classify;
 use eth_p2p::{
     dns_candidates, encode_block_records, fetch_block_logs, fetch_block_range, fetch_header_range,
-    OutboundSession,
+    Egress, OutboundSession,
 };
+use eyre::WrapErr;
 use model::{encode_header_records, DiscoveryHit, ETHEREUM_MAINNET};
 use reth_network_peers::{pk2id, NodeRecord, PeerId};
 use secp256k1::{SecretKey, SECP256K1};
@@ -23,7 +23,7 @@ use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    net::IpAddr,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::{
@@ -70,6 +70,12 @@ struct Args {
     /// How many outbound sessions to keep.
     #[arg(long, default_value_t = TARGET_PEERS)]
     peers: usize,
+    /// Bind IPv4 RLPx to this address. Policy routing sends that source into the tunnel.
+    #[arg(long)]
+    bind4: Option<Ipv4Addr>,
+    /// Bind IPv6 RLPx to this address.
+    #[arg(long)]
+    bind6: Option<Ipv6Addr>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -145,7 +151,18 @@ async fn main() -> eyre::Result<()> {
 
     let key = load_node_key()?;
     let id = pk2id(&key.public_key(SECP256K1));
-    info!(%id, peers = args.peers, socket = %socket.display(), "peer process starting");
+    let egress = match (args.bind4, args.bind6) {
+        (Some(v4), Some(v6)) => Some(Egress { v4, v6 }),
+        (None, None) => None,
+        _ => return Err(eyre::eyre!("pass both --bind4 and --bind6, or neither")),
+    };
+    info!(
+        %id,
+        peers = args.peers,
+        socket = %socket.display(),
+        ?egress,
+        "peer process starting"
+    );
 
     if socket.exists() {
         fs::remove_file(&socket).wrap_err("remove stale socket")?;
@@ -161,6 +178,7 @@ async fn main() -> eyre::Result<()> {
         args.peers,
         Arc::clone(&slots),
         Arc::clone(&wanted),
+        egress,
     ));
 
     loop {
@@ -293,6 +311,7 @@ async fn maintain(
     target: usize,
     slots: Arc<Mutex<Vec<Slot>>>,
     wanted: Arc<AtomicU64>,
+    egress: Option<Egress>,
 ) {
     let mut held: HashSet<IpAddr> = HashSet::new();
     let mut cooldown: HashMap<IpAddr, Instant> = HashMap::new();
@@ -409,12 +428,15 @@ async fn maintain(
             let key = key;
             dials.spawn(async move {
                 let dialed = peer;
-                let result =
-                    match timeout(DIAL_BUDGET, OutboundSession::connect_with_key(peer, &key)).await
-                    {
-                        Ok(inner) => inner,
-                        Err(_) => Err(eyre::eyre!("dial budget elapsed")),
-                    };
+                let result = match timeout(
+                    DIAL_BUDGET,
+                    OutboundSession::connect_via(peer, &key, egress),
+                )
+                .await
+                {
+                    Ok(inner) => inner,
+                    Err(_) => Err(eyre::eyre!("dial budget elapsed")),
+                };
                 (dialed, result)
             });
         }

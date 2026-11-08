@@ -10,7 +10,7 @@ mod logs;
 pub use logs::{decode_receipt_bundle, encode_receipt_bundle, flatten_logs, logs_in_block};
 
 use eyre::WrapErr;
-use model::{encode_block_record, BlockRecord};
+use model::{decode_block_record, encode_block_record, BlockRecord};
 use redb::{Database, Durability, ReadableTable, TableDefinition};
 use std::path::{Path, PathBuf};
 
@@ -95,8 +95,70 @@ impl Corpus {
         Ok(())
     }
 
+    /// One stored block. A missing row and an empty hole are both `None`.
+    pub fn read_block(&self, number: u64) -> eyre::Result<Option<BlockRecord>> {
+        let read = self.db.begin_read()?;
+        let table = match read.open_table(BLOCKS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(err) => return Err(err.into()),
+        };
+        let Some(value) = table.get(number)? else {
+            return Ok(None);
+        };
+        let bytes = value.value();
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        let (record, consumed) =
+            decode_block_record(bytes).map_err(|err| eyre::eyre!("block {number}: {err}"))?;
+        if consumed != bytes.len() {
+            return Err(eyre::eyre!("block {number} has trailing bytes"));
+        }
+        if record.receipts_zstd.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(record))
+    }
+
+    /// Insert receipt blocks without moving an ingest cursor.
+    ///
+    /// Empty `receipts_zstd` is skipped. A hole at the same number is replaced.
+    pub fn put_blocks(&self, records: &[BlockRecord]) -> eyre::Result<u64> {
+        if records.is_empty() {
+            return Ok(0);
+        }
+        let mut txn = self.db.begin_write()?;
+        txn.set_durability(Durability::Immediate);
+        let delta = {
+            let mut blocks = txn.open_table(BLOCKS)?;
+            let mut meta = txn.open_table(META)?;
+            let mut delta: i64 = 0;
+            for record in records {
+                if record.receipts_zstd.is_empty() {
+                    continue;
+                }
+                let bytes = encode_block_record(record);
+                let previous = blocks.insert(record.number, bytes.as_slice())?;
+                if let Some(previous) = previous {
+                    delta -= previous.value().len() as i64;
+                }
+                delta += bytes.len() as i64;
+            }
+            let stored = meta.get("bytes")?.map(|value| value.value()).unwrap_or(0);
+            let stored = (stored as i64 + delta).max(0) as u64;
+            meta.insert("bytes", stored)?;
+            delta
+        };
+        txn.commit()?;
+        Ok(delta.max(0) as u64)
+    }
+
     /// Visit every stored block in number order, including holes.
-    pub fn for_each_block(&self, mut visit: impl FnMut(u64, &[u8]) -> eyre::Result<()>) -> eyre::Result<()> {
+    pub fn for_each_block(
+        &self,
+        mut visit: impl FnMut(u64, &[u8]) -> eyre::Result<()>,
+    ) -> eyre::Result<()> {
         let read = self.db.begin_read()?;
         let table = read.open_table(BLOCKS)?;
         for row in table.iter()? {
@@ -169,6 +231,15 @@ mod tests {
             })
             .unwrap();
         assert_eq!(seen, vec![(7, added as usize), (8, 0)]);
+        assert!(corpus.read_block(8).unwrap().is_none());
+        assert_eq!(corpus.read_block(7).unwrap().unwrap().number, 7);
+        let cursor = corpus.meta("cursor-test").unwrap();
+        corpus.put_blocks(&[sample(9)]).unwrap();
+        assert_eq!(corpus.meta("cursor-test").unwrap(), cursor);
+        assert_eq!(corpus.read_block(9).unwrap().unwrap().number, 9);
+        corpus.write_hole(10).unwrap();
+        corpus.put_blocks(&[sample(10)]).unwrap();
+        assert_eq!(corpus.read_block(10).unwrap().unwrap().number, 10);
         drop(corpus);
         let _ = std::fs::remove_file(&path);
     }

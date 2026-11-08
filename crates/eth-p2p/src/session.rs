@@ -18,7 +18,7 @@ use reth_network_peers::{pk2id, NodeRecord};
 use secp256k1::{SecretKey, SECP256K1};
 use std::{
     collections::HashMap,
-    net::SocketAddr,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, OnceLock,
@@ -26,11 +26,48 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    net::TcpStream,
+    net::{TcpSocket, TcpStream},
     sync::{mpsc, oneshot},
     time::timeout,
 };
 use tracing::{info, warn};
+
+/// Source addresses for outbound RLPx. The matching family is bound before connect.
+///
+/// Policy routing then sends that source through the tunnel. Other processes
+/// keep the host's default route.
+#[derive(Debug, Clone, Copy)]
+pub struct Egress {
+    pub v4: Ipv4Addr,
+    pub v6: Ipv6Addr,
+}
+
+async fn dial(addr: SocketAddr, egress: Option<Egress>) -> eyre::Result<TcpStream> {
+    let socket = match addr {
+        SocketAddr::V4(_) => {
+            let socket = TcpSocket::new_v4().wrap_err("tcp v4")?;
+            if let Some(egress) = egress {
+                socket
+                    .bind(SocketAddr::new(IpAddr::V4(egress.v4), 0))
+                    .wrap_err("bind v4 egress")?;
+            }
+            socket
+        }
+        SocketAddr::V6(_) => {
+            let socket = TcpSocket::new_v6().wrap_err("tcp v6")?;
+            if let Some(egress) = egress {
+                socket
+                    .bind(SocketAddr::new(IpAddr::V6(egress.v6), 0))
+                    .wrap_err("bind v6 egress")?;
+            }
+            socket
+        }
+    };
+    timeout(DIAL_TIMEOUT, socket.connect(addr))
+        .await
+        .wrap_err("dial timed out")?
+        .wrap_err("dial failed")
+}
 
 /// Eth versions this spike will speak. Highest shared version wins.
 const OFFERED_ETH: [EthVersion; 5] = [
@@ -117,14 +154,21 @@ impl OutboundSession {
 
     /// Same handshake as [`Self::connect_record`], using a stable node key.
     pub async fn connect_with_key(peer: NodeRecord, secret: &SecretKey) -> eyre::Result<Self> {
+        Self::connect_via(peer, secret, None).await
+    }
+
+    /// [`Self::connect_with_key`] with an explicit source address per family.
+    pub async fn connect_via(
+        peer: NodeRecord,
+        secret: &SecretKey,
+        egress: Option<Egress>,
+    ) -> eyre::Result<Self> {
         if peer.tcp_port == 0 {
             return Err(eyre!("peer advertises no TCP port"));
         }
         let addr = SocketAddr::new(peer.address, peer.tcp_port);
-        let tcp = timeout(DIAL_TIMEOUT, TcpStream::connect(addr))
-            .await
-            .wrap_err("dial timed out")?
-            .wrap_err("dial failed")?;
+        let tcp = dial(addr, egress).await?;
+        let local = tcp.local_addr().ok();
 
         let local_id = pk2id(&secret.public_key(SECP256K1));
         let ecies = ECIESStream::connect(tcp, *secret, peer.id)
@@ -165,6 +209,7 @@ impl OutboundSession {
             peer_fork = ?their_status.forkid,
             latest_block = their_status.latest_block,
             earliest_block = their_status.earliest_block,
+            ?local,
             "outbound session ready"
         );
         let (commands, incoming) = mpsc::channel(16);

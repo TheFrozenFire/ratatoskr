@@ -171,7 +171,10 @@ pub async fn census_mainnet_dns() -> eyre::Result<Vec<DnsPeer>> {
             by_id
                 .entry(record.id)
                 .and_modify(|peer| peer.source |= bit)
-                .or_insert(DnsPeer { record, source: bit });
+                .or_insert(DnsPeer {
+                    record,
+                    source: bit,
+                });
         }
     }
     let mut found: Vec<_> = by_id.into_values().collect();

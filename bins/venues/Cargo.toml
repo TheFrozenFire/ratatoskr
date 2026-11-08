@@ -1,0 +1,18 @@
+[package]
+name = "venues-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ratatoskr-venues"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+eyre.workspace = true
+corpus.workspace = true
+venues.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

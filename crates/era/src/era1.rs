@@ -53,7 +53,9 @@ pub fn parse_index(file_len: u64, tail: &[u8]) -> eyre::Result<BlockIndex> {
     }
     let count = i64::from_le_bytes(tail[tail.len() - 8..].try_into().unwrap());
     if count < 1 || count as usize > MAX_BLOCKS {
-        return Err(eyre!("era1 block count {count} is outside 1..={MAX_BLOCKS}"));
+        return Err(eyre!(
+            "era1 block count {count} is outside 1..={MAX_BLOCKS}"
+        ));
     }
     let count = count as usize;
     let record_len = 24 + count * 8;
@@ -62,7 +64,11 @@ pub fn parse_index(file_len: u64, tail: &[u8]) -> eyre::Result<BlockIndex> {
     }
     let record = &tail[tail.len() - record_len..];
     if record[0..2] != INDEX_TYPE {
-        return Err(eyre!("era1 tail type {:02x}{:02x} is not a block index", record[0], record[1]));
+        return Err(eyre!(
+            "era1 tail type {:02x}{:02x} is not a block index",
+            record[0],
+            record[1]
+        ));
     }
     let length = u32::from_le_bytes(record[2..6].try_into().unwrap());
     if record[6..8] != [0, 0] || length as usize != 16 + count * 8 {
@@ -73,7 +79,9 @@ pub fn parse_index(file_len: u64, tail: &[u8]) -> eyre::Result<BlockIndex> {
     let mut offsets = Vec::with_capacity(count);
     for i in 0..count {
         let start = 8 + i * 8;
-        offsets.push(i64::from_le_bytes(data[start..start + 8].try_into().unwrap()));
+        offsets.push(i64::from_le_bytes(
+            data[start..start + 8].try_into().unwrap(),
+        ));
     }
     let recorded = i64::from_le_bytes(data[data.len() - 8..].try_into().unwrap());
     if recorded != count as i64 {
@@ -90,17 +98,28 @@ pub fn parse_index(file_len: u64, tail: &[u8]) -> eyre::Result<BlockIndex> {
 #[derive(Debug)]
 pub enum HeaderCut<'a> {
     /// Header payload, and the body length from the following tag.
-    Ready { payload: &'a [u8], entry_len: u64, body_len: u64 },
+    Ready {
+        payload: &'a [u8],
+        entry_len: u64,
+        body_len: u64,
+    },
     /// `buf` holds `have` bytes; the header tag plus the body tag need `need`.
     Short { have: u64, need: u64 },
 }
 
 pub fn cut_header(buf: &[u8]) -> eyre::Result<HeaderCut<'_>> {
     if buf.len() < 8 {
-        return Ok(HeaderCut::Short { have: buf.len() as u64, need: 8 });
+        return Ok(HeaderCut::Short {
+            have: buf.len() as u64,
+            need: 8,
+        });
     }
     if buf[0..2] != HEADER_TYPE {
-        return Err(eyre!("expected a compressed header, found {:02x}{:02x}", buf[0], buf[1]));
+        return Err(eyre!(
+            "expected a compressed header, found {:02x}{:02x}",
+            buf[0],
+            buf[1]
+        ));
     }
     if buf[6..8] != [0, 0] {
         return Err(eyre!("compressed header reserved bytes are set"));
@@ -112,7 +131,10 @@ pub fn cut_header(buf: &[u8]) -> eyre::Result<HeaderCut<'_>> {
     let entry_len = 8 + payload_len as u64;
     let need = entry_len + 8;
     if (buf.len() as u64) < need {
-        return Ok(HeaderCut::Short { have: buf.len() as u64, need });
+        return Ok(HeaderCut::Short {
+            have: buf.len() as u64,
+            need,
+        });
     }
     let entry = entry_len as usize;
     if buf[entry..entry + 2] != BODY_TYPE {
@@ -126,11 +148,18 @@ pub fn cut_header(buf: &[u8]) -> eyre::Result<HeaderCut<'_>> {
         return Err(eyre!("body tag reserved bytes are set"));
     }
     let body_len = u32::from_le_bytes(buf[entry + 2..entry + 6].try_into().unwrap()) as u64;
-    Ok(HeaderCut::Ready { payload: &buf[8..entry], entry_len, body_len })
+    Ok(HeaderCut::Ready {
+        payload: &buf[8..entry],
+        entry_len,
+        body_len,
+    })
 }
 
 pub fn receipt_at(header_at: u64, entry_len: u64, body_len: u64) -> Option<u64> {
-    header_at.checked_add(entry_len)?.checked_add(8)?.checked_add(body_len)
+    header_at
+        .checked_add(entry_len)?
+        .checked_add(8)?
+        .checked_add(body_len)
 }
 
 /// Length of the compressed receipt payload. `head` is the 8-byte record tag.
@@ -234,8 +263,8 @@ pub fn fitted_window(entry_lens: &[u64]) -> u64 {
 mod tests {
     use super::*;
     use alloy_consensus::Eip658Value;
-    use alloy_rlp::Encodable;
     use alloy_primitives::{address, b256, Bytes, Log, LogData};
+    use alloy_rlp::Encodable;
     use snap::write::FrameEncoder;
     use std::io::Write;
 
@@ -264,7 +293,10 @@ mod tests {
 
     #[test]
     fn header_window_skips_the_body_using_its_tag() {
-        let header = Header { number: 7, ..Default::default() };
+        let header = Header {
+            number: 7,
+            ..Default::default()
+        };
         let mut rlp = Vec::new();
         header.encode(&mut rlp);
         let payload = frame(&rlp);
@@ -275,7 +307,11 @@ mod tests {
         let entry_len = buf.len() as u64;
         buf.extend_from_slice(&[0x04, 0x00, 0x20, 0, 0, 0, 0, 0]);
         match cut_header(&buf).unwrap() {
-            HeaderCut::Ready { payload: got, entry_len: len, body_len } => {
+            HeaderCut::Ready {
+                payload: got,
+                entry_len: len,
+                body_len,
+            } => {
                 assert_eq!(len, entry_len);
                 assert_eq!(body_len, 0x20);
                 assert_eq!(decode_header(got).unwrap().number, 7);
@@ -283,7 +319,10 @@ mod tests {
             }
             HeaderCut::Short { .. } => panic!("window should hold the header and the body tag"),
         }
-        assert!(matches!(cut_header(&buf[..8]).unwrap(), HeaderCut::Short { .. }));
+        assert!(matches!(
+            cut_header(&buf[..8]).unwrap(),
+            HeaderCut::Short { .. }
+        ));
     }
 
     #[test]
@@ -297,7 +336,9 @@ mod tests {
         Log {
             address: address!("1F98431c8aD98523631AE4a59f267346ea31F984"),
             data: LogData::new_unchecked(
-                vec![b256!("783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118")],
+                vec![b256!(
+                    "783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118"
+                )],
                 Bytes::from(vec![1, 2, 3, 4]),
             ),
         }
@@ -317,7 +358,11 @@ mod tests {
 
     fn list_of(item: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
-        alloy_rlp::Header { list: true, payload_length: item.len() }.encode(&mut out);
+        alloy_rlp::Header {
+            list: true,
+            payload_length: item.len(),
+        }
+        .encode(&mut out);
         out.extend_from_slice(item);
         out
     }
@@ -332,7 +377,10 @@ mod tests {
         let decoded = decode_receipts(&encoded).unwrap();
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].logs()[0].address, log.address);
-        assert_eq!(receipt_root(&decoded), alloy_consensus::proofs::calculate_receipt_root(&decoded));
+        assert_eq!(
+            receipt_root(&decoded),
+            alloy_consensus::proofs::calculate_receipt_root(&decoded)
+        );
 
         let mut typed = vec![0x02];
         receipt.encode(&mut typed);

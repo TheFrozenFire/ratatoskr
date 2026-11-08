@@ -11,4 +11,7 @@ mod http;
 mod scan;
 
 pub use http::EraHttp;
-pub use scan::{enumerate_headers, enumerate_logs, HeaderRow};
+pub use scan::{
+    enumerate_headers, enumerate_logs, logs_for_blocks, logs_from_snappy, receipts_for_blocks,
+    EraBlock, HeaderRow,
+};

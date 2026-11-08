@@ -31,6 +31,12 @@ cargo run -p peer -- --status
 
 `ratatoskr-univ3` reads that corpus and writes pool identities to `~/.local/share/ratatoskr/univ3-pools.redb`. Each row is the pool address, token pair, fee, and tick spacing from `PoolCreated` on the canonical factory. Tick liquidity is not in the row. A later RPC call addresses the pool directly.
 
+`ratatoskr-venues` writes every listed venue to `~/.local/share/ratatoskr/venues.redb`. Factories that expose an index are read with a lens: `eth_call` of the creation code in `contracts/lens/IndexLens.sol`, with no `to`. The constructor reverts the rows, so any mainnet client that runs a creation call can serve it. Factories with no index are found by testing logs blooms in the local header chain. The hit list is kept in `venues.redb`. Receipts for those hits come from era1 range requests before the merge and from `ratatoskr-peer` after it, and the downloaded receipt bytes are kept in redb so a resume does not fetch them again. The local receipt corpus is folded in when it is present.
+
+```
+cargo run -p venues-cli --release
+```
+
 `ratatoskr-headers` asks the peer process for header ranges only and writes `~/.local/share/ratatoskr/headers.redb`. Each row is the block hash, parent hash, receipts root, and logs bloom. The chain has to link back to mainnet genesis. A restart continues from the saved cursor. Receipts are not downloaded.
 
-See [docs/architecture.md](docs/architecture.md) for the two pipelines and the exact spike sequence.
+See [docs/architecture.md](docs/architecture.md) for the two pipelines and the exact spike sequence. See [docs/venues.md](docs/venues.md) for the mainnet venues in use and how each set of pools is listed.

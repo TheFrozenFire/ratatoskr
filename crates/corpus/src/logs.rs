@@ -57,7 +57,11 @@ pub fn logs_in_block(record: &BlockRecord) -> eyre::Result<Vec<NormalizedLog>> {
     Ok(flatten_logs(record.number, record.hash, &receipts))
 }
 
-pub fn flatten_logs(block_number: u64, block_hash: B256, receipts: &[Receipt]) -> Vec<NormalizedLog> {
+pub fn flatten_logs(
+    block_number: u64,
+    block_hash: B256,
+    receipts: &[Receipt],
+) -> Vec<NormalizedLog> {
     let mut logs = Vec::new();
     let mut log_index = 0_u64;
     for (tx_index, receipt) in receipts.iter().enumerate() {
@@ -115,7 +119,8 @@ mod tests {
     #[test]
     fn receipt_bundle_roundtrip() {
         let receipt = one_log();
-        let decoded = decode_receipt_bundle(&encode_receipt_bundle(&[receipt.clone()])).expect("bundle");
+        let decoded =
+            decode_receipt_bundle(&encode_receipt_bundle(&[receipt.clone()])).expect("bundle");
         assert_eq!(decoded, vec![receipt]);
     }
 }

@@ -34,7 +34,11 @@ pub fn parse_catalog(text: &str, network: &str) -> eyre::Result<BTreeMap<u64, Er
         if let Some((epoch, hash)) = file_suffix(tail) {
             let name = format!("{prefix}{epoch:05}-{hash}.era1");
             let size = size_near(&tail[19.min(tail.len())..]);
-            let file = EraFile { epoch, name: name.clone(), size };
+            let file = EraFile {
+                epoch,
+                name: name.clone(),
+                size,
+            };
             if let Some(prev) = files.insert(epoch, file) {
                 if prev.name != name {
                     return Err(eyre!("epoch {epoch} listed as {} and {name}", prev.name));
@@ -62,7 +66,9 @@ fn file_suffix(tail: &str) -> Option<(u64, String)> {
         return None;
     }
     let epoch = std::str::from_utf8(&bytes[..5]).ok()?.parse().ok()?;
-    let hash = std::str::from_utf8(&bytes[6..14]).ok()?.to_ascii_lowercase();
+    let hash = std::str::from_utf8(&bytes[6..14])
+        .ok()?
+        .to_ascii_lowercase();
     Some((epoch, hash))
 }
 
