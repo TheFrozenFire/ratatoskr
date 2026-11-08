@@ -154,6 +154,43 @@ impl Corpus {
         Ok(delta.max(0) as u64)
     }
 
+    /// Copy at most `limit` stored rows with a key greater than `after`.
+    ///
+    /// The read stops when the page is full. Later keys are not visited.
+    pub fn page_blocks(
+        &self,
+        after: Option<u64>,
+        limit: usize,
+    ) -> eyre::Result<Vec<(u64, Vec<u8>)>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let read = self.db.begin_read()?;
+        let table = match read.open_table(BLOCKS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(err) => return Err(err.into()),
+        };
+        let mut page = Vec::with_capacity(limit);
+        let rows = match after {
+            Some(after) => {
+                let Some(start) = after.checked_add(1) else {
+                    return Ok(page);
+                };
+                table.range(start..)?
+            }
+            None => table.range::<u64>(..)?,
+        };
+        for row in rows {
+            if page.len() == limit {
+                break;
+            }
+            let (key, value) = row?;
+            page.push((key.value(), value.value().to_vec()));
+        }
+        Ok(page)
+    }
+
     /// Visit every stored block in number order, including holes.
     pub fn for_each_block(
         &self,

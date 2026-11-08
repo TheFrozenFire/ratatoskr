@@ -187,7 +187,20 @@ impl Catalog {
 
     /// Bloom hits in `[from, to)`.
     pub fn hits_from(&self, job: &str, from: u64, to: u64) -> eyre::Result<Vec<u64>> {
-        if from >= to {
+        self.hits_from_limit(job, from, to, usize::MAX)
+    }
+
+    /// At most `limit` bloom hits in `[from, to)`, in key order.
+    ///
+    /// The range stops once `limit` rows have been read.
+    pub fn hits_from_limit(
+        &self,
+        job: &str,
+        from: u64,
+        to: u64,
+        limit: usize,
+    ) -> eyre::Result<Vec<u64>> {
+        if from >= to || limit == 0 {
             return Ok(Vec::new());
         }
         let read = self.db.begin_read()?;
@@ -200,6 +213,9 @@ impl Catalog {
         let end = hit_key(job, to);
         let mut hits = Vec::new();
         for item in table.range(start.as_slice()..end.as_slice())? {
+            if hits.len() == limit {
+                break;
+            }
             let (key, _) = item?;
             hits.push(block_of_hit_key(job, key.value())?);
         }

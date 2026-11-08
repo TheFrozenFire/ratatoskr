@@ -72,6 +72,27 @@ impl LocalStore {
             catalog: Arc::new(Catalog::open(venues)?),
         })
     }
+
+    pub(crate) async fn page_blocks(
+        &self,
+        after: Option<u64>,
+        limit: usize,
+    ) -> eyre::Result<Vec<(u64, Vec<u8>)>> {
+        let corpus = Arc::clone(&self.corpus);
+        blocking(move || corpus.page_blocks(after, limit)).await
+    }
+
+    pub(crate) async fn hits_page(
+        &self,
+        job: &str,
+        from: u64,
+        to: u64,
+        limit: usize,
+    ) -> eyre::Result<Vec<u64>> {
+        let catalog = Arc::clone(&self.catalog);
+        let job = job.to_string();
+        blocking(move || catalog.hits_from_limit(&job, from, to, limit)).await
+    }
 }
 
 impl EntityStore for LocalStore {
@@ -629,5 +650,22 @@ mod tests {
             seen,
             vec![(4, Vec::new()), (7, encode_block_record(&stored))]
         );
+    }
+
+    #[tokio::test]
+    async fn remote_scan_resumes_after_a_full_page() {
+        let serving = Serving::start().await;
+        let records: Vec<_> = (0..70).map(block).collect();
+        serving.remote.put_blocks(&records).await.unwrap();
+        let mut numbers = Vec::new();
+        serving
+            .remote
+            .for_each_block(&mut |number, _bytes| {
+                numbers.push(number);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(numbers, (0..70).collect::<Vec<_>>());
     }
 }

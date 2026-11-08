@@ -59,10 +59,16 @@ async fn handle(conn: UnixStream, store: Arc<LocalStore>) -> eyre::Result<()> {
         Ok(value) => value,
         Err(err) => return write_value(&mut write, &encode_error(&err.to_string()), &[]).await,
     };
-    let body = match read_body(&mut lines, &value).await {
-        Ok(body) => body,
+    let len = match payload_len(&value) {
+        Ok(len) => len,
         Err(err) => return write_value(&mut write, &encode_error(&err.to_string()), &[]).await,
     };
+    let mut body = vec![0u8; len];
+    if len > 0 {
+        if let Err(err) = lines.read_exact(&mut body).await {
+            return write_value(&mut write, &encode_error(&err.to_string()), &[]).await;
+        }
+    }
     let reply = match decode_request(&value, &body) {
         Ok(op) => dispatch(&store, op).await,
         Err(err) => Err(err),
@@ -74,18 +80,6 @@ async fn handle(conn: UnixStream, store: Arc<LocalStore>) -> eyre::Result<()> {
         }
         Err(err) => write_value(&mut write, &encode_error(&err.to_string()), &[]).await,
     }
-}
-
-async fn read_body(
-    lines: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
-    value: &Value,
-) -> eyre::Result<Vec<u8>> {
-    let len = payload_len(value)?;
-    let mut body = vec![0u8; len];
-    if len > 0 {
-        lines.read_exact(&mut body).await?;
-    }
-    Ok(body)
 }
 
 async fn write_value(
@@ -143,14 +137,9 @@ async fn dispatch(store: &LocalStore, op: Op) -> eyre::Result<Reply> {
             store.commit_chunk(&job, next, &rows, put).await?,
         )),
         Op::HitScan { job } => Ok(Reply::HitScan(store.hit_scan(&job).await?)),
-        Op::HitsFrom { job, from, to } => {
-            let mut hits = store.hits_from(&job, from, to).await?;
-            let cap = READ_CAP as usize;
-            if hits.len() > cap {
-                hits.truncate(cap);
-            }
-            Ok(Reply::Hits(hits))
-        }
+        Op::HitsFrom { job, from, to } => Ok(Reply::Hits(
+            store.hits_page(&job, from, to, READ_CAP as usize).await?,
+        )),
         Op::CommitHits {
             job,
             scanned_to,
@@ -188,21 +177,5 @@ async fn read_headers(store: &LocalStore, from: u64, limit: u64) -> eyre::Result
 
 async fn scan_blocks(store: &LocalStore, after: Option<u64>, limit: u64) -> eyre::Result<Reply> {
     let limit = (limit.min(SCAN_PAGE)) as usize;
-    if limit == 0 {
-        return Ok(Reply::Scan(Vec::new()));
-    }
-    let mut page = Vec::new();
-    store
-        .for_each_block(&mut |number, bytes| {
-            if page.len() >= limit {
-                return Ok(());
-            }
-            if after.is_some_and(|after| number <= after) {
-                return Ok(());
-            }
-            page.push((number, bytes.to_vec()));
-            Ok(())
-        })
-        .await?;
-    Ok(Reply::Scan(page))
+    Ok(Reply::Scan(store.page_blocks(after, limit).await?))
 }
