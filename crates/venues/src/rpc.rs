@@ -220,6 +220,100 @@ impl Rpc {
         u64::from_str_radix(hex, 16).wrap_err("block number")
     }
 
+    /// `eth_getCode` for many accounts, one JSON-RPC batch per hundred.
+    ///
+    /// Curve quoters are the pools themselves, so a page would otherwise spend
+    /// a round trip on each code probe.
+    pub fn codes_at(&self, queries: &[(Address, u64)]) -> eyre::Result<Vec<bool>> {
+        let mut out = Vec::with_capacity(queries.len());
+        for chunk in queries.chunks(100) {
+            out.extend(self.codes_chunk(chunk)?);
+        }
+        Ok(out)
+    }
+
+    fn codes_chunk(&self, queries: &[(Address, u64)]) -> eyre::Result<Vec<bool>> {
+        if queries.is_empty() {
+            return Ok(Vec::new());
+        }
+        let start = self.id.get();
+        let mut body = Vec::with_capacity(queries.len());
+        let mut ids = Vec::with_capacity(queries.len());
+        for (offset, (to, block)) in queries.iter().enumerate() {
+            let id = start + offset as u64;
+            ids.push(id);
+            body.push(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "eth_getCode",
+                "params": [to.to_string(), block_tag(Some(*block))],
+            }));
+        }
+        self.id.set(start + queries.len() as u64);
+        let value = self.send_batch(&Value::Array(body))?;
+        code_flags(&value, &ids)
+    }
+
+    fn send_batch(&self, body: &Value) -> eyre::Result<Value> {
+        let start = self.next.get();
+        let mut last = None;
+        for step in 0..self.urls.len() {
+            let index = (start + step) % self.urls.len();
+            let url = &self.urls[index];
+            for attempt in 0..5 {
+                match self.post_value(url, body) {
+                    Ok((status, _value)) if status == 429 || status == 502 || status == 503 => {
+                        tracing::warn!(
+                            endpoint = %redact_secret(url),
+                            status,
+                            attempt,
+                            "rpc rotate"
+                        );
+                        last = Some(eyre::eyre!("{}: http {status}", redact_secret(url)));
+                        if attempt + 1 < 5 {
+                            std::thread::sleep(Duration::from_millis(500 << attempt));
+                        }
+                    }
+                    Ok((status, value)) => {
+                        self.next.set(index);
+                        if status >= 400 {
+                            return Err(eyre!("{} http {status}", redact_secret(url)));
+                        }
+                        return Ok(value);
+                    }
+                    Err(err) => {
+                        let shown = redact_secret(&format!("{err:#}"));
+                        tracing::warn!(
+                            endpoint = %redact_secret(url),
+                            error = %shown,
+                            attempt,
+                            "rpc transport"
+                        );
+                        last = Some(eyre::eyre!("{shown}"));
+                        if attempt + 1 < 5 {
+                            std::thread::sleep(Duration::from_millis(500 << attempt));
+                        }
+                    }
+                }
+            }
+        }
+        Err(last.unwrap_or_else(|| eyre!("rpc batch failed")))
+    }
+
+    fn post_value(&self, url: &str, body: &Value) -> eyre::Result<(u16, Value)> {
+        let response = self
+            .client
+            .post(url)
+            .json(body)
+            .send()
+            .wrap_err_with(|| format!("post {url}"))?;
+        let status = response.status().as_u16();
+        let text = response.text().wrap_err_with(|| format!("read {url}"))?;
+        let value: Value =
+            serde_json::from_str(&text).wrap_err_with(|| format!("{url} http {status}"))?;
+        Ok((status, value))
+    }
+
     fn exchange(&self, method: &str, params: Value) -> eyre::Result<RpcResponse> {
         let body = self.body(method, params);
         let start = self.next.get();
@@ -337,6 +431,32 @@ fn word_u256(text: &str) -> eyre::Result<U256> {
         return Err(eyre!("storage word width {}", bytes.len()));
     }
     Ok(U256::from_be_slice(&bytes))
+}
+
+fn code_flags(body: &Value, ids: &[u64]) -> eyre::Result<Vec<bool>> {
+    let Value::Array(items) = body else {
+        return Err(eyre!("code batch"));
+    };
+    let mut by_id = BTreeMap::new();
+    for item in items {
+        let id = item
+            .get("id")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| eyre!("code id"))?;
+        let present = match item.get("result").and_then(Value::as_str) {
+            Some(text) => {
+                let hex = text.strip_prefix("0x").unwrap_or(text);
+                !hex.is_empty()
+            }
+            None => return Err(eyre!("code result")),
+        };
+        by_id.insert(id, present);
+    }
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        out.push(*by_id.get(id).ok_or_else(|| eyre!("code missing"))?);
+    }
+    Ok(out)
 }
 
 fn call_bytes(response: RpcResponse) -> eyre::Result<CallBytes> {
@@ -471,6 +591,15 @@ mod tests {
             .await
             .unwrap();
         drop(rpc);
+    }
+
+    #[test]
+    fn code_batch_matches_ids_out_of_order() {
+        let text =
+            r#"[{"jsonrpc":"2.0","id":2,"result":"0x"},{"jsonrpc":"2.0","id":1,"result":"0x60"}]"#;
+        let body: Value = serde_json::from_str(text).unwrap();
+        let flags = code_flags(&body, &[1, 2]).unwrap();
+        assert_eq!(flags, vec![true, false]);
     }
 
     #[test]

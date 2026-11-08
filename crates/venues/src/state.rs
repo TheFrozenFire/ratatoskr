@@ -54,6 +54,8 @@ pub const CLASS_NONE: u8 = 0;
 pub const CLASS_HEAD: u8 = 1;
 pub const CLASS_TICKS: u8 = 2;
 const DETAIL_BATCH: u32 = 16;
+/// Pools quoted in one pass. A wider page fills the parallel multicalls.
+const QUOTE_BATCH: u32 = 64;
 const LEASE_SECS: u64 = 120;
 const RETRY_SECS: u64 = 30;
 
@@ -860,6 +862,36 @@ impl Catalog {
         Ok(())
     }
 
+    /// Store a page of quotes in one commit. A generation mismatch stores none of them.
+    pub fn put_quotes(&self, quotes: &[QuoteRecord]) -> eyre::Result<()> {
+        if quotes.is_empty() {
+            return Ok(());
+        }
+        let mut write = self.entities.begin_write()?;
+        write.set_durability(Durability::Immediate);
+        {
+            let mutable_table = write.open_table(MUTABLE)?;
+            for quote in quotes {
+                let key = entity_key(quote.kind, &quote.id);
+                let Some(stored) = mutable_table.get(key.as_slice())? else {
+                    return Err(eyre::eyre!("quote has no mutable row"));
+                };
+                let view = decode_mutable(stored.value())?;
+                if view.generation != quote.generation || view.block != quote.block {
+                    return Err(eyre::eyre!("quote generation"));
+                }
+            }
+            let mut quote_table = write.open_table(QUOTES)?;
+            for quote in quotes {
+                let key = entity_key(quote.kind, &quote.id);
+                let bytes = encode_quote(quote);
+                quote_table.insert(key.as_slice(), bytes.as_slice())?;
+            }
+        }
+        write.commit()?;
+        Ok(())
+    }
+
     /// Remove one quote row. The snapshot and the curve stay.
     pub fn delete_quote(&self, kind: u8, id: B256) -> eyre::Result<bool> {
         let mut write = self.entities.begin_write()?;
@@ -1196,7 +1228,12 @@ async fn drive_one<S: EntityStore>(
         } else {
             LEASE_SECS
         };
-        let jobs = store.claim_work(stage, DETAIL_BATCH, now, lease).await?;
+        let limit = if stage == STAGE_QUOTE {
+            QUOTE_BATCH
+        } else {
+            DETAIL_BATCH
+        };
+        let jobs = store.claim_work(stage, limit, now, lease).await?;
         if jobs.is_empty() {
             continue;
         }

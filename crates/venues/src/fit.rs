@@ -14,7 +14,9 @@
 //! and tick crosses pile up there.
 //!
 //! Chain amounts come from the protocol quoter via Multicall3 at the mutable
-//! snapshot block. `local` is this crate's quote of the same snapshot and is
+//! snapshot block. One multicall carries 16 quotes, and eight of those calls
+//! are in flight at once. A quoter that reverts the whole batch is split in
+//! half and retried. `local` is this crate's quote of the same snapshot and is
 //! recomputed when the file is written. It is not stored.
 
 use crate::catalog::{
@@ -31,11 +33,19 @@ use crate::EntityStore;
 use crate::Rpc;
 use alloy_primitives::{address, Address, B256, U256};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{self, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
+
+/// Quotes per Multicall3. Sixteen heavy quotes fit in one `eth_call` and return
+/// in about the same time as a single quote.
+const CALLS_PER_BATCH: usize = 16;
+/// Independent multicalls issued together. The provider runs these at once.
+const QUOTE_IN_FLIGHT: usize = 8;
+const CALL_GAS: u64 = 50_000_000;
 
 const MULTICALL3: Address = address!("cA11bde05977b3631167028862bE2a173976CA11");
 const UNI_V2_ROUTER: Address = address!("7a250d5630B4cF539739dF2C5dAcb4c659F2488D");
@@ -85,13 +95,8 @@ enum Family {
     Bal3,
 }
 
-fn batch_of(family: Family) -> (usize, u64) {
-    match family {
-        Family::V2 => (16, 12_000_000),
-        Family::Curve => (8, 20_000_000),
-        Family::V3 | Family::V4 => (2, 50_000_000),
-        Family::Bal2 | Family::Bal3 => (4, 30_000_000),
-    }
+fn batch_of(_family: Family) -> (usize, u64) {
+    (CALLS_PER_BATCH, CALL_GAS)
 }
 
 /// Pools written, plus chain-quote counts. `resumed` were already in the file.
@@ -109,13 +114,27 @@ struct Quoters {
 }
 
 impl Quoters {
-    fn has_code(&mut self, rpc: &Rpc, to: Address, block: u64) -> eyre::Result<bool> {
-        if let Some(present) = self.code.get(&(to, block)).copied() {
-            return Ok(present);
+    /// One JSON-RPC batch for every quoter this page has not already probed.
+    fn warm(&mut self, rpc: &Rpc, keys: &[(Address, u64)]) -> eyre::Result<()> {
+        let mut missing = BTreeSet::new();
+        for key in keys {
+            if !self.code.contains_key(key) {
+                missing.insert(*key);
+            }
         }
-        let present = rpc.code_len(to, Some(block))? > 0;
-        self.code.insert((to, block), present);
-        Ok(present)
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let missing: Vec<(Address, u64)> = missing.into_iter().collect();
+        let present = rpc.codes_at(&missing)?;
+        for (key, present) in missing.into_iter().zip(present) {
+            self.code.insert(key, present);
+        }
+        Ok(())
+    }
+
+    fn has_cached(&self, to: Address, block: u64) -> bool {
+        self.code.get(&(to, block)).copied().unwrap_or(false)
     }
 }
 
@@ -175,6 +194,14 @@ struct Prepared {
     data: Vec<u8>,
     alt: Option<Vec<u8>>,
     alt_method: Option<&'static str>,
+}
+
+struct Staged {
+    pool: usize,
+    dir: usize,
+    sample: usize,
+    block: u64,
+    prepared: Prepared,
 }
 
 enum Prep {
@@ -415,6 +442,7 @@ pub(crate) async fn drive_quotes<S: EntityStore>(
             Err(err) => return Err(eyre::eyre!("quote task: {err}")),
         }
     }
+    let mut records = Vec::new();
     for (plan, (index, generation, curve)) in plans.into_iter().zip(picked) {
         let job = &jobs[index];
         if plan.missing.is_some() {
@@ -428,29 +456,44 @@ pub(crate) async fn drive_quotes<S: EntityStore>(
             );
             continue;
         }
-        let record = QuoteRecord {
-            kind: plan.kind,
-            id: plan.id,
+        records.push((
+            index,
             generation,
-            version: QUOTE_VERSION,
-            block: plan.block,
-            payload: payload_of(&plan),
-        };
-        if let Err(err) = store.put_quote(&record).await {
+            curve,
+            QuoteRecord {
+                kind: plan.kind,
+                id: plan.id,
+                generation,
+                version: QUOTE_VERSION,
+                block: plan.block,
+                payload: payload_of(&plan),
+            },
+        ));
+    }
+    let batch: Vec<QuoteRecord> = records
+        .iter()
+        .map(|(_, _, _, record)| record.clone())
+        .collect();
+    if let Err(err) = store.put_quotes(&batch).await {
+        let error = err.to_string();
+        for (index, _, _, _) in &records {
             keep_or_drop(
-                job,
-                err.to_string(),
+                &jobs[*index],
+                error.clone(),
                 give_up_after,
                 &mut done,
                 &mut failed,
                 notes,
             );
-            continue;
         }
-        if !curve_is_current(curve.as_ref(), generation) {
-            follow.push(curve_job(job.kind, job.id, generation));
+    } else {
+        for (index, generation, curve, _) in records {
+            let job = &jobs[index];
+            if !curve_is_current(curve.as_ref(), generation) {
+                follow.push(curve_job(job.kind, job.id, generation));
+            }
+            done.push((job.stage, job.kind, job.id));
         }
-        done.push((job.stage, job.kind, job.id));
     }
     store.finish_work(&done, &failed).await?;
     store.enqueue_work(&follow, unix_now()).await?;
@@ -860,8 +903,7 @@ fn grid_amounts(max_in: U256) -> Vec<(&'static str, U256)> {
 }
 
 fn quote_page(rpc: &Rpc, quoters: &mut Quoters, plans: &mut [PoolPlan]) -> eyre::Result<()> {
-    let mut calls = Vec::new();
-    let mut back: Vec<(usize, usize, usize)> = Vec::new();
+    let mut staged = Vec::new();
     for (pool_index, plan) in plans.iter_mut().enumerate() {
         let Some(detail) = plan.detail.take() else {
             continue;
@@ -884,29 +926,49 @@ fn quote_page(rpc: &Rpc, quoters: &mut Quoters, plans: &mut [PoolPlan]) -> eyre:
                     dir.token_out,
                     sample.amount_in,
                     block,
-                    rpc,
-                    quoters,
-                )? {
+                ) {
                     Prep::Skip(reason) => sample.chain_error = Some(reason),
                     Prep::Ready(prepared) => {
                         sample.quoter = Some(prepared.target);
                         sample.method = Some(prepared.method);
-                        sample.alt = prepared.alt;
+                        sample.alt = prepared.alt.clone();
                         sample.alt_method = prepared.alt_method;
-                        sample.attempted = true;
-                        calls.push(RawCall {
+                        staged.push(Staged {
+                            pool: pool_index,
+                            dir: dir_index,
+                            sample: sample_index,
                             block,
-                            family: prepared.family,
-                            target: prepared.target,
-                            data: prepared.data,
-                            method: prepared.method,
+                            prepared,
                         });
-                        back.push((pool_index, dir_index, sample_index));
                     }
                 }
             }
         }
         plan.detail = Some(detail);
+    }
+    let keys: Vec<(Address, u64)> = staged
+        .iter()
+        .map(|item| (item.prepared.target, item.block))
+        .collect();
+    quoters.warm(rpc, &keys)?;
+    let mut calls = Vec::new();
+    let mut back: Vec<(usize, usize, usize)> = Vec::new();
+    for item in staged {
+        let sample = &mut plans[item.pool].directions[item.dir].samples[item.sample];
+        if !quoters.has_cached(item.prepared.target, item.block) {
+            sample.chain_error = Some("quoter has no code at this block".into());
+            sample.alt = None;
+            continue;
+        }
+        sample.attempted = true;
+        calls.push(RawCall {
+            block: item.block,
+            family: item.prepared.family,
+            target: item.prepared.target,
+            data: item.prepared.data,
+            method: item.prepared.method,
+        });
+        back.push((item.pool, item.dir, item.sample));
     }
     apply_calls(rpc, plans, &calls, &back)?;
     calls.clear();
@@ -997,6 +1059,7 @@ fn bisect(rpc: &Rpc, quoters: &mut Quoters, plans: &mut [PoolPlan]) -> eyre::Res
     for _ in 0..BISECT_STEPS {
         let mut calls = Vec::new();
         let mut which = Vec::new();
+        let mut staged = Vec::new();
         // Indexing keeps `plans` free while a bound is updated on a skipped mid.
         #[allow(clippy::needless_range_loop)]
         for index in 0..bounds.len() {
@@ -1016,15 +1079,7 @@ fn bisect(rpc: &Rpc, quoters: &mut Quoters, plans: &mut [PoolPlan]) -> eyre::Res
                     continue;
                 };
                 let dir = &plan.directions[dir_index];
-                prepare(
-                    detail,
-                    dir.token_in,
-                    dir.token_out,
-                    mid,
-                    plan.block,
-                    rpc,
-                    quoters,
-                )?
+                prepare(detail, dir.token_in, dir.token_out, mid, plan.block)
             };
             let Prep::Ready(prepared) = prepared else {
                 bounds[index].hi = mid;
@@ -1032,6 +1087,19 @@ fn bisect(rpc: &Rpc, quoters: &mut Quoters, plans: &mut [PoolPlan]) -> eyre::Res
                 continue;
             };
             let block = plans[pool].block;
+            staged.push((index, mid, block, prepared));
+        }
+        let keys: Vec<(Address, u64)> = staged
+            .iter()
+            .map(|(_, _, block, prepared)| (prepared.target, *block))
+            .collect();
+        quoters.warm(rpc, &keys)?;
+        for (index, mid, block, prepared) in staged {
+            if !quoters.has_cached(prepared.target, block) {
+                bounds[index].hi = mid;
+                bounds[index].steps = bounds[index].steps.saturating_add(1);
+                continue;
+            }
             which.push((index, mid));
             calls.push(RawCall {
                 block,
@@ -1108,11 +1176,9 @@ fn prepare(
     token_out: Address,
     amount: U256,
     block: u64,
-    rpc: &Rpc,
-    quoters: &mut Quoters,
-) -> eyre::Result<Prep> {
+) -> Prep {
     if block == 0 {
-        return Ok(Prep::Skip("snapshot block is 0".into()));
+        return Prep::Skip("snapshot block is 0".into());
     }
     let built = match detail {
         PoolDetail::ConstantProduct(pool) => {
@@ -1124,14 +1190,10 @@ fn prepare(
         PoolDetail::Metric(_) => Err("metric has no on-chain quoter".into()),
         PoolDetail::Failed(_) => Err("pool read failed".into()),
     };
-    let prepared = match built {
-        Ok(prepared) => prepared,
-        Err(reason) => return Ok(Prep::Skip(reason)),
-    };
-    if !quoters.has_code(rpc, prepared.target, block)? {
-        return Ok(Prep::Skip("quoter has no code at this block".into()));
+    match built {
+        Ok(prepared) => Prep::Ready(prepared),
+        Err(reason) => Prep::Skip(reason),
     }
-    Ok(Prep::Ready(prepared))
 }
 
 fn prepare_product(
@@ -1293,7 +1355,16 @@ fn fits_i24(value: i32) -> bool {
     (-8_388_608..8_388_608).contains(&value)
 }
 
+struct CallChunk {
+    block: u64,
+    gas: u64,
+    indices: Vec<usize>,
+}
+
 fn dispatch_raw(rpc: &Rpc, calls: &[RawCall]) -> eyre::Result<Vec<ChainOut>> {
+    if calls.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut order: BTreeMap<(u64, Family), Vec<usize>> = BTreeMap::new();
     for (index, call) in calls.iter().enumerate() {
         order
@@ -1301,6 +1372,18 @@ fn dispatch_raw(rpc: &Rpc, calls: &[RawCall]) -> eyre::Result<Vec<ChainOut>> {
             .or_default()
             .push(index);
     }
+    let mut chunks = Vec::new();
+    for ((block, family), indices) in order {
+        let (size, gas) = batch_of(family);
+        for chunk in indices.chunks(size) {
+            chunks.push(CallChunk {
+                block,
+                gas,
+                indices: chunk.to_vec(),
+            });
+        }
+    }
+    let groups = run_chunks(rpc, calls, &chunks)?;
     let mut outs = vec![
         ChainOut {
             amount_out: None,
@@ -1308,20 +1391,73 @@ fn dispatch_raw(rpc: &Rpc, calls: &[RawCall]) -> eyre::Result<Vec<ChainOut>> {
         };
         calls.len()
     ];
-    for ((block, family), indices) in order {
-        let (size, gas) = batch_of(family);
-        for chunk in indices.chunks(size) {
-            let prepared: Vec<(Address, &[u8])> = chunk
-                .iter()
-                .map(|index| (calls[*index].target, calls[*index].data.as_slice()))
-                .collect();
-            let raws = execute(rpc, Some(block), &prepared, gas)?;
-            for (index, raw) in chunk.iter().zip(raws) {
-                outs[*index] = interpret(calls[*index].method, raw);
-            }
+    for (chunk, raws) in chunks.iter().zip(groups) {
+        if raws.len() != chunk.indices.len() {
+            return Err(eyre::eyre!("quote batch length"));
+        }
+        for (index, raw) in chunk.indices.iter().zip(raws) {
+            outs[*index] = interpret(calls[*index].method, raw);
         }
     }
     Ok(outs)
+}
+
+/// Run multicalls on a few threads. Each thread has its own `Rpc` clone so the
+/// request id is not shared. The HTTP client pool is shared.
+fn run_chunks(
+    rpc: &Rpc,
+    calls: &[RawCall],
+    chunks: &[CallChunk],
+) -> eyre::Result<Vec<Vec<RawOut>>> {
+    let count = chunks.len();
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let workers = count.min(QUOTE_IN_FLIGHT);
+    let next = AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        let next = &next;
+        let mut handles = Vec::with_capacity(workers);
+        for _ in 0..workers {
+            let rpc = rpc.clone();
+            handles.push(
+                scope.spawn(move || -> eyre::Result<Vec<(usize, Vec<RawOut>)>> {
+                    let mut done = Vec::new();
+                    loop {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        if index >= count {
+                            break;
+                        }
+                        let chunk = &chunks[index];
+                        let prepared: Vec<(Address, &[u8])> = chunk
+                            .indices
+                            .iter()
+                            .map(|call| (calls[*call].target, calls[*call].data.as_slice()))
+                            .collect();
+                        let raws = execute(&rpc, Some(chunk.block), &prepared, chunk.gas)?;
+                        done.push((index, raws));
+                    }
+                    Ok(done)
+                }),
+            );
+        }
+        let mut groups = (0..count).map(|_| Vec::new()).collect::<Vec<_>>();
+        let mut filled = vec![false; count];
+        for handle in handles {
+            let done = match handle.join() {
+                Ok(result) => result?,
+                Err(_) => return Err(eyre::eyre!("quote thread panicked")),
+            };
+            for (index, raws) in done {
+                groups[index] = raws;
+                filled[index] = true;
+            }
+        }
+        if filled.iter().any(|done| !done) {
+            return Err(eyre::eyre!("quote chunk dropped"));
+        }
+        Ok(groups)
+    })
 }
 
 fn execute(
