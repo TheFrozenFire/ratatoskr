@@ -81,6 +81,15 @@ where
     S: EntityStore,
     P: HistoryPeer + Clone + 'static,
 {
+    let scan = scan_blooms(store, jobs, stop).await?;
+    fetch_receipts(store, peer, scan, stop).await
+}
+
+async fn load_and_scan<S: EntityStore>(
+    store: &S,
+    jobs: &[LogJob],
+    stop: &tokio::sync::watch::Receiver<bool>,
+) -> eyre::Result<BloomScan> {
     let mut pending = Vec::new();
     for job in jobs {
         let at = store
@@ -127,7 +136,11 @@ where
     let mut at = start;
     while at < end {
         if *stop.borrow() {
-            return Ok(Vec::new());
+            return Ok(BloomScan {
+                end,
+                jobs: pending,
+                stopped: true,
+            });
         }
         let to = at.saturating_add(SCAN_FLUSH).min(end);
         let window = store
@@ -173,8 +186,42 @@ where
             "bloom hits"
         );
     }
-    tracing::info!("released header chain");
+    Ok(BloomScan {
+        end,
+        jobs: pending,
+        stopped: false,
+    })
+}
 
+pub struct BloomScan {
+    end: u64,
+    jobs: Vec<PendingJob>,
+    stopped: bool,
+}
+
+pub(crate) async fn scan_blooms<S: EntityStore>(
+    store: &S,
+    jobs: &[LogJob],
+    stop: &tokio::sync::watch::Receiver<bool>,
+) -> eyre::Result<BloomScan> {
+    load_and_scan(store, jobs, stop).await
+}
+
+pub(crate) async fn fetch_receipts<S, P>(
+    store: &S,
+    peer: Option<&P>,
+    scan: BloomScan,
+    stop: &tokio::sync::watch::Receiver<bool>,
+) -> eyre::Result<Vec<String>>
+where
+    S: EntityStore,
+    P: HistoryPeer + Clone + 'static,
+{
+    if scan.stopped {
+        return Ok(Vec::new());
+    }
+    let end = scan.end;
+    let pending = scan.jobs;
     let Some(peer) = peer else {
         socket_path().wrap_err("peer socket")?;
         return Err(eyre!("peer socket"));

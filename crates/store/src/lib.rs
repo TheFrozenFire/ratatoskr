@@ -16,6 +16,9 @@ use venues::{Catalog, Put, ReceiptBody, VenueRow};
 pub use venues::EntityStore;
 
 const HEADER_BATCH: u64 = 8192;
+/// Block bytes copied out of one corpus read. The table is multiple gigabytes,
+/// so the next page is read only after this one has been visited.
+const BLOCK_PAGE: usize = 8 * 1024 * 1024;
 
 /// Which corpus file to open. Ingest uses [`CorpusOpen::Create`]. A venue
 /// import uses [`CorpusOpen::Open`] so a missing path still fails.
@@ -197,18 +200,22 @@ impl EntityStore for LocalStore {
         &self,
         visit: &mut dyn FnMut(u64, &[u8]) -> eyre::Result<()>,
     ) -> eyre::Result<()> {
-        let corpus = self.corpus_db()?;
-        let rows = blocking(move || {
-            let mut rows = Vec::new();
-            corpus.for_each_block(|number, bytes| {
-                rows.push((number, bytes.to_vec()));
-                Ok(())
-            })?;
-            Ok(rows)
-        })
-        .await?;
-        for (number, bytes) in &rows {
-            visit(*number, bytes)?;
+        let mut from = 0_u64;
+        loop {
+            let corpus = self.corpus_db()?;
+            let start = from;
+            let page = blocking(move || corpus.read_block_page(start, BLOCK_PAGE)).await?;
+            let Some((last, _)) = page.last() else {
+                break;
+            };
+            let next = last.saturating_add(1);
+            for (number, bytes) in &page {
+                visit(*number, bytes)?;
+            }
+            if next <= from {
+                break;
+            }
+            from = next;
         }
         Ok(())
     }
@@ -517,5 +524,43 @@ mod tests {
         let err = store.cursor("job").await.unwrap_err();
         assert!(err.to_string().contains("venues are not open"));
         assert!(store.meta("bytes").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_corpus_lock_does_not_block_opening_headers() {
+        let dir = TempDir::new();
+        let headers = dir.0.join("headers.redb");
+        let venues = dir.0.join("venues.redb");
+        let created = open(&dir.0);
+        drop(created);
+        let corpus = LocalStore::corpus(&dir.0.join("corpus.redb")).unwrap();
+        let scan = LocalStore::parts(Some(&headers), None, Some(&venues)).unwrap();
+        let err = LocalStore::parts(Some(&headers), None, None)
+            .map(|_| ())
+            .unwrap_err();
+        let err = format!("{err:#}");
+        assert!(err.contains("already open"), "{err}");
+        drop(scan);
+        LocalStore::parts(Some(&headers), None, None).unwrap();
+        drop(corpus);
+    }
+
+    #[tokio::test]
+    async fn for_each_block_visits_each_stored_block() {
+        let dir = TempDir::new();
+        let store = open(&dir.0);
+        store
+            .write_records("cursor-range", &[block(1), block(2), block(4)])
+            .await
+            .unwrap();
+        let mut numbers = Vec::new();
+        store
+            .for_each_block(&mut |number, _bytes| {
+                numbers.push(number);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(numbers, vec![1, 2, 4]);
     }
 }

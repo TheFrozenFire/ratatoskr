@@ -20,14 +20,17 @@ mod rpc;
 
 pub use catalog::{kind_name, Catalog, Put, ReceiptBody, VenueRow};
 pub use entity::EntityStore;
+pub use history::BloomScan;
 pub use logs::Walk;
 
 use ipc::HistoryPeer;
 
 /// Which part of a venue run to perform. A standalone binary splits these so
-/// a list walk does not hold the header file open.
+/// one phase does not hold a file the next phase must leave free.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunPhase {
+    Lists,
+    Corpus,
     ListsAndCorpus,
     History,
     All,
@@ -71,7 +74,14 @@ where
     P: HistoryPeer + Clone + 'static,
 {
     let mut report = RunReport::default();
-    let lists = matches!(opts.phase, RunPhase::ListsAndCorpus | RunPhase::All);
+    let lists = matches!(
+        opts.phase,
+        RunPhase::Lists | RunPhase::ListsAndCorpus | RunPhase::All
+    );
+    let import = matches!(
+        opts.phase,
+        RunPhase::Corpus | RunPhase::ListsAndCorpus | RunPhase::All
+    );
     let history = matches!(opts.phase, RunPhase::History | RunPhase::All);
     if lists {
         let call_urls = if opts.rpcs.is_empty() {
@@ -96,21 +106,21 @@ where
                 }
             }
         }
-        if !opts.no_corpus && opts.corpus_available && job_wanted(&opts.only, "corpus") {
-            if *stop.borrow() {
-                return Ok(report);
+    }
+    if import && !opts.no_corpus && opts.corpus_available && job_wanted(&opts.only, "corpus") {
+        if *stop.borrow() {
+            return Ok(report);
+        }
+        match import::import_corpus(store).await {
+            Ok(wrote) => {
+                let note = format!("corpus wrote {wrote}");
+                tracing::info!(%note);
+                report.notes.push(note);
             }
-            match import::import_corpus(store).await {
-                Ok(wrote) => {
-                    let note = format!("corpus wrote {wrote}");
-                    tracing::info!(%note);
-                    report.notes.push(note);
-                }
-                Err(err) => {
-                    let message = format!("corpus: {err}");
-                    tracing::error!(%message);
-                    report.list_errors.push(message);
-                }
+            Err(err) => {
+                let message = format!("corpus: {err}");
+                tracing::error!(%message);
+                report.list_errors.push(message);
             }
         }
     }
@@ -134,4 +144,34 @@ where
         }
     }
     Ok(report)
+}
+
+/// Bloom scan. The caller opens `headers.redb` for this and drops it before
+/// [`fetch_receipts`]. The corpus stays closed so an ingest lock does not
+/// block the scan.
+pub async fn scan_blooms<S: EntityStore>(
+    store: &S,
+    only: &Option<String>,
+    stop: &tokio::sync::watch::Receiver<bool>,
+) -> eyre::Result<history::BloomScan> {
+    let jobs = logs::jobs()
+        .into_iter()
+        .filter(|job| job_wanted(only, &job.name))
+        .collect::<Vec<_>>();
+    history::scan_blooms(store, &jobs, stop).await
+}
+
+/// Receipt fetch for a finished bloom scan. Needs the corpus and the catalog,
+/// not the header file.
+pub async fn fetch_receipts<S, P>(
+    store: &S,
+    peer: Option<&P>,
+    scan: history::BloomScan,
+    stop: &tokio::sync::watch::Receiver<bool>,
+) -> eyre::Result<Vec<String>>
+where
+    S: EntityStore,
+    P: HistoryPeer + Clone + 'static,
+{
+    history::fetch_receipts(store, peer, scan, stop).await
 }

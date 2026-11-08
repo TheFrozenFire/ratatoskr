@@ -154,6 +154,35 @@ impl Corpus {
         Ok(delta.max(0) as u64)
     }
 
+    /// Copy block rows from `from` upward until `byte_budget` bytes are held.
+    ///
+    /// The read transaction ends before this returns. One row is always
+    /// included when any remain, so a single large block still makes progress.
+    pub fn read_block_page(
+        &self,
+        from: u64,
+        byte_budget: usize,
+    ) -> eyre::Result<Vec<(u64, Vec<u8>)>> {
+        let read = self.db.begin_read()?;
+        let table = match read.open_table(BLOCKS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(err) => return Err(err.into()),
+        };
+        let mut out = Vec::new();
+        let mut held = 0usize;
+        for item in table.range(from..)? {
+            let (key, value) = item?;
+            let bytes = value.value().to_vec();
+            held = held.saturating_add(bytes.len());
+            out.push((key.value(), bytes));
+            if held >= byte_budget {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
     /// Visit every stored block in number order, including holes.
     pub fn for_each_block(
         &self,
@@ -244,6 +273,35 @@ mod tests {
         corpus.write_hole(10).unwrap();
         corpus.put_blocks(&[sample(10)]).unwrap();
         assert_eq!(corpus.read_block(10).unwrap().unwrap().number, 10);
+        drop(corpus);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_block_page_stops_at_the_byte_budget_and_resumes() {
+        let path = std::env::temp_dir().join(format!(
+            "ratatoskr-corpus-page-{}-{}.redb",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let corpus = Corpus::create(&path).unwrap();
+        corpus
+            .write_records("cursor-page", &[sample(1), sample(2), sample(3)])
+            .unwrap();
+        let first = corpus.read_block_page(0, 1).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].0, 1);
+        let next = corpus.read_block_page(first[0].0 + 1, 1).unwrap();
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].0, 2);
+        let rest = corpus.read_block_page(next[0].0 + 1, 1).unwrap();
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0].0, 3);
+        assert!(corpus.read_block_page(rest[0].0 + 1, 1).unwrap().is_empty());
         drop(corpus);
         let _ = std::fs::remove_file(&path);
     }

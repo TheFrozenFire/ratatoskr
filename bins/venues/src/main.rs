@@ -9,7 +9,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 use store::{CorpusOpen, LocalStore};
-use venues::{history_selected, job_wanted, kind_name, Catalog, RunOpts, RunPhase, RunReport};
+use venues::{
+    fetch_receipts, history_selected, job_wanted, kind_name, scan_blooms, Catalog, RunOpts,
+    RunPhase, RunReport,
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "ratatoskr-venues")]
@@ -63,34 +66,81 @@ fn main() -> eyre::Result<ExitCode> {
         .enable_all()
         .build()?;
     let report = runtime.block_on(async {
-        let corpus = import_path
-            .as_deref()
-            .filter(|_| import)
-            .map(CorpusOpen::Open);
-        let store = LocalStore::parts(None, corpus, Some(&out))?;
-        let mut report = run_phase(store, None, opts.clone()).await?;
+        let mut list_opts = opts.clone();
+        list_opts.phase = RunPhase::Lists;
+        list_opts.corpus_available = false;
+        let store = LocalStore::parts(None, None, Some(&out))?;
+        let mut report = run_phase(store, None, list_opts).await?;
+        if import {
+            if let Some(path) = import_path {
+                match LocalStore::parts(None, Some(CorpusOpen::Open(&path)), Some(&out)) {
+                    Ok(store) => {
+                        let mut corpus_opts = opts.clone();
+                        corpus_opts.phase = RunPhase::Corpus;
+                        corpus_opts.corpus_available = true;
+                        let imported = run_phase(store, None, corpus_opts).await?;
+                        report.list_errors.extend(imported.list_errors);
+                        report.notes.extend(imported.notes);
+                    }
+                    Err(err) => {
+                        let note = format!("corpus: {err:#}");
+                        tracing::error!(%note);
+                        report.notes.push(note);
+                    }
+                }
+            }
+        }
         if history {
             let headers = HeaderChain::default_path();
-            let corpus_path = Corpus::default_path();
-            match LocalStore::parts(
-                Some(&headers),
-                Some(CorpusOpen::OpenOrCreate(&corpus_path)),
-                Some(&out),
-            ) {
+            let (_tx, stop) = tokio::sync::watch::channel(false);
+            // The catalog stores bloom hits. The corpus stays closed so an
+            // ingest process can keep corpus.redb.
+            let scanned = match LocalStore::parts(Some(&headers), None, Some(&out)) {
                 Ok(store) => {
-                    let peer = socket_path().ok().map(SocketPeer::new);
-                    let mut history_opts = opts.clone();
-                    history_opts.phase = RunPhase::History;
-                    history_opts.corpus_available = false;
-                    let history_report = run_phase(store, peer, history_opts).await?;
-                    report.list_errors.extend(history_report.list_errors);
-                    report.notes.extend(history_report.notes);
+                    let scanned = scan_blooms(&store, &opts.only, &stop).await;
+                    drop(store);
+                    tracing::info!("released header chain");
+                    Some(scanned)
                 }
                 Err(err) => {
                     let note = format!("history: {err:#}");
                     tracing::error!(%note);
                     report.notes.push(note);
+                    None
                 }
+            };
+            match scanned {
+                Some(Ok(scan)) => {
+                    let corpus_path = Corpus::default_path();
+                    match LocalStore::parts(
+                        None,
+                        Some(CorpusOpen::OpenOrCreate(&corpus_path)),
+                        Some(&out),
+                    ) {
+                        Ok(store) => {
+                            let peer = socket_path().ok().map(SocketPeer::new);
+                            match fetch_receipts(&store, peer.as_ref(), scan, &stop).await {
+                                Ok(notes) => report.notes.extend(notes),
+                                Err(err) => {
+                                    let note = format!("history: {err:#}");
+                                    tracing::error!(%note);
+                                    report.notes.push(note);
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            let note = format!("history: {err:#}");
+                            tracing::error!(%note);
+                            report.notes.push(note);
+                        }
+                    }
+                }
+                Some(Err(err)) => {
+                    let note = format!("history: {err:#}");
+                    tracing::error!(%note);
+                    report.notes.push(note);
+                }
+                None => {}
             }
         }
         Ok::<_, eyre::Report>(report)
