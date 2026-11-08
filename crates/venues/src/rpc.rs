@@ -48,6 +48,7 @@ pub struct CallBytes {
     pub message: String,
 }
 
+#[derive(Clone)]
 pub struct Rpc {
     client: reqwest::blocking::Client,
     urls: Vec<String>,

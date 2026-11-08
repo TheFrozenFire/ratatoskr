@@ -30,6 +30,7 @@ enum Length {
     NextPoolIdx,
 }
 
+#[derive(Clone)]
 pub struct ListJob {
     pub name: String,
     pub factory: Address,
@@ -193,7 +194,11 @@ pub async fn walk<S: EntityStore>(
         if *stop.borrow() {
             return Ok(wrote);
         }
-        let end = length(rpc, job)?;
+        let rpc_len = rpc.clone();
+        let job_len = job.clone();
+        let end = tokio::task::spawn_blocking(move || length(&rpc_len, &job_len))
+            .await
+            .map_err(|err| eyre!("list length: {err}"))??;
         if at >= end {
             store.commit_chunk(&job.name, at, &[], job.put).await?;
             tracing::info!(job = %job.name, at, end, "list done");
@@ -201,7 +206,16 @@ pub async fn walk<S: EntityStore>(
         }
         let mut count = (end - at).min(job.batch).max(1);
         loop {
-            match fetch(rpc, job, at, count) {
+            let rpc_fetch = rpc.clone();
+            let job_fetch = job.clone();
+            let fetched =
+                match tokio::task::spawn_blocking(move || fetch(&rpc_fetch, &job_fetch, at, count))
+                    .await
+                {
+                    Ok(fetched) => fetched,
+                    Err(err) => Err(Fetch::Fatal(eyre!("list fetch: {err}"))),
+                };
+            match fetched {
                 Ok(hits) => {
                     let rows = hits_to_rows(job, hits);
                     let next = at + count;

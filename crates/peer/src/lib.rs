@@ -72,7 +72,7 @@ pub struct OpenedPeer {
 }
 
 impl OpenedPeer {
-    /// The slot table [`run`] dials. Empty until that loop starts.
+    /// The same table [`run`] dials. Empty until a handshake probe publishes a slot.
     pub fn local(&self) -> LocalPeer {
         self.local.clone()
     }
@@ -84,14 +84,14 @@ pub fn open(path: &Path) -> eyre::Result<OpenedPeer> {
     Ok(OpenedPeer {
         catalog,
         local: LocalPeer {
-            slots: Arc::new(Mutex::new(Vec::new())),
+            slots: Arc::new(Mutex::new(Table::new())),
             wanted: Arc::new(AtomicU64::new(0)),
         },
     })
 }
 
 /// Remove a stale socket file and bind mode 0600. Does not dial.
-pub fn bind_socket(socket: &Path) -> eyre::Result<UnixListener> {
+fn bind_socket(socket: &Path) -> eyre::Result<UnixListener> {
     if socket.exists() {
         fs::remove_file(socket).wrap_err("remove stale socket")?;
     }
@@ -165,7 +165,7 @@ pub async fn run(prepared: PreparedPeer, mut stop: watch::Receiver<bool>) -> eyr
     let slots = Arc::clone(&local.slots);
     let wanted = Arc::clone(&local.wanted);
     let maintain_stop = stop.clone();
-    let maintain_task = tokio::spawn(maintain(
+    let mut maintain_task = tokio::spawn(maintain(
         key,
         peers,
         Arc::clone(&slots),
@@ -176,6 +176,7 @@ pub async fn run(prepared: PreparedPeer, mut stop: watch::Receiver<bool>) -> eyr
         maintain_stop,
     ));
     let catalog_path = Arc::new(catalog_path);
+    let mut maintain_ended = None;
     let accept_result = loop {
         if *stop.borrow() {
             break Ok(());
@@ -186,6 +187,10 @@ pub async fn run(prepared: PreparedPeer, mut stop: watch::Receiver<bool>) -> eyr
                 if changed.is_err() || *stop.borrow() {
                     break Ok(());
                 }
+            }
+            joined = &mut maintain_task => {
+                maintain_ended = Some(joined);
+                break Ok(());
             }
             accepted = listener.accept() => {
                 match accepted {
@@ -209,13 +214,27 @@ pub async fn run(prepared: PreparedPeer, mut stop: watch::Receiver<bool>) -> eyr
     };
     drop(listener);
     drop(catalog_tx);
+    // Closed before maintain returns, so a probe still in flight cannot publish
+    // after the catalog flock is released.
+    slots.lock().await.close();
     if accept_result.is_err() {
         maintain_task.abort();
     }
-    let _ = maintain_task.await;
-    slots.lock().await.clear();
+    let maintain_result = match maintain_ended {
+        Some(result) => result,
+        None => maintain_task.await,
+    };
     drop(local);
-    accept_result
+    let maintain_err = match maintain_result {
+        Ok(()) => None,
+        Err(err) if err.is_cancelled() => None,
+        Err(err) => Some(eyre::eyre!("peer maintain: {err}")),
+    };
+    match (accept_result, maintain_err) {
+        (Err(err), _) => Err(err),
+        (Ok(()), Some(err)) => Err(err),
+        (Ok(()), None) => Ok(()),
+    }
 }
 
 /// In-process history reads. The slot table is the one [`serve`] dials.
@@ -224,7 +243,7 @@ pub async fn run(prepared: PreparedPeer, mut stop: watch::Receiver<bool>) -> eyr
 /// `fetch_block_range` return. Encoding stays on the socket path.
 #[derive(Clone)]
 pub struct LocalPeer {
-    slots: Arc<Mutex<Vec<Slot>>>,
+    slots: Arc<Mutex<Table>>,
     wanted: Arc<AtomicU64>,
 }
 
@@ -232,6 +251,7 @@ impl HistoryPeer for LocalPeer {
     async fn status(&self) -> eyre::Result<Vec<SessionInfo>> {
         let guard = self.slots.lock().await;
         Ok(guard
+            .slots
             .iter()
             .filter(|slot| !slot.jobs.is_closed())
             .map(|slot| SessionInfo {
@@ -276,6 +296,36 @@ struct Slot {
     head: Option<u64>,
     earliest: Option<u64>,
     jobs: mpsc::Sender<Job>,
+}
+
+struct Table {
+    closed: bool,
+    slots: Vec<Slot>,
+}
+
+impl Table {
+    fn new() -> Self {
+        Self {
+            closed: false,
+            slots: Vec::new(),
+        }
+    }
+
+    fn close(&mut self) {
+        self.closed = true;
+        self.slots.clear();
+    }
+
+    /// `false` drops `slot` so a probe that lost the race does not stay connected.
+    fn publish(&mut self, slot: Slot) -> bool {
+        if self.closed {
+            drop(slot);
+            false
+        } else {
+            self.slots.push(slot);
+            true
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -447,7 +497,7 @@ async fn pause(stop: &mut watch::Receiver<bool>, secs: u64) -> bool {
 async fn maintain(
     key: SecretKey,
     target: usize,
-    slots: Arc<Mutex<Vec<Slot>>>,
+    slots: Arc<Mutex<Table>>,
     wanted: Arc<AtomicU64>,
     egress: Option<Egress>,
     mut catalog: catalog::Catalog,
@@ -465,6 +515,7 @@ async fn maintain(
     let (dead_tx, mut dead_rx) = mpsc::unbounded_channel::<IpAddr>();
     let (sight_tx, mut sight_rx) = mpsc::unbounded_channel::<catalog::Sighting>();
     let mut dials: JoinSet<(NodeRecord, eyre::Result<OutboundSession>)> = JoinSet::new();
+    let mut probes: JoinSet<()> = JoinSet::new();
     seed_directory(&mut directory, &catalog);
     // DNS walks take about a minute. Remembered endpoints are dialed while that
     // walk runs, and again whenever the walk is older than ten minutes.
@@ -479,9 +530,9 @@ async fn maintain(
         sightings = catalog.next_seq,
         "peer catalog"
     );
-    loop {
+    'run: loop {
         if *stop.borrow() {
-            return;
+            break 'run;
         }
         while let Ok(ip) = dead_rx.try_recv() {
             held.remove(&ip);
@@ -496,12 +547,12 @@ async fn maintain(
         seed_directory(&mut directory, &catalog);
         let live = {
             let mut guard = slots.lock().await;
-            guard.retain(|slot| !slot.jobs.is_closed());
-            guard.len()
+            guard.slots.retain(|slot| !slot.jobs.is_closed());
+            guard.slots.len()
         };
         if live >= target && dials.is_empty() {
             if pause(&mut stop, 5).await {
-                return;
+                break 'run;
             }
             continue;
         }
@@ -544,7 +595,7 @@ async fn maintain(
         let wanted_block = wanted.load(Ordering::Relaxed);
         while under_target && dials.len() < IN_FLIGHT && started_in_window < DIALS_PER_SEC {
             if *stop.borrow() {
-                return;
+                break 'run;
             }
             // One dial in four walks the directory in order so a peer we have
             // not measured yet is still tried. The rest prefer a peer whose
@@ -584,18 +635,18 @@ async fn maintain(
         }
         if dials.is_empty() {
             if pause(&mut stop, 5).await {
-                return;
+                break 'run;
             }
             continue;
         }
         if *stop.borrow() {
-            return;
+            break 'run;
         }
         let joined = tokio::select! {
             biased;
             changed = stop.changed() => {
                 if changed.is_err() || *stop.borrow() {
-                    return;
+                    break 'run;
                 }
                 continue;
             }
@@ -682,7 +733,7 @@ async fn maintain(
             earliest = ?session.earliest_block,
             "handshake complete"
         );
-        tokio::spawn(async move {
+        probes.spawn(async move {
             let session = session;
             let block = head.saturating_sub(32);
             // A header proves the session can answer. A receipt probe is large
@@ -714,8 +765,9 @@ async fn maintain(
                         earliest: session.earliest_block,
                         jobs: job_tx,
                     };
-                    slots.lock().await.push(slot);
-                    run_peer(session, job_rx, sightings).await;
+                    if slots.lock().await.publish(slot) {
+                        run_peer(session, job_rx, sightings).await;
+                    }
                 }
                 Ok(_) => {
                     info!(peer = %session.peer, "peer returned no header");
@@ -750,6 +802,9 @@ async fn maintain(
             let _ = dead_tx.send(remote);
         });
     }
+    drop(dials);
+    slots.lock().await.close();
+    while probes.join_next().await.is_some() {}
 }
 
 async fn run_peer(
@@ -979,7 +1034,7 @@ async fn census_response(
 
 async fn handle_conn(
     conn: UnixStream,
-    slots: Arc<Mutex<Vec<Slot>>>,
+    slots: Arc<Mutex<Table>>,
     wanted: Arc<AtomicU64>,
     catalog_tx: mpsc::UnboundedSender<CatalogCmd>,
     catalog_path: Arc<PathBuf>,
@@ -1034,9 +1089,10 @@ async fn handle_conn(
     Ok(())
 }
 
-async fn status_response(slots: &Mutex<Vec<Slot>>) -> Value {
+async fn status_response(slots: &Mutex<Table>) -> Value {
     let guard = slots.lock().await;
     let peers: Vec<_> = guard
+        .slots
         .iter()
         .filter(|slot| !slot.jobs.is_closed())
         .map(|slot| {
@@ -1051,12 +1107,16 @@ async fn status_response(slots: &Mutex<Vec<Slot>>) -> Value {
     json!({"ok": true, "peers": peers})
 }
 
-async fn fetch_response(slots: &Mutex<Vec<Slot>>, block: Option<u64>) -> Value {
+async fn fetch_response(slots: &Mutex<Table>, block: Option<u64>) -> Value {
     let mut errors = Vec::new();
     for _ in 0..3 {
         let job = {
             let guard = slots.lock().await;
-            let mut ranked: Vec<_> = guard.iter().filter(|slot| !slot.jobs.is_closed()).collect();
+            let mut ranked: Vec<_> = guard
+                .slots
+                .iter()
+                .filter(|slot| !slot.jobs.is_closed())
+                .collect();
             ranked.sort_by_key(|slot| std::cmp::Reverse(slot.head.unwrap_or(0)));
             let Some(slot) = ranked.first() else {
                 return json!({"ok": false, "error": "no peers connected"});
@@ -1108,7 +1168,7 @@ async fn fetch_response(slots: &Mutex<Vec<Slot>>, block: Option<u64>) -> Value {
 }
 
 async fn range_response(
-    slots: &Mutex<Vec<Slot>>,
+    slots: &Mutex<Table>,
     wanted: &AtomicU64,
     start: u64,
     count: u64,
@@ -1121,7 +1181,11 @@ async fn range_response(
     for _ in 0..3 {
         let job = {
             let guard = slots.lock().await;
-            let mut ranked: Vec<_> = guard.iter().filter(|slot| !slot.jobs.is_closed()).collect();
+            let mut ranked: Vec<_> = guard
+                .slots
+                .iter()
+                .filter(|slot| !slot.jobs.is_closed())
+                .collect();
             if ranked.is_empty() {
                 return Err("no peers connected".to_string());
             }
@@ -1330,11 +1394,11 @@ mod tests {
 
     #[tokio::test]
     async fn local_peer_returns_fetched_headers_without_a_second_codec() {
-        let slots = Arc::new(Mutex::new(Vec::new()));
+        let slots = Arc::new(Mutex::new(Table::new()));
         let wanted = Arc::new(AtomicU64::new(u64::MAX));
         let seen = Arc::new(StdMutex::new(None));
         let (tx, mut rx) = mpsc::channel(4);
-        slots.lock().await.push(Slot {
+        slots.lock().await.slots.push(Slot {
             label: "fake".into(),
             eth: 69,
             head: Some(80),
@@ -1366,7 +1430,7 @@ mod tests {
         assert_eq!(encode_header_records(&headers), header_bytes(11));
         assert_eq!(wanted.load(Ordering::Relaxed), 11);
         let err = LocalPeer {
-            slots: Arc::new(Mutex::new(Vec::new())),
+            slots: Arc::new(Mutex::new(Table::new())),
             wanted: Arc::new(AtomicU64::new(0)),
         }
         .chunk(1, 1)
@@ -1378,10 +1442,10 @@ mod tests {
     #[tokio::test]
     async fn socket_handler_encodes_headers_and_clamps_a_missing_count() {
         let (client, server) = UnixStream::pair().unwrap();
-        let slots = Arc::new(Mutex::new(Vec::new()));
+        let slots = Arc::new(Mutex::new(Table::new()));
         let wanted = Arc::new(AtomicU64::new(u64::MAX));
         let (tx, mut rx) = mpsc::channel(4);
-        slots.lock().await.push(Slot {
+        slots.lock().await.slots.push(Slot {
             label: "fake".into(),
             eth: 69,
             head: Some(80),
@@ -1509,5 +1573,22 @@ mod tests {
         drop(listener);
         drop(opened);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_closed_slot_table_drops_the_probe_sender() {
+        let table = Arc::new(Mutex::new(Table::new()));
+        let (tx, mut rx) = mpsc::channel(1);
+        table.lock().await.close();
+        let installed = table.lock().await.publish(Slot {
+            label: "probe".into(),
+            eth: 68,
+            head: Some(40),
+            earliest: None,
+            jobs: tx,
+        });
+        assert!(!installed);
+        assert!(table.lock().await.slots.is_empty());
+        assert!(rx.recv().await.is_none());
     }
 }

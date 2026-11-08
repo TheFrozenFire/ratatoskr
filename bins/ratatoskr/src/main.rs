@@ -93,6 +93,7 @@ async fn supervise(args: Args) -> eyre::Result<()> {
     let services = parse_services(&args.services)?;
     let pipelines = parse_pipelines(&args.pipeline)?;
     let egress = egress_from(args.bind4, args.bind6)?;
+    check_combination(&services, &pipelines)?;
     let paths = default_paths()?;
     let mut owned = open_owned(&services, &pipelines, &paths)?;
     let local = owned.peer.as_ref().map(peer::OpenedPeer::local);
@@ -121,22 +122,29 @@ async fn supervise(args: Args) -> eyre::Result<()> {
         tokio::spawn(async move { peer::run(prepared, stop).await })
     });
     let store = owned.store.clone();
-    let db_serve = owned.store.take().map(|store| {
+    let mut db_cancel = None;
+    let mut db_result = None;
+    let db_thread = owned.store.take().map(|store| {
         let socket = paths.db_socket.clone();
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
-        let thread = std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .wrap_err("db runtime")?;
-            runtime.block_on(async move {
-                tokio::select! {
-                    result = store::serve(Arc::new(store), &socket) => result,
-                    _ = cancel_rx => Ok(()),
-                }
-            })
-        });
-        (cancel_tx, thread)
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        db_cancel = Some(cancel_tx);
+        db_result = Some(result_rx);
+        std::thread::spawn(move || {
+            let result = (|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .wrap_err("db runtime")?;
+                runtime.block_on(async move {
+                    tokio::select! {
+                        result = store::serve(Arc::new(store), &socket) => result,
+                        _ = cancel_rx => Ok(()),
+                    }
+                })
+            })();
+            let _ = result_tx.send(result);
+        })
     });
     let opts = RunOpts {
         rpcs: args.rpc,
@@ -145,6 +153,9 @@ async fn supervise(args: Args) -> eyre::Result<()> {
         corpus_available: !args.no_corpus,
         phase: RunPhase::All,
     };
+    let pipelines_started = pipelines.headers || pipelines.venues || pipelines.receipts;
+    let mut peer_task = peer_task;
+    let mut stop_rx = stop_rx;
     let mut failed = tokio::task::LocalSet::new()
         .run_until(async {
             let mut tasks = spawn_pipelines(
@@ -154,47 +165,39 @@ async fn supervise(args: Args) -> eyre::Result<()> {
                 opts,
                 args.target_bytes,
                 stop_rx.clone(),
-            )?;
-            let failed: Option<eyre::Report> =
-                wait_for_pipelines(&mut tasks, &stop_tx, &stop_rx).await;
-            Ok::<_, eyre::Report>(failed)
+            );
+            wait_for_stop(
+                &mut tasks,
+                &mut peer_task,
+                &mut db_result,
+                pipelines_started,
+                &stop_tx,
+                &mut stop_rx,
+            )
+            .await
         })
-        .await?;
+        .await;
     let _ = stop_tx.send(true);
     if let Some(task) = peer_task {
         match task.await {
             Ok(Ok(())) => {}
-            Ok(Err(err)) => {
-                tracing::error!(%err, "peer");
-                if failed.is_none() {
-                    failed = Some(err);
-                }
-            }
-            Err(err) => {
-                tracing::error!(%err, "peer task");
-                if failed.is_none() {
-                    failed = Some(eyre::eyre!("peer task: {err}"));
-                }
-            }
+            Ok(Err(err)) => note_failure(&mut failed, err),
+            Err(err) => note_failure(&mut failed, eyre::eyre!("peer task: {err}")),
         }
     }
-    if let Some((cancel, thread)) = db_serve {
+    if let Some(cancel) = db_cancel {
         let _ = cancel.send(());
-        match thread.join() {
+    }
+    if let Some(result) = db_result {
+        match result.await {
             Ok(Ok(())) => {}
-            Ok(Err(err)) => {
-                tracing::error!(%err, "db socket");
-                if failed.is_none() {
-                    failed = Some(err);
-                }
-            }
-            Err(_) => {
-                let err = eyre::eyre!("db socket thread panicked");
-                tracing::error!(%err);
-                if failed.is_none() {
-                    failed = Some(err);
-                }
-            }
+            Ok(Err(err)) => note_failure(&mut failed, err),
+            Err(_) => note_failure(&mut failed, eyre::eyre!("db socket thread dropped")),
+        }
+    }
+    if let Some(thread) = db_thread {
+        if thread.join().is_err() {
+            note_failure(&mut failed, eyre::eyre!("db socket thread panicked"));
         }
     }
     drop(store);
@@ -212,15 +215,11 @@ fn spawn_pipelines(
     opts: RunOpts,
     target_bytes: u64,
     stop: watch::Receiver<bool>,
-) -> eyre::Result<JoinSet<eyre::Result<()>>> {
+) -> JoinSet<eyre::Result<()>> {
     let mut tasks = JoinSet::new();
     if pipelines.headers {
-        let peer = local
-            .clone()
-            .ok_or_else(|| eyre::eyre!("headers needs both db and peer"))?;
-        let store = store
-            .clone()
-            .ok_or_else(|| eyre::eyre!("headers needs both db and peer"))?;
+        let peer = local.clone().expect("headers needs both db and peer");
+        let store = store.clone().expect("headers needs both db and peer");
         let stop = stop.clone();
         tasks.spawn_local(async move {
             let mut sink = StoreSink::new(store.clone());
@@ -228,12 +227,8 @@ fn spawn_pipelines(
         });
     }
     if pipelines.receipts {
-        let peer = local
-            .clone()
-            .ok_or_else(|| eyre::eyre!("receipts needs both db and peer"))?;
-        let store = store
-            .clone()
-            .ok_or_else(|| eyre::eyre!("receipts needs both db and peer"))?;
+        let peer = local.clone().expect("receipts needs both db and peer");
+        let store = store.clone().expect("receipts needs both db and peer");
         let stop = stop.clone();
         tasks.spawn_local(async move {
             let mut sink = StoreSink::new(store.clone());
@@ -243,7 +238,7 @@ fn spawn_pipelines(
         });
     }
     if pipelines.venues {
-        let store = store.ok_or_else(|| eyre::eyre!("venues needs db"))?;
+        let store = store.expect("venues needs db");
         let stop = stop.clone();
         tasks.spawn_local(async move {
             let mut sink = StoreSink::new(store.clone());
@@ -252,36 +247,104 @@ fn spawn_pipelines(
                 .await
         });
     }
-    Ok(tasks)
+    tasks
 }
 
-async fn wait_for_pipelines(
-    tasks: &mut JoinSet<eyre::Result<()>>,
-    stop_tx: &watch::Sender<bool>,
-    stop_rx: &watch::Receiver<bool>,
-) -> Option<eyre::Report> {
-    if tasks.is_empty() {
-        let mut stop = stop_rx.clone();
-        let _ = stop.changed().await;
-        return None;
+fn note_failure(failed: &mut Option<eyre::Report>, err: eyre::Report) {
+    tracing::error!(%err);
+    if failed.is_none() {
+        *failed = Some(err);
     }
+}
+
+async fn wait_for_stop(
+    tasks: &mut JoinSet<eyre::Result<()>>,
+    peer_task: &mut Option<tokio::task::JoinHandle<eyre::Result<()>>>,
+    db_result: &mut Option<tokio::sync::oneshot::Receiver<eyre::Result<()>>>,
+    pipelines_started: bool,
+    stop_tx: &watch::Sender<bool>,
+    stop_rx: &mut watch::Receiver<bool>,
+) -> Option<eyre::Report> {
     let mut failed = None;
-    while let Some(joined) = tasks.join_next().await {
-        match joined {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => {
-                tracing::error!(%err, "pipeline");
+    loop {
+        if tasks.is_empty() && *stop_rx.borrow() {
+            break;
+        }
+        if tasks.is_empty() && pipelines_started && failed.is_none() && !*stop_rx.borrow() {
+            break;
+        }
+        if tasks.is_empty() && peer_task.is_none() && db_result.is_none() {
+            break;
+        }
+        tokio::select! {
+            biased;
+            joined = tasks.join_next(), if !tasks.is_empty() => {
+                match joined {
+                    Some(Ok(Ok(()))) => {}
+                    Some(Ok(Err(err))) => {
+                        tracing::error!(%err, "pipeline");
+                        if failed.is_none() {
+                            failed = Some(err);
+                        }
+                        let _ = stop_tx.send(true);
+                    }
+                    Some(Err(err)) => {
+                        let err = eyre::eyre!("pipeline task: {err}");
+                        tracing::error!(%err, "pipeline task");
+                        if failed.is_none() {
+                            failed = Some(err);
+                        }
+                        let _ = stop_tx.send(true);
+                    }
+                    None => {}
+                }
+            }
+            joined = async { peer_task.as_mut().unwrap().await }, if peer_task.is_some() => {
+                *peer_task = None;
+                match joined {
+                    Ok(Ok(())) if *stop_rx.borrow() => {}
+                    Ok(Ok(())) => {
+                        let err = eyre::eyre!("peer stopped");
+                        tracing::error!(%err, "peer");
+                        if failed.is_none() {
+                            failed = Some(err);
+                        }
+                        let _ = stop_tx.send(true);
+                    }
+                    Ok(Err(err)) => {
+                        tracing::error!(%err, "peer");
+                        if failed.is_none() {
+                            failed = Some(err);
+                        }
+                        let _ = stop_tx.send(true);
+                    }
+                    Err(err) => {
+                        let err = eyre::eyre!("peer maintain: {err}");
+                        tracing::error!(%err, "peer task");
+                        if failed.is_none() {
+                            failed = Some(err);
+                        }
+                        let _ = stop_tx.send(true);
+                    }
+                }
+            }
+            result = async { db_result.as_mut().unwrap().await }, if db_result.is_some() => {
+                *db_result = None;
+                let err = match result {
+                    Ok(Err(err)) => err,
+                    Ok(Ok(())) => eyre::eyre!("db socket stopped"),
+                    Err(_) => eyre::eyre!("db socket thread dropped"),
+                };
+                tracing::error!(%err, "db socket");
                 if failed.is_none() {
                     failed = Some(err);
                 }
                 let _ = stop_tx.send(true);
             }
-            Err(err) => {
-                tracing::error!(%err, "pipeline task");
-                if failed.is_none() {
-                    failed = Some(eyre::eyre!("pipeline task: {err}"));
+            changed = stop_rx.changed(), if !*stop_rx.borrow() => {
+                if changed.is_err() {
+                    let _ = stop_tx.send(true);
                 }
-                let _ = stop_tx.send(true);
             }
         }
     }
