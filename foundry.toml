@@ -1,0 +1,24 @@
+# Lenses are creation-code eth_calls. The Rust client uses the hex checked in
+# beside each contract. These settings match that build: solc 0.8.28, optimizer
+# 200, Cancun, legacy codegen. via-IR is off; it blows the stack on these files.
+[profile.default]
+src = "contracts"
+out = "out"
+libs = ["lib"]
+solc = "0.8.28"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
+via_ir = false
+bytecode_hash = "ipfs"
+cbor_metadata = true
+deny = "warnings"
+auto_detect_remappings = true
+
+[fmt]
+line_length = 120
+tab_width = 4
+bracket_spacing = false
+int_types = "long"
+quote_style = "double"
+number_underscore = "preserve"
