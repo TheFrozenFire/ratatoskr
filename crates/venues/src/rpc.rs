@@ -210,7 +210,7 @@ pub fn hex_0x(bytes: &[u8]) -> String {
 
 pub fn unhex(text: &str) -> eyre::Result<Vec<u8>> {
     let text = text.strip_prefix("0x").unwrap_or(text);
-    if text.len() % 2 != 0 {
+    if !text.len().is_multiple_of(2) {
         return Err(eyre!("odd hex"));
     }
     alloy_primitives::hex::decode(text).map_err(|err| eyre!(err))

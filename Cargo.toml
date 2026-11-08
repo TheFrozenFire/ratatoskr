@@ -8,6 +8,7 @@ members = [
     "crates/era",
     "crates/chain",
     "crates/corpus",
+    "crates/store",
     "crates/directory",
     "crates/ipc",
     "crates/univ3",
@@ -38,6 +39,7 @@ futures = "0.3"
 rand = "0.8"
 chain = { path = "crates/chain" }
 corpus = { path = "crates/corpus" }
+store = { path = "crates/store" }
 directory = { path = "crates/directory" }
 discover = { path = "crates/discover" }
 era = { path = "crates/era" }

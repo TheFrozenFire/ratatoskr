@@ -271,6 +271,7 @@ fn metric_row(log: &NormalizedLog) -> Option<VenueRow> {
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn row(
     kind: u8,
     id: B256,
@@ -297,7 +298,7 @@ fn address_from_topic(word: B256) -> Address {
     Address::from_slice(&word.as_slice()[12..])
 }
 
-fn word<'a>(data: &'a [u8], index: usize) -> Option<&'a [u8]> {
+fn word(data: &[u8], index: usize) -> Option<&[u8]> {
     let start = index.checked_mul(32)?;
     data.get(start..start + 32)
 }

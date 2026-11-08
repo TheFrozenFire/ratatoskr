@@ -58,8 +58,7 @@ impl HeaderChain {
         if records.is_empty() {
             return Err(eyre::eyre!("empty header batch"));
         }
-        let mut expect = next;
-        for record in records {
+        for (expect, record) in (next..).zip(records.iter()) {
             if record.number != expect {
                 return Err(eyre::eyre!(
                     "header {} arrived where {expect} belongs",
@@ -77,7 +76,6 @@ impl HeaderChain {
                 ));
             }
             parent = record.hash;
-            expect += 1;
         }
         let last = records[records.len() - 1].clone();
         let mut txn = self.db.begin_write()?;
@@ -140,6 +138,35 @@ impl HeaderChain {
             ));
         }
         Ok(seen)
+    }
+
+    /// Copy headers in `[from, to)` and drop the read transaction before returning.
+    ///
+    /// A missing table is an empty slice. The caller checks that the keys are dense.
+    pub fn read_range(&self, from: u64, to: u64) -> eyre::Result<Vec<HeaderRecord>> {
+        if from > to {
+            return Err(eyre::eyre!("header range {from}..{to} is backwards"));
+        }
+        let read = self.db.begin_read()?;
+        let table = match read.open_table(HEADERS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(err) => return Err(err.into()),
+        };
+        let mut out = Vec::new();
+        for item in table.range(from..to)? {
+            let (number, value) = item?;
+            let number = number.value();
+            let record = decode_header_record(value.value()).map_err(|err| eyre::eyre!(err))?;
+            if record.number != number {
+                return Err(eyre::eyre!(
+                    "header key {number} stores block {}",
+                    record.number
+                ));
+            }
+            out.push(record);
+        }
+        Ok(out)
     }
 }
 

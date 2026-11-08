@@ -1,0 +1,497 @@
+//! Owner of the three entity files.
+//!
+//! Header append and `write_records` stay Eventual. Venue commits, hit commits,
+//! era bodies, `put_blocks`, `put_meta`, and `write_hole` stay Immediate.
+//! Those choices live in `HeaderChain`, `Corpus`, and `Catalog`.
+
+use alloy_primitives::B256;
+use chain::HeaderChain;
+use corpus::Corpus;
+use model::{BlockRecord, HeaderRecord};
+use std::path::Path;
+use std::sync::{Arc, Condvar, Mutex};
+use venues::{Catalog, Put, ReceiptBody, VenueRow};
+
+const HEADER_BATCH: u64 = 8192;
+
+#[allow(async_fn_in_trait)]
+pub trait EntityStore: Send + Sync {
+    async fn header_cursor(&self) -> eyre::Result<u64>;
+    async fn header_parent(&self, next: u64) -> eyre::Result<B256>;
+    async fn append_headers(&self, records: &[HeaderRecord]) -> eyre::Result<HeaderRecord>;
+    async fn for_each_header(
+        &self,
+        from: u64,
+        to: u64,
+        visit: &mut dyn FnMut(&[HeaderRecord]) -> eyre::Result<()>,
+    ) -> eyre::Result<u64>;
+
+    async fn read_block(&self, number: u64) -> eyre::Result<Option<BlockRecord>>;
+    async fn put_blocks(&self, records: &[BlockRecord]) -> eyre::Result<u64>;
+    async fn write_records(&self, cursor_key: &str, records: &[BlockRecord]) -> eyre::Result<u64>;
+    async fn write_hole(&self, number: u64) -> eyre::Result<()>;
+    async fn meta(&self, key: &str) -> eyre::Result<Option<u64>>;
+    async fn put_meta(&self, key: &str, value: u64) -> eyre::Result<()>;
+    async fn for_each_block(
+        &self,
+        visit: &mut dyn FnMut(u64, &[u8]) -> eyre::Result<()>,
+    ) -> eyre::Result<()>;
+
+    async fn cursor(&self, job: &str) -> eyre::Result<Option<u64>>;
+    async fn commit_chunk(
+        &self,
+        job: &str,
+        next: u64,
+        rows: &[VenueRow],
+        put: Put,
+    ) -> eyre::Result<u64>;
+    async fn hit_scan(&self, job: &str) -> eyre::Result<Option<u64>>;
+    async fn hits_from(&self, job: &str, from: u64, to: u64) -> eyre::Result<Vec<u64>>;
+    async fn commit_hits(&self, job: &str, scanned_to: u64, hits: &[u64]) -> eyre::Result<()>;
+    async fn read_bodies(&self, numbers: &[u64]) -> eyre::Result<Vec<Option<ReceiptBody>>>;
+    async fn put_bodies(&self, bodies: &[(u64, ReceiptBody)]) -> eyre::Result<()>;
+}
+
+pub struct LocalStore {
+    chain: Arc<HeaderChain>,
+    corpus: Arc<Corpus>,
+    catalog: Arc<Catalog>,
+}
+
+impl LocalStore {
+    pub fn open(headers: &Path, corpus: &Path, venues: &Path) -> eyre::Result<Self> {
+        Ok(Self {
+            chain: Arc::new(HeaderChain::create(headers)?),
+            corpus: Arc::new(Corpus::create(corpus)?),
+            catalog: Arc::new(Catalog::open(venues)?),
+        })
+    }
+}
+
+impl EntityStore for LocalStore {
+    async fn header_cursor(&self) -> eyre::Result<u64> {
+        let chain = Arc::clone(&self.chain);
+        blocking(move || chain.cursor()).await
+    }
+
+    async fn header_parent(&self, next: u64) -> eyre::Result<B256> {
+        let chain = Arc::clone(&self.chain);
+        blocking(move || chain.parent_hash(next)).await
+    }
+
+    async fn append_headers(&self, records: &[HeaderRecord]) -> eyre::Result<HeaderRecord> {
+        let chain = Arc::clone(&self.chain);
+        let records = records.to_vec();
+        blocking(move || {
+            let next = chain.cursor()?;
+            let parent = chain.parent_hash(next)?;
+            chain.append(&records, next, parent)
+        })
+        .await
+    }
+
+    async fn for_each_header(
+        &self,
+        from: u64,
+        to: u64,
+        visit: &mut dyn FnMut(&[HeaderRecord]) -> eyre::Result<()>,
+    ) -> eyre::Result<u64> {
+        // `to` stays the caller's end. A callback that appends must not extend it.
+        if from > to {
+            return Err(eyre::eyre!("header range {from}..{to} is backwards"));
+        }
+        let mut seen = 0_u64;
+        let mut at = from;
+        while at < to {
+            let end = at.saturating_add(HEADER_BATCH).min(to);
+            let chain = Arc::clone(&self.chain);
+            let batch = blocking(move || chain.read_range(at, end)).await?;
+            let rows = batch.len() as u64;
+            let dense = batch
+                .iter()
+                .enumerate()
+                .all(|(index, record)| record.number == at + index as u64);
+            if !dense || rows != end - at {
+                seen += rows;
+                return Err(short_header_range(seen, from, to));
+            }
+            visit(&batch)?;
+            seen += rows;
+            at = end;
+        }
+        if seen != to - from {
+            return Err(short_header_range(seen, from, to));
+        }
+        Ok(seen)
+    }
+
+    async fn read_block(&self, number: u64) -> eyre::Result<Option<BlockRecord>> {
+        let corpus = Arc::clone(&self.corpus);
+        blocking(move || corpus.read_block(number)).await
+    }
+
+    async fn put_blocks(&self, records: &[BlockRecord]) -> eyre::Result<u64> {
+        let corpus = Arc::clone(&self.corpus);
+        let records = records.to_vec();
+        blocking(move || corpus.put_blocks(&records)).await
+    }
+
+    async fn write_records(&self, cursor_key: &str, records: &[BlockRecord]) -> eyre::Result<u64> {
+        let corpus = Arc::clone(&self.corpus);
+        let cursor_key = cursor_key.to_string();
+        let records = records.to_vec();
+        blocking(move || corpus.write_records(&cursor_key, &records)).await
+    }
+
+    async fn write_hole(&self, number: u64) -> eyre::Result<()> {
+        let corpus = Arc::clone(&self.corpus);
+        blocking(move || corpus.write_hole(number)).await
+    }
+
+    async fn meta(&self, key: &str) -> eyre::Result<Option<u64>> {
+        let corpus = Arc::clone(&self.corpus);
+        let key = key.to_string();
+        blocking(move || corpus.meta(&key)).await
+    }
+
+    async fn put_meta(&self, key: &str, value: u64) -> eyre::Result<()> {
+        let corpus = Arc::clone(&self.corpus);
+        let key = key.to_string();
+        blocking(move || corpus.put_meta(&key, value)).await
+    }
+
+    async fn for_each_block(
+        &self,
+        visit: &mut dyn FnMut(u64, &[u8]) -> eyre::Result<()>,
+    ) -> eyre::Result<()> {
+        let corpus = Arc::clone(&self.corpus);
+        // SAFETY: lifetime is erased so the pointer can move onto the blocking
+        // thread. `JoinWalk` keeps `visit` borrowed until the walk drops it.
+        let visit: *mut (dyn FnMut(u64, &[u8]) -> eyre::Result<()> + 'static) =
+            unsafe { std::mem::transmute(std::ptr::from_mut(visit)) };
+        let done = Arc::new((Mutex::new(false), Condvar::new()));
+        let walk = BlockWalk {
+            corpus,
+            visit,
+            done: Arc::clone(&done),
+        };
+        let handle = tokio::task::spawn_blocking(move || walk.run());
+        let _joined = JoinWalk(done);
+        match handle.await {
+            Ok(result) => result,
+            Err(err) => Err(eyre::eyre!("store task: {err}")),
+        }
+    }
+
+    async fn cursor(&self, job: &str) -> eyre::Result<Option<u64>> {
+        let catalog = Arc::clone(&self.catalog);
+        let job = job.to_string();
+        blocking(move || catalog.cursor(&job)).await
+    }
+
+    async fn commit_chunk(
+        &self,
+        job: &str,
+        next: u64,
+        rows: &[VenueRow],
+        put: Put,
+    ) -> eyre::Result<u64> {
+        let catalog = Arc::clone(&self.catalog);
+        let job = job.to_string();
+        let rows = rows.to_vec();
+        blocking(move || {
+            if let Some(stored) = catalog.cursor(&job)? {
+                if next < stored {
+                    return Err(eyre::eyre!("cursor {job} is {stored}; {next} is below it"));
+                }
+            }
+            catalog.commit_chunk(&job, next, &rows, put)
+        })
+        .await
+    }
+
+    async fn hit_scan(&self, job: &str) -> eyre::Result<Option<u64>> {
+        let catalog = Arc::clone(&self.catalog);
+        let job = job.to_string();
+        blocking(move || catalog.hit_scan(&job)).await
+    }
+
+    async fn hits_from(&self, job: &str, from: u64, to: u64) -> eyre::Result<Vec<u64>> {
+        let catalog = Arc::clone(&self.catalog);
+        let job = job.to_string();
+        blocking(move || catalog.hits_from(&job, from, to)).await
+    }
+
+    async fn commit_hits(&self, job: &str, scanned_to: u64, hits: &[u64]) -> eyre::Result<()> {
+        let catalog = Arc::clone(&self.catalog);
+        let job = job.to_string();
+        let hits = hits.to_vec();
+        blocking(move || catalog.commit_hits(&job, scanned_to, &hits)).await
+    }
+
+    async fn read_bodies(&self, numbers: &[u64]) -> eyre::Result<Vec<Option<ReceiptBody>>> {
+        let catalog = Arc::clone(&self.catalog);
+        let numbers = numbers.to_vec();
+        blocking(move || catalog.read_bodies(&numbers)).await
+    }
+
+    async fn put_bodies(&self, bodies: &[(u64, ReceiptBody)]) -> eyre::Result<()> {
+        let catalog = Arc::clone(&self.catalog);
+        let bodies = bodies.to_vec();
+        blocking(move || catalog.put_bodies(&bodies)).await
+    }
+}
+
+fn short_header_range(seen: u64, from: u64, to: u64) -> eyre::Report {
+    let span = to - from;
+    eyre::eyre!("header chain has {seen} rows for {span} blocks starting at {from}")
+}
+
+async fn blocking<T, F>(work: F) -> eyre::Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> eyre::Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|err| eyre::eyre!("store task: {err}"))?
+}
+
+struct BlockWalk {
+    corpus: Arc<Corpus>,
+    visit: *mut (dyn FnMut(u64, &[u8]) -> eyre::Result<()> + 'static),
+    done: Arc<(Mutex<bool>, Condvar)>,
+}
+
+// SAFETY: the pointer is used on the blocking thread only. `JoinWalk` waits
+// until that use finishes before the caller touches `visit` again.
+unsafe impl Send for BlockWalk {}
+
+impl BlockWalk {
+    fn run(self) -> eyre::Result<()> {
+        // SAFETY: `JoinWalk` waits until this value is dropped, and the caller
+        // keeps `visit` borrowed until that wait finishes.
+        unsafe {
+            let visit = &mut *self.visit;
+            self.corpus
+                .for_each_block(|number, bytes| visit(number, bytes))
+        }
+    }
+}
+
+impl Drop for BlockWalk {
+    fn drop(&mut self) {
+        let (lock, cv) = &*self.done;
+        let mut done = lock.lock().unwrap_or_else(|err| err.into_inner());
+        *done = true;
+        cv.notify_one();
+    }
+}
+
+struct JoinWalk(Arc<(Mutex<bool>, Condvar)>);
+
+impl Drop for JoinWalk {
+    fn drop(&mut self) {
+        let (lock, cv) = &*self.0;
+        let mut done = lock.lock().unwrap_or_else(|err| err.into_inner());
+        while !*done {
+            done = cv.wait(done).unwrap_or_else(|err| err.into_inner());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EntityStore, LocalStore};
+    use alloy_primitives::{address, b256, Address, B256};
+    use model::{BlockRecord, HeaderRecord, MAINNET_GENESIS_HASH};
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use venues::{Put, VenueRow};
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "ratatoskr-store-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn open(dir: &Path) -> LocalStore {
+        LocalStore::open(
+            &dir.join("headers.redb"),
+            &dir.join("corpus.redb"),
+            &dir.join("venues.redb"),
+        )
+        .unwrap()
+    }
+
+    fn header(number: u64, hash: B256, parent: B256) -> HeaderRecord {
+        HeaderRecord {
+            number,
+            hash,
+            parent_hash: parent,
+            timestamp: number,
+            receipts_root: B256::ZERO,
+            logs_bloom: [0; 256],
+        }
+    }
+
+    fn block(number: u64) -> BlockRecord {
+        BlockRecord {
+            number,
+            hash: b256!("1111111111111111111111111111111111111111111111111111111111111111"),
+            parent_hash: b256!("2222222222222222222222222222222222222222222222222222222222222222"),
+            timestamp: 1,
+            receipts_root: B256::ZERO,
+            transactions_root: B256::ZERO,
+            receipts_zstd: vec![1, 2, 3],
+        }
+    }
+
+    fn row() -> VenueRow {
+        VenueRow {
+            kind: 1,
+            id: VenueRow::address_id(address!("1111111111111111111111111111111111111111")),
+            factory: Address::ZERO,
+            tokens: Vec::new(),
+            fee: None,
+            tick_spacing: None,
+            block_number: None,
+            extra: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn write_hole_does_not_move_a_cursor_and_put_meta_does() {
+        let dir = TempDir::new();
+        let store = open(&dir.0);
+        store.put_meta("cursor-range", 4).await.unwrap();
+        store.write_hole(4).await.unwrap();
+        assert_eq!(store.meta("cursor-range").await.unwrap(), Some(4));
+        store.put_meta("cursor-range", 3).await.unwrap();
+        assert_eq!(store.meta("cursor-range").await.unwrap(), Some(3));
+        let mut seen = Vec::new();
+        store
+            .for_each_block(&mut |number, bytes| {
+                seen.push((number, bytes.to_vec()));
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(seen, vec![(4, Vec::new())]);
+    }
+
+    #[tokio::test]
+    async fn put_blocks_does_not_change_a_cursor_key() {
+        let dir = TempDir::new();
+        let store = open(&dir.0);
+        let added = store
+            .write_records("cursor-range", &[block(7)])
+            .await
+            .unwrap();
+        assert!(added > 0);
+        assert_eq!(store.meta("cursor-range").await.unwrap(), Some(8));
+        assert_eq!(store.meta("bytes").await.unwrap(), Some(added));
+        store.put_blocks(&[block(9)]).await.unwrap();
+        assert_eq!(store.meta("cursor-range").await.unwrap(), Some(8));
+        assert_eq!(store.read_block(9).await.unwrap().unwrap().number, 9);
+    }
+
+    #[tokio::test]
+    async fn commit_chunk_rejects_a_next_below_the_stored_cursor() {
+        let dir = TempDir::new();
+        let store = open(&dir.0);
+        let row = row();
+        store
+            .commit_chunk("list", 10, std::slice::from_ref(&row), Put::Merge)
+            .await
+            .unwrap();
+        let err = store
+            .commit_chunk("list", 9, &[row], Put::Merge)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("below"));
+        assert_eq!(store.cursor("list").await.unwrap(), Some(10));
+    }
+
+    #[tokio::test]
+    async fn commit_hits_does_not_move_hit_scan_backward() {
+        let dir = TempDir::new();
+        let store = open(&dir.0);
+        store.commit_hits("logs", 10, &[3, 4]).await.unwrap();
+        store.commit_hits("logs", 8, &[1]).await.unwrap();
+        assert_eq!(store.hit_scan("logs").await.unwrap(), Some(10));
+        assert_eq!(store.hits_from("logs", 0, 10).await.unwrap(), vec![1, 3, 4]);
+    }
+
+    #[tokio::test]
+    async fn for_each_header_errors_when_the_range_is_not_dense() {
+        let dir = TempDir::new();
+        let store = open(&dir.0);
+        let child = b256!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let last = store
+            .append_headers(&[
+                header(0, MAINNET_GENESIS_HASH, B256::ZERO),
+                header(1, child, MAINNET_GENESIS_HASH),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(last.number, 1);
+        assert_eq!(store.header_cursor().await.unwrap(), 2);
+
+        let side = dir.0.join("side.redb");
+        let mut numbers = Vec::new();
+        let seen = store
+            .for_each_header(0, 2, &mut |batch| {
+                numbers.extend(batch.iter().map(|header| header.number));
+                let db = redb::Database::create(&side)?;
+                let txn = db.begin_write()?;
+                txn.commit()?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(seen, 2);
+        assert_eq!(numbers, vec![0, 1]);
+        assert!(side.is_file());
+
+        let mut called = false;
+        let err = store
+            .for_each_header(0, 4, &mut |_| {
+                called = true;
+                Ok(())
+            })
+            .await
+            .unwrap_err();
+        assert!(!called);
+        assert!(err.to_string().contains("header chain has"));
+        assert!(err.to_string().contains("2 rows"));
+
+        let mut called = false;
+        let err = store
+            .for_each_header(3, 1, &mut |_| {
+                called = true;
+                Ok(())
+            })
+            .await
+            .unwrap_err();
+        assert!(!called);
+        assert!(err.to_string().contains("backwards"));
+    }
+}

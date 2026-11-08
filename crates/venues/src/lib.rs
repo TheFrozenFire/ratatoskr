@@ -17,7 +17,7 @@ mod lists;
 mod logs;
 mod rpc;
 
-pub use catalog::{kind_name, Catalog, Put, VenueRow};
+pub use catalog::{kind_name, Catalog, Put, ReceiptBody, VenueRow};
 pub use logs::Walk;
 
 use std::path::PathBuf;

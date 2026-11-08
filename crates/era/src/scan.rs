@@ -187,6 +187,7 @@ async fn fetch_block_logs(
     Ok(blocks)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn enumerate_logs(
     http: &EraHttp,
     mirror: &str,
@@ -228,6 +229,7 @@ fn epoch_file(
         .ok_or_else(|| eyre!("no era1 file for epoch {epoch}; these mirrors stop at the merge"))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn read_epoch(
     http: &EraHttp,
     mirror: &str,
@@ -247,6 +249,7 @@ async fn read_epoch(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn read_file(
     http: &EraHttp,
     mirror: &str,

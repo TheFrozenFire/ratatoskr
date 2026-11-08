@@ -104,7 +104,7 @@ pub async fn ingest_all(catalog: &Catalog, jobs: &[LogJob]) -> eyre::Result<Vec<
                 job.fresh.push(header.number);
             }
         }
-        if scanned % SCAN_FLUSH == 0 {
+        if scanned.is_multiple_of(SCAN_FLUSH) {
             tracing::info!(block = header.number, scanned, "bloom scan");
             flush_hits(catalog, &mut pending, through)?;
         }
@@ -347,7 +347,7 @@ async fn fetch_peer(
             next_span += 1;
             let socket = socket.to_path_buf();
             let filter = job.filter.clone();
-            let corpus = Arc::clone(&corpus);
+            let corpus = Arc::clone(corpus);
             pending.insert(
                 start,
                 tokio::spawn(
