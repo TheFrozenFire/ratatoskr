@@ -52,19 +52,41 @@ pub trait EntityStore: Send + Sync {
     async fn put_bodies(&self, bodies: &[(u64, ReceiptBody)]) -> eyre::Result<()>;
 }
 
+#[derive(Clone)]
 pub struct LocalStore {
     chain: Arc<HeaderChain>,
-    corpus: Arc<Corpus>,
-    catalog: Arc<Catalog>,
+    corpus: Option<Arc<Corpus>>,
+    catalog: Option<Arc<Catalog>>,
 }
 
 impl LocalStore {
     pub fn open(headers: &Path, corpus: &Path, venues: &Path) -> eyre::Result<Self> {
         Ok(Self {
             chain: Arc::new(HeaderChain::create(headers)?),
-            corpus: Arc::new(Corpus::create(corpus)?),
-            catalog: Arc::new(Catalog::open(venues)?),
+            corpus: Some(Arc::new(Corpus::create(corpus)?)),
+            catalog: Some(Arc::new(Catalog::open(venues)?)),
         })
+    }
+
+    /// Header sync runs while other processes may hold the corpus and venue files.
+    pub fn open_headers(headers: &Path) -> eyre::Result<Self> {
+        Ok(Self {
+            chain: Arc::new(HeaderChain::create(headers)?),
+            corpus: None,
+            catalog: None,
+        })
+    }
+
+    fn corpus(&self) -> eyre::Result<Arc<Corpus>> {
+        self.corpus
+            .clone()
+            .ok_or_else(|| eyre::eyre!("corpus is not open"))
+    }
+
+    fn catalog(&self) -> eyre::Result<Arc<Catalog>> {
+        self.catalog
+            .clone()
+            .ok_or_else(|| eyre::eyre!("venues catalog is not open"))
     }
 }
 
@@ -122,36 +144,36 @@ impl EntityStore for LocalStore {
     }
 
     async fn read_block(&self, number: u64) -> eyre::Result<Option<BlockRecord>> {
-        let corpus = Arc::clone(&self.corpus);
+        let corpus = self.corpus()?;
         blocking(move || corpus.read_block(number)).await
     }
 
     async fn put_blocks(&self, records: &[BlockRecord]) -> eyre::Result<u64> {
-        let corpus = Arc::clone(&self.corpus);
+        let corpus = self.corpus()?;
         let records = records.to_vec();
         blocking(move || corpus.put_blocks(&records)).await
     }
 
     async fn write_records(&self, cursor_key: &str, records: &[BlockRecord]) -> eyre::Result<u64> {
-        let corpus = Arc::clone(&self.corpus);
+        let corpus = self.corpus()?;
         let cursor_key = cursor_key.to_string();
         let records = records.to_vec();
         blocking(move || corpus.write_records(&cursor_key, &records)).await
     }
 
     async fn write_hole(&self, number: u64) -> eyre::Result<()> {
-        let corpus = Arc::clone(&self.corpus);
+        let corpus = self.corpus()?;
         blocking(move || corpus.write_hole(number)).await
     }
 
     async fn meta(&self, key: &str) -> eyre::Result<Option<u64>> {
-        let corpus = Arc::clone(&self.corpus);
+        let corpus = self.corpus()?;
         let key = key.to_string();
         blocking(move || corpus.meta(&key)).await
     }
 
     async fn put_meta(&self, key: &str, value: u64) -> eyre::Result<()> {
-        let corpus = Arc::clone(&self.corpus);
+        let corpus = self.corpus()?;
         let key = key.to_string();
         blocking(move || corpus.put_meta(&key, value)).await
     }
@@ -160,7 +182,7 @@ impl EntityStore for LocalStore {
         &self,
         visit: &mut dyn FnMut(u64, &[u8]) -> eyre::Result<()>,
     ) -> eyre::Result<()> {
-        let corpus = Arc::clone(&self.corpus);
+        let corpus = self.corpus()?;
         let rows = blocking(move || {
             let mut rows = Vec::new();
             corpus.for_each_block(|number, bytes| {
@@ -177,7 +199,7 @@ impl EntityStore for LocalStore {
     }
 
     async fn cursor(&self, job: &str) -> eyre::Result<Option<u64>> {
-        let catalog = Arc::clone(&self.catalog);
+        let catalog = self.catalog()?;
         let job = job.to_string();
         blocking(move || catalog.cursor(&job)).await
     }
@@ -189,39 +211,39 @@ impl EntityStore for LocalStore {
         rows: &[VenueRow],
         put: Put,
     ) -> eyre::Result<u64> {
-        let catalog = Arc::clone(&self.catalog);
+        let catalog = self.catalog()?;
         let job = job.to_string();
         let rows = rows.to_vec();
         blocking(move || catalog.commit_chunk(&job, next, &rows, put)).await
     }
 
     async fn hit_scan(&self, job: &str) -> eyre::Result<Option<u64>> {
-        let catalog = Arc::clone(&self.catalog);
+        let catalog = self.catalog()?;
         let job = job.to_string();
         blocking(move || catalog.hit_scan(&job)).await
     }
 
     async fn hits_from(&self, job: &str, from: u64, to: u64) -> eyre::Result<Vec<u64>> {
-        let catalog = Arc::clone(&self.catalog);
+        let catalog = self.catalog()?;
         let job = job.to_string();
         blocking(move || catalog.hits_from(&job, from, to)).await
     }
 
     async fn commit_hits(&self, job: &str, scanned_to: u64, hits: &[u64]) -> eyre::Result<()> {
-        let catalog = Arc::clone(&self.catalog);
+        let catalog = self.catalog()?;
         let job = job.to_string();
         let hits = hits.to_vec();
         blocking(move || catalog.commit_hits(&job, scanned_to, &hits)).await
     }
 
     async fn read_bodies(&self, numbers: &[u64]) -> eyre::Result<Vec<Option<ReceiptBody>>> {
-        let catalog = Arc::clone(&self.catalog);
+        let catalog = self.catalog()?;
         let numbers = numbers.to_vec();
         blocking(move || catalog.read_bodies(&numbers)).await
     }
 
     async fn put_bodies(&self, bodies: &[(u64, ReceiptBody)]) -> eyre::Result<()> {
-        let catalog = Arc::clone(&self.catalog);
+        let catalog = self.catalog()?;
         let bodies = bodies.to_vec();
         blocking(move || catalog.put_bodies(&bodies)).await
     }
@@ -461,5 +483,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(seen, 0);
+    }
+
+    #[tokio::test]
+    async fn open_headers_does_not_open_corpus_or_venues() {
+        let dir = TempDir::new();
+        let headers = dir.0.join("headers.redb");
+        let store = LocalStore::open_headers(&headers).unwrap();
+        assert!(headers.exists());
+        assert!(!dir.0.join("corpus.redb").exists());
+        assert!(!dir.0.join("venues.redb").exists());
+        let err = store.put_blocks(&[]).await.unwrap_err();
+        assert!(err.to_string().contains("corpus is not open"));
+        let err = store.cursor("list").await.unwrap_err();
+        assert!(err.to_string().contains("venues catalog is not open"));
+        assert_eq!(store.header_cursor().await.unwrap(), 0);
     }
 }

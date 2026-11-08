@@ -2256,8 +2256,8 @@ dependencies = [
  "clap",
  "eyre",
  "ipc",
- "model",
- "serde_json",
+ "pipeline",
+ "store",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -3546,6 +3546,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "eyre",
+ "ipc",
  "model",
  "store",
  "tokio",
