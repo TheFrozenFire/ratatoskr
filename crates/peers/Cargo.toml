@@ -12,8 +12,8 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 eyre.workspace = true
-directory.workspace = true
-eth-p2p.workspace = true
+ipc.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
