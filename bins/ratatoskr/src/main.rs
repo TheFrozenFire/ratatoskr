@@ -49,6 +49,10 @@ struct Args {
     /// Print stored state counts for `--data-dir` and exit.
     #[arg(long)]
     summarize: bool,
+    /// Write a curve-fit JSONL extract for `--data-dir` and exit.
+    /// Each pool is quoted at its stored snapshot block.
+    #[arg(long)]
+    export_fit: Option<PathBuf>,
     /// JSON-RPC URL for venue lists. Repeat to rotate.
     #[arg(long)]
     rpc: Vec<String>,
@@ -122,6 +126,9 @@ async fn supervise(args: Args) -> eyre::Result<()> {
     if args.summarize && args.data_dir.is_none() {
         return Err(eyre::eyre!("--summarize needs --data-dir"));
     }
+    if args.export_fit.is_some() && args.data_dir.is_none() {
+        return Err(eyre::eyre!("--export-fit needs --data-dir"));
+    }
     if args.copy_from.is_some() && args.data_dir.is_none() {
         return Err(eyre::eyre!("--copy-from needs --data-dir"));
     }
@@ -142,6 +149,23 @@ async fn supervise(args: Args) -> eyre::Result<()> {
         if !report.anchor {
             tracing::warn!("sample did not include the USDC/WETH 0.3% pool");
         }
+    }
+    if let Some(out) = args.export_fit.clone() {
+        let rpcs = resolve_rpcs(&args.rpc, true)?;
+        let venues_path = paths.venues.clone();
+        let report = tokio::task::spawn_blocking(move || {
+            let rpc = venues::Rpc::new(rpcs)?;
+            let catalog = venues::Catalog::open(&venues_path)?;
+            venues::export_curve_fit(&catalog, &rpc, &out)
+        })
+        .await
+        .wrap_err("fit export task")??;
+        println!("pools {}", report.pools);
+        println!("resumed {}", report.resumed);
+        println!("chain_ok {}", report.chain_ok);
+        println!("chain_fail {}", report.chain_fail);
+        println!("chain_absent {}", report.chain_absent);
+        return Ok(());
     }
     if args.summarize {
         let catalog = venues::Catalog::open(&paths.venues)?;

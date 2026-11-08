@@ -198,6 +198,19 @@ impl Rpc {
         Ok(U256::from_be_slice(&call.bytes))
     }
 
+    /// Byte length of deployed code at `block`. Zero means the account is empty.
+    pub fn code_len(&self, to: Address, block: Option<u64>) -> eyre::Result<usize> {
+        let response = self.exchange("eth_getCode", json!([to.to_string(), block_tag(block)]))?;
+        let Some(text) = response.result.as_ref().and_then(Value::as_str) else {
+            return Err(eyre!("code for {to}"));
+        };
+        let hex = text.strip_prefix("0x").unwrap_or(text);
+        if hex.is_empty() {
+            return Ok(0);
+        }
+        Ok(hex.len() / 2)
+    }
+
     pub fn block_number(&self) -> eyre::Result<u64> {
         let response = self.exchange("eth_blockNumber", json!([]))?;
         let Some(text) = response.result.as_ref().and_then(Value::as_str) else {

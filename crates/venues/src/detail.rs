@@ -882,7 +882,7 @@ fn quote_product(
     )
 }
 
-fn product_fee_pips(kind: u8, raw: Option<u32>) -> u32 {
+pub(crate) fn product_fee_pips(kind: u8, raw: Option<u32>) -> u32 {
     match raw {
         Some(fee) if fee <= 100 => fee.saturating_mul(100),
         Some(fee) if fee <= 1_000_000 => fee,
