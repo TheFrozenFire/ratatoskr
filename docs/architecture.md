@@ -1,12 +1,12 @@
 # Architecture
 
-Two processes own files. The router is a library inside `ratatoskr`, not a third process and not a file owner.
+By default one `ratatoskr` process owns both file sets (`--services db,peer`). `ratatoskr-db` and `ratatoskr-peer` are the split. The router is a library inside `ratatoskr`, not a third process and not a file owner.
 
 ## File owners
 
-The database server owns `headers.redb`, `corpus.redb`, and `venues.redb`. That server is `ratatoskr` with `--services db`, or `ratatoskr-db`.
+The database side owns `headers.redb`, `corpus.redb`, and `venues.redb`. That is `ratatoskr` with `--services db`, or `ratatoskr-db`.
 
-The peer service owns `peers.redb` and is the only dialer.
+The peer side owns `peers.redb` and is the only dialer. That is `ratatoskr` with `--services peer`, or `ratatoskr-peer`.
 
 ## Flock
 
@@ -24,7 +24,13 @@ Sockets are for other processes. Colocated pipelines call `LocalStore` and `Loca
 
 ## Cursor
 
-`Source::run` awaits `Sink::push`. The cursor moves only when the sink returns `Applied`. A rejected push retries the same cursor. `write_hole` does not move a cursor. `put_meta` does.
+Header sync is the path that awaits `Sink::push`. `HeaderSource` moves its cursor only when the sink returns `Applied`. A rejected header push retries the same cursor.
+
+A rejected receipt push fails the run. The supervisor stops the pipelines.
+
+Venue job cursors move inside `commit_chunk`. `VenueSource` does not await `Sink::push`.
+
+`write_hole` does not move a cursor. `put_meta` does.
 
 ## Pipelines
 
