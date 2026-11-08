@@ -5,3 +5,5 @@
 /out
 /cache
 /broadcast
+# Curve-fit extract written by --export-fit.
+/data/
