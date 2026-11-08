@@ -120,7 +120,7 @@ mod tests {
     fn receipt_bundle_roundtrip() {
         let receipt = one_log();
         let decoded =
-            decode_receipt_bundle(&encode_receipt_bundle(&[receipt.clone()])).expect("bundle");
+            decode_receipt_bundle(&encode_receipt_bundle(std::slice::from_ref(&receipt))).expect("bundle");
         assert_eq!(decoded, vec![receipt]);
     }
 }

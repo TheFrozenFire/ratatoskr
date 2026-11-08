@@ -187,7 +187,20 @@ impl Catalog {
 
     /// Bloom hits in `[from, to)`.
     pub fn hits_from(&self, job: &str, from: u64, to: u64) -> eyre::Result<Vec<u64>> {
-        if from >= to {
+        self.hits_from_limit(job, from, to, usize::MAX)
+    }
+
+    /// At most `limit` bloom hits in `[from, to)`, in key order.
+    ///
+    /// The range stops once `limit` rows have been read.
+    pub fn hits_from_limit(
+        &self,
+        job: &str,
+        from: u64,
+        to: u64,
+        limit: usize,
+    ) -> eyre::Result<Vec<u64>> {
+        if from >= to || limit == 0 {
             return Ok(Vec::new());
         }
         let read = self.db.begin_read()?;
@@ -200,6 +213,9 @@ impl Catalog {
         let end = hit_key(job, to);
         let mut hits = Vec::new();
         for item in table.range(start.as_slice()..end.as_slice())? {
+            if hits.len() == limit {
+                break;
+            }
             let (key, _) = item?;
             hits.push(block_of_hit_key(job, key.value())?);
         }
@@ -297,7 +313,7 @@ pub struct ReceiptBody {
 const BODY_VERSION: u8 = 1;
 const BODY_FIXED: usize = 1 + 32 + 32 + 8 + 32;
 
-fn encode_body(body: &ReceiptBody) -> Vec<u8> {
+pub fn encode_body(body: &ReceiptBody) -> Vec<u8> {
     let mut out = Vec::with_capacity(BODY_FIXED + body.payload.len());
     out.push(BODY_VERSION);
     out.extend_from_slice(body.hash.as_slice());
@@ -308,7 +324,7 @@ fn encode_body(body: &ReceiptBody) -> Vec<u8> {
     out
 }
 
-fn decode_body(bytes: &[u8]) -> eyre::Result<ReceiptBody> {
+pub fn decode_body(bytes: &[u8]) -> eyre::Result<ReceiptBody> {
     if bytes.len() < BODY_FIXED || bytes[0] != BODY_VERSION {
         return Err(eyre::eyre!("receipt body header"));
     }

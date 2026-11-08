@@ -18,7 +18,10 @@ mod lists;
 mod logs;
 mod rpc;
 
-pub use catalog::{kind_name, Catalog, Put, ReceiptBody, VenueRow};
+pub use catalog::{
+    decode_body, decode_row, encode_body, encode_row, kind_name, Catalog, Put, ReceiptBody,
+    VenueRow,
+};
 pub use entity::EntityStore;
 pub use history::BloomScan;
 pub use logs::Walk;

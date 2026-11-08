@@ -10,6 +10,7 @@ members = [
     "crates/corpus",
     "crates/store",
     "crates/pipeline",
+    "crates/api",
     "crates/directory",
     "crates/ipc",
     "crates/univ3",
@@ -19,6 +20,7 @@ members = [
     "crates/ingest",
     "crates/headers",
     "crates/peers",
+    "bins/db",
     "bins/era",
     "bins/univ3",
     "bins/venues",
@@ -38,6 +40,7 @@ clap = { version = "4", features = ["derive"] }
 eyre = "0.6"
 futures = "0.3"
 rand = "0.8"
+api = { path = "crates/api" }
 chain = { path = "crates/chain" }
 corpus = { path = "crates/corpus" }
 store = { path = "crates/store" }

@@ -13,6 +13,11 @@ use std::path::Path;
 use std::sync::Arc;
 use venues::{Catalog, Put, ReceiptBody, VenueRow};
 
+mod remote;
+mod serve;
+
+pub use remote::RemoteStore;
+pub use serve::serve;
 pub use venues::EntityStore;
 
 const HEADER_BATCH: u64 = 8192;
@@ -100,6 +105,27 @@ impl LocalStore {
         self.catalog
             .clone()
             .ok_or_else(|| eyre::eyre!("venues are not open"))
+    }
+
+    pub(crate) async fn page_blocks(
+        &self,
+        after: Option<u64>,
+        limit: usize,
+    ) -> eyre::Result<Vec<(u64, Vec<u8>)>> {
+        let corpus = self.corpus_db()?;
+        blocking(move || corpus.page_blocks(after, limit)).await
+    }
+
+    pub(crate) async fn hits_page(
+        &self,
+        job: &str,
+        from: u64,
+        to: u64,
+        limit: usize,
+    ) -> eyre::Result<Vec<u64>> {
+        let catalog = self.catalog_db()?;
+        let job = job.to_string();
+        blocking(move || catalog.hits_from_limit(&job, from, to, limit)).await
     }
 }
 
@@ -280,7 +306,7 @@ impl EntityStore for LocalStore {
     }
 }
 
-fn short_header_range(seen: u64, from: u64, to: u64) -> eyre::Report {
+pub(crate) fn short_header_range(seen: u64, from: u64, to: u64) -> eyre::Report {
     let span = to - from;
     eyre::eyre!("header chain has {seen} rows for {span} blocks starting at {from}")
 }
@@ -297,11 +323,13 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{EntityStore, LocalStore};
+    use super::{serve, EntityStore, LocalStore, RemoteStore};
     use alloy_primitives::{address, b256, Address, B256};
-    use model::{BlockRecord, HeaderRecord, MAINNET_GENESIS_HASH};
+    use model::{encode_block_record, BlockRecord, HeaderRecord, MAINNET_GENESIS_HASH};
+    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
     use venues::{Put, VenueRow};
 
@@ -586,5 +614,186 @@ mod tests {
         let err = store.cursor("list").await.unwrap_err();
         assert!(err.to_string().contains("venues are not open"));
         assert_eq!(store.header_cursor().await.unwrap(), 0);
+    }
+
+    struct Serving {
+        _dir: TempDir,
+        socket: PathBuf,
+        cancel: Option<tokio::sync::oneshot::Sender<()>>,
+        thread: Option<std::thread::JoinHandle<()>>,
+        remote: RemoteStore,
+    }
+
+    impl Serving {
+        async fn start() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let dir = TempDir::new();
+            let n = NEXT.fetch_add(1, Ordering::Relaxed);
+            let socket = std::env::temp_dir().join(format!("rsk-{}-{n}.sock", std::process::id()));
+            let _ = std::fs::remove_file(&socket);
+            std::fs::write(&socket, b"stale").unwrap();
+            let store = Arc::new(open(&dir.0));
+            let path = socket.clone();
+            let (cancel, cancel_rx) = tokio::sync::oneshot::channel();
+            let thread = std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("runtime");
+                runtime.block_on(async move {
+                    tokio::select! {
+                        result = serve(store, &path) => result.expect("serve"),
+                        _ = cancel_rx => {}
+                    }
+                });
+            });
+            let mut ready = false;
+            for _ in 0..100 {
+                if tokio::net::UnixStream::connect(&socket).await.is_ok() {
+                    ready = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert!(ready, "serve did not bind");
+            let mut mode = 0;
+            for _ in 0..50 {
+                mode = std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777;
+                if mode == 0o600 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert_eq!(mode, 0o600);
+            let remote = RemoteStore::new(&socket);
+            Self {
+                _dir: dir,
+                socket,
+                cancel: Some(cancel),
+                thread: Some(thread),
+                remote,
+            }
+        }
+    }
+
+    impl Drop for Serving {
+        fn drop(&mut self) {
+            if let Some(cancel) = self.cancel.take() {
+                let _ = cancel.send(());
+            }
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+            let _ = std::fs::remove_file(&self.socket);
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_append_rejects_a_bad_parent() {
+        let serving = Serving::start().await;
+        let genesis = header(0, MAINNET_GENESIS_HASH, B256::ZERO);
+        let stored = serving
+            .remote
+            .append_headers(std::slice::from_ref(&genesis))
+            .await
+            .unwrap();
+        assert_eq!(stored, genesis);
+        assert_eq!(serving.remote.header_cursor().await.unwrap(), 1);
+        let bad = header(
+            1,
+            b256!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            b256!("1111111111111111111111111111111111111111111111111111111111111111"),
+        );
+        let err = serving.remote.append_headers(&[bad]).await.unwrap_err();
+        assert!(err.to_string().contains("parent does not match"));
+        assert_eq!(serving.remote.header_cursor().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn remote_commit_chunk_rejects_a_next_below_the_stored_cursor() {
+        let serving = Serving::start().await;
+        let row = row();
+        serving
+            .remote
+            .commit_chunk("list", 10, std::slice::from_ref(&row), Put::Merge)
+            .await
+            .unwrap();
+        let err = serving
+            .remote
+            .commit_chunk("list", 9, &[row], Put::Merge)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("below"));
+        assert_eq!(serving.remote.cursor("list").await.unwrap(), Some(10));
+    }
+
+    #[tokio::test]
+    async fn remote_put_blocks_does_not_change_a_cursor_key() {
+        let serving = Serving::start().await;
+        let added = serving
+            .remote
+            .write_records("cursor-range", &[block(7)])
+            .await
+            .unwrap();
+        assert!(added > 0);
+        assert_eq!(serving.remote.meta("cursor-range").await.unwrap(), Some(8));
+        assert_eq!(serving.remote.meta("bytes").await.unwrap(), Some(added));
+        serving.remote.put_blocks(&[block(9)]).await.unwrap();
+        assert_eq!(serving.remote.meta("cursor-range").await.unwrap(), Some(8));
+        assert_eq!(
+            serving.remote.read_block(9).await.unwrap().unwrap().number,
+            9
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_put_meta_round_trip() {
+        let serving = Serving::start().await;
+        serving.remote.put_meta("cursor-range", 4).await.unwrap();
+        assert_eq!(serving.remote.meta("cursor-range").await.unwrap(), Some(4));
+        serving.remote.put_meta("cursor-range", 3).await.unwrap();
+        assert_eq!(serving.remote.meta("cursor-range").await.unwrap(), Some(3));
+    }
+
+    #[tokio::test]
+    async fn remote_scan_yields_a_body_and_a_hole_in_key_order() {
+        let serving = Serving::start().await;
+        let stored = block(7);
+        serving
+            .remote
+            .put_blocks(std::slice::from_ref(&stored))
+            .await
+            .unwrap();
+        serving.remote.write_hole(4).await.unwrap();
+        let mut seen = Vec::new();
+        serving
+            .remote
+            .for_each_block(&mut |number, bytes| {
+                seen.push((number, bytes.to_vec()));
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            seen,
+            vec![(4, Vec::new()), (7, encode_block_record(&stored))]
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_scan_resumes_after_a_full_page() {
+        let serving = Serving::start().await;
+        let records: Vec<_> = (0..70).map(block).collect();
+        serving.remote.put_blocks(&records).await.unwrap();
+        let mut numbers = Vec::new();
+        serving
+            .remote
+            .for_each_block(&mut |number, _bytes| {
+                numbers.push(number);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(numbers, (0..70).collect::<Vec<_>>());
     }
 }
