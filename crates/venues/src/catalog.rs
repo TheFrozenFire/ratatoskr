@@ -17,6 +17,7 @@ use redb::{Database, Durability, ReadableTable, TableDefinition};
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 pub(crate) const VENUES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("venues");
 const CURSORS: TableDefinition<&str, u64> = TableDefinition::new("cursors");
@@ -820,6 +821,222 @@ impl Catalog {
     }
 }
 
+/// How many identities a sample copied, by kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SampleReport {
+    pub copied: u64,
+    pub by_kind: BTreeMap<u8, u64>,
+    /// The USDC/WETH 0.3% pool was in the source and is in the copy.
+    pub anchor: bool,
+}
+
+/// Copy a varied subset of identities from `src` into the catalog at `dest`.
+///
+/// `src` is opened as a plain redb file. This does not migrate it. The live
+/// `venues.redb` and the live catalog directory are refused.
+pub fn sample_identities(src: &Path, dest: &Path, target: u64) -> eyre::Result<SampleReport> {
+    if target == 0 {
+        return Err(eyre::eyre!("sample target is 0"));
+    }
+    refuse_live_file(src)?;
+    let dest_dir = catalog_dir(dest);
+    std::fs::create_dir_all(&dest_dir)?;
+    let src_dir = src.parent().unwrap_or_else(|| Path::new("."));
+    if dirs_equal(src_dir, &dest_dir)? {
+        return Err(eyre::eyre!(
+            "sample source and destination are the same directory"
+        ));
+    }
+    refuse_live_dir(&dest_dir)?;
+    let source = Database::open(src).wrap_err("open identity source")?;
+    let counts = count_identities(&source)?;
+    let plan = allocate_sample(&counts, target);
+    let catalog = Catalog::open(&dest_dir)?;
+    let anchor = anchor_id();
+    let read = source.begin_read()?;
+    let table = read.open_table(VENUES).wrap_err("identity table")?;
+    let mut copied = 0_u64;
+    let mut by_kind = BTreeMap::new();
+    let mut found_anchor = false;
+    for (kind, want) in plan {
+        if want == 0 {
+            continue;
+        }
+        let count = counts.get(&kind).copied().unwrap_or(0);
+        let step = (count / want).max(1);
+        tracing::info!(kind = kind_name(kind), count, want, step, "sampling kind");
+        let start_key = key(kind, &B256::ZERO);
+        let mut end_key = [0u8; 33];
+        let end = if kind == u8::MAX {
+            Bound::Unbounded
+        } else {
+            end_key[0] = kind + 1;
+            Bound::Excluded(end_key.as_slice())
+        };
+        let mut picked = 0_u64;
+        let mut wrote = 0_u64;
+        let mut chunk = Vec::new();
+        for (index, item) in table
+            .range::<&[u8]>((Bound::Included(start_key.as_slice()), end))?
+            .enumerate()
+        {
+            let index = index as u64;
+            let (key_bytes, value) = item?;
+            let key_bytes = key_bytes.value();
+            if key_bytes.len() != 33 || key_bytes[0] != kind {
+                return Err(eyre::eyre!("venue key"));
+            }
+            let id = B256::from_slice(&key_bytes[1..]);
+            let is_anchor = kind == UNI_V3 && id == anchor;
+            let on_stride = picked < want && index.is_multiple_of(step);
+            if !on_stride && !is_anchor {
+                continue;
+            }
+            if !is_anchor && picked >= want {
+                continue;
+            }
+            let row = decode_row(kind, id, value.value())?;
+            if is_anchor {
+                found_anchor = true;
+            }
+            picked += 1;
+            chunk.push(row);
+            if chunk.len() == 512 {
+                wrote += write_identities(&catalog.entities, &chunk, Put::IfAbsent)?;
+                chunk.clear();
+            }
+            if picked >= want && (kind != UNI_V3 || found_anchor) {
+                break;
+            }
+        }
+        if !chunk.is_empty() {
+            wrote += write_identities(&catalog.entities, &chunk, Put::IfAbsent)?;
+        }
+        if wrote > 0 {
+            by_kind.insert(kind, wrote);
+            copied += wrote;
+        }
+    }
+    Ok(SampleReport {
+        copied,
+        by_kind,
+        anchor: found_anchor,
+    })
+}
+
+/// Take small kinds whole, then split whatever remains across the large ones.
+fn allocate_sample(counts: &BTreeMap<u8, u64>, target: u64) -> BTreeMap<u8, u64> {
+    if target == 0 || counts.is_empty() {
+        return BTreeMap::new();
+    }
+    let min_each = (target / counts.len() as u64 / 2).max(1);
+    let mut ordered: Vec<(u8, u64)> = counts.iter().map(|(kind, count)| (*kind, *count)).collect();
+    ordered.sort_by_key(|(_, count)| *count);
+    let mut take = BTreeMap::new();
+    let mut used = 0_u64;
+    let mut large = Vec::new();
+    for (index, (kind, count)) in ordered.iter().copied().enumerate() {
+        let remaining = (ordered.len() - index - 1) as u64;
+        let room_after = target.saturating_sub(used).saturating_sub(count);
+        let need = min_each.saturating_mul(remaining);
+        if count > 0 && room_after >= need && used.saturating_add(count) <= target {
+            take.insert(kind, count);
+            used += count;
+        } else if count > 0 {
+            large.push((kind, count));
+        }
+    }
+    let mut left = target.saturating_sub(used);
+    while left > 0 {
+        let open: Vec<usize> = large
+            .iter()
+            .enumerate()
+            .filter(|(_, (kind, count))| take.get(kind).copied().unwrap_or(0) < *count)
+            .map(|(index, _)| index)
+            .collect();
+        if open.is_empty() {
+            break;
+        }
+        let share = (left / open.len() as u64).max(1);
+        let mut progressed = false;
+        for index in open {
+            if left == 0 {
+                break;
+            }
+            let (kind, count) = large[index];
+            let have = take.get(&kind).copied().unwrap_or(0);
+            let add = share.min(count - have).min(left);
+            if add > 0 {
+                take.insert(kind, have + add);
+                left -= add;
+                progressed = true;
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    take
+}
+
+fn count_identities(db: &Database) -> eyre::Result<BTreeMap<u8, u64>> {
+    let read = db.begin_read()?;
+    let table = match read.open_table(VENUES) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(BTreeMap::new()),
+        Err(err) => return Err(err.into()),
+    };
+    let mut counts = BTreeMap::new();
+    for (seen, item) in table.iter()?.enumerate() {
+        if seen.is_multiple_of(100_000) {
+            tracing::info!(seen, "counting identities");
+        }
+        let (key, _) = item?;
+        let key = key.value();
+        if key.len() != 33 {
+            return Err(eyre::eyre!("venue key"));
+        }
+        *counts.entry(key[0]).or_default() += 1;
+    }
+    tracing::info!(rows = counts.values().sum::<u64>(), "counted identities");
+    Ok(counts)
+}
+
+fn anchor_id() -> B256 {
+    let address = Address::from_str("8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8").expect("anchor");
+    VenueRow::address_id(address)
+}
+
+fn live_share_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    PathBuf::from(home).join(".local/share/ratatoskr")
+}
+
+fn dirs_equal(left: &Path, right: &Path) -> eyre::Result<bool> {
+    if !left.exists() || !right.exists() {
+        return Ok(false);
+    }
+    Ok(std::fs::canonicalize(left)? == std::fs::canonicalize(right)?)
+}
+
+fn refuse_live_dir(dir: &Path) -> eyre::Result<()> {
+    if dirs_equal(dir, &live_share_dir())? {
+        return Err(eyre::eyre!("refusing to write the live catalog"));
+    }
+    Ok(())
+}
+
+fn refuse_live_file(path: &Path) -> eyre::Result<()> {
+    let live = live_share_dir().join("venues.redb");
+    if path.exists()
+        && live.exists()
+        && std::fs::canonicalize(path)? == std::fs::canonicalize(&live)?
+    {
+        return Err(eyre::eyre!("refusing to open the live venues.redb"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1072,5 +1289,104 @@ mod tests {
         drop(again);
         let _ = Catalog::open(&dir.0).unwrap();
         assert_eq!(std::fs::read(&untouched).unwrap(), b"leave-me");
+    }
+
+    #[test]
+    fn sample_takes_small_kinds_and_a_stride_of_the_large_one() {
+        let src_dir = TempDir::new();
+        let src = src_dir.0.join("venues.redb");
+        let db = Database::create(&src).unwrap();
+        {
+            let write = db.begin_write().unwrap();
+            {
+                let mut venues = write.open_table(VENUES).unwrap();
+                for index in 0..30_u8 {
+                    let mut row = sample();
+                    row.kind = if index < 5 { V3_FORK } else { UNI_V2 };
+                    row.id[31] = index;
+                    let bytes = encode_row(&row).unwrap();
+                    venues
+                        .insert(row.key().as_slice(), bytes.as_slice())
+                        .unwrap();
+                }
+            }
+            write.commit().unwrap();
+        }
+        drop(db);
+        let dest = TempDir::new();
+        let report = sample_identities(&src, &dest.0, 10).unwrap();
+        assert_eq!(report.copied, 10);
+        assert_eq!(report.by_kind.get(&V3_FORK).copied(), Some(5));
+        assert_eq!(report.by_kind.get(&UNI_V2).copied(), Some(5));
+        assert!(src.exists());
+        assert!(!src_dir.0.join("entities.redb").exists());
+        assert!(dest.0.join("entities.redb").exists());
+        let catalog = Catalog::open(&dest.0).unwrap();
+        assert_eq!(catalog.page_venues(V3_FORK, None, 10).unwrap().len(), 5);
+    }
+
+    #[test]
+    fn sample_keeps_the_anchor_pool_off_the_stride() {
+        let src_dir = TempDir::new();
+        let src = src_dir.0.join("venues.redb");
+        let db = Database::create(&src).unwrap();
+        {
+            let write = db.begin_write().unwrap();
+            {
+                let mut venues = write.open_table(VENUES).unwrap();
+                for index in 0..20_u8 {
+                    let mut row = sample();
+                    row.kind = UNI_V3;
+                    row.id[31] = index;
+                    if index == 19 {
+                        row.id = anchor_id();
+                    }
+                    let bytes = encode_row(&row).unwrap();
+                    venues
+                        .insert(row.key().as_slice(), bytes.as_slice())
+                        .unwrap();
+                }
+            }
+            write.commit().unwrap();
+        }
+        drop(db);
+        let dest = TempDir::new();
+        let report = sample_identities(&src, &dest.0, 3).unwrap();
+        assert!(report.anchor);
+        assert!(report.copied >= 3);
+        let catalog = Catalog::open(&dest.0).unwrap();
+        let rows = catalog.page_venues(UNI_V3, None, 10).unwrap();
+        assert!(rows.iter().any(|row| row.id == anchor_id()));
+    }
+
+    #[test]
+    fn allocate_covers_every_live_kind_near_ten_thousand() {
+        let counts = [
+            (1_u8, 527_256_u64),
+            (2, 4_818),
+            (3, 8_110),
+            (4, 212),
+            (5, 48_693),
+            (6, 1_498),
+            (7, 253),
+            (8, 12),
+            (9, 102),
+            (10, 192_676),
+            (11, 334),
+            (12, 253),
+            (13, 2_501),
+            (14, 190),
+        ]
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+        let plan = allocate_sample(&counts, 10_000);
+        let total: u64 = plan.values().sum();
+        assert_eq!(total, 10_000);
+        for kind in [4_u8, 6, 7, 8, 9, 11, 12, 13, 14] {
+            assert_eq!(plan.get(&kind).copied(), counts.get(&kind).copied());
+        }
+        for kind in [1_u8, 2, 3, 5, 10] {
+            assert!(plan.get(&kind).copied().unwrap_or(0) >= 400, "{plan:?}");
+        }
     }
 }

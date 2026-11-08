@@ -45,6 +45,8 @@ fn main() -> eyre::Result<ExitCode> {
         no_corpus: args.no_corpus,
         corpus_available: !args.no_corpus,
         phase: RunPhase::All,
+        pin_block: None,
+        until_idle: false,
     };
 
     let runtime = tokio::runtime::Builder::new_multi_thread()

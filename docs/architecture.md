@@ -32,7 +32,7 @@ Venue job cursors move inside `commit_chunk`. `VenueSource` does not await `Sink
 
 ## Pipelines
 
-Default pipelines are header sync and venue enumeration. The 10 GiB receipt walk is `--pipeline receipts` and is off by default. Pool state is `--pipeline state` and is off by default. It is not part of `RunPhase::All`. Spike is not started by the supervisor.
+Default pipelines are header sync and venue enumeration. The 10 GiB receipt walk is `--pipeline receipts` and is off by default. Pool state is `--pipeline state` and is off by default. It is not part of `RunPhase::All`. `state` requires `--data-dir` and does not open the live catalog. `--copy-from` copies a stratified identity sample into that directory first. Spike is not started by the supervisor.
 
 ## Venue rows
 

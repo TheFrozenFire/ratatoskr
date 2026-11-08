@@ -6,7 +6,7 @@ use eyre::WrapErr;
 use peer::LocalPeer;
 use pipeline::{HeaderSource, ReceiptSource, Source, StoreSink, VenueSource};
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use store::LocalStore;
 use tokio::sync::watch;
@@ -28,8 +28,27 @@ struct Args {
     services: String,
     /// Comma-separated pipelines: `headers`, `venues`, `receipts`, `state`.
     /// Default is `headers,venues`. `receipts` and `state` run only when named.
+    /// `state` requires `--data-dir` and does not open the live catalog.
     #[arg(long, default_value = "headers,venues")]
     pipeline: String,
+    /// Catalog directory for this process. Required for `state`.
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+    /// Copy a stratified identity sample from this redb file into `--data-dir`.
+    #[arg(long)]
+    copy_from: Option<PathBuf>,
+    /// Identities to copy with `--copy-from`. Default is 10000.
+    #[arg(long, default_value_t = 10_000)]
+    sample_size: u64,
+    /// Block tag for state reads. Default is the header cursor, or the RPC head.
+    #[arg(long)]
+    pin_block: Option<u64>,
+    /// Exit the state pipeline once nothing is left to claim.
+    #[arg(long)]
+    until_idle: bool,
+    /// Print stored state counts for `--data-dir` and exit.
+    #[arg(long)]
+    summarize: bool,
     /// JSON-RPC URL for venue lists. Repeat to rotate.
     #[arg(long)]
     rpc: Vec<String>,
@@ -95,7 +114,54 @@ async fn supervise(args: Args) -> eyre::Result<()> {
     let pipelines = parse_pipelines(&args.pipeline)?;
     let egress = egress_from(args.bind4, args.bind6)?;
     check_combination(&services, &pipelines)?;
-    let paths = default_paths()?;
+    if pipelines.state && args.data_dir.is_none() {
+        return Err(eyre::eyre!(
+            "state needs --data-dir and does not open the live catalog"
+        ));
+    }
+    if args.summarize && args.data_dir.is_none() {
+        return Err(eyre::eyre!("--summarize needs --data-dir"));
+    }
+    if args.copy_from.is_some() && args.data_dir.is_none() {
+        return Err(eyre::eyre!("--copy-from needs --data-dir"));
+    }
+    if let Some(dir) = &args.data_dir {
+        refuse_live(dir)?;
+    }
+    let paths = paths_from(args.data_dir.as_deref())?;
+    if let Some(src) = &args.copy_from {
+        let report = venues::sample_identities(src, &paths.venues, args.sample_size)?;
+        tracing::info!(
+            copied = report.copied,
+            anchor = report.anchor,
+            "identity sample"
+        );
+        for (kind, count) in &report.by_kind {
+            tracing::info!(kind = venues::kind_name(*kind), count, "sample kind");
+        }
+        if !report.anchor {
+            tracing::warn!("sample did not include the USDC/WETH 0.3% pool");
+        }
+    }
+    if args.summarize {
+        let catalog = venues::Catalog::open(&paths.venues)?;
+        let summary = catalog.state_summary()?;
+        println!("identities {}", summary.identities);
+        println!("immutable {}", summary.immutable);
+        println!("mutable {}", summary.mutable);
+        println!("curves {}", summary.curves);
+        println!("tick_pages {}", summary.tick_pages);
+        println!("mismatches {}", summary.mismatches);
+        println!("jobs {}", summary.jobs);
+        for (stage, count) in &summary.jobs_by_stage {
+            println!("jobs stage {stage} {count}");
+        }
+        for (error, count) in &summary.errors {
+            println!("error {count} {error}");
+        }
+        return Ok(());
+    }
+    let rpcs = resolve_rpcs(&args.rpc, pipelines.state)?;
     let mut owned = open_owned(&services, &pipelines, &paths)?;
     let local = owned.peer.as_ref().map(peer::OpenedPeer::local);
     let prepared = match owned.peer.take() {
@@ -148,11 +214,13 @@ async fn supervise(args: Args) -> eyre::Result<()> {
         })
     });
     let opts = RunOpts {
-        rpcs: args.rpc,
+        rpcs,
         only: args.only,
         no_corpus: args.no_corpus,
         corpus_available: !args.no_corpus,
         phase: RunPhase::All,
+        pin_block: args.pin_block,
+        until_idle: args.until_idle,
     };
     let pipelines_started =
         pipelines.headers || pipelines.venues || pipelines.receipts || pipelines.state;
@@ -473,6 +541,71 @@ fn default_paths() -> eyre::Result<Paths> {
     })
 }
 
+fn paths_from(data_dir: Option<&Path>) -> eyre::Result<Paths> {
+    let Some(dir) = data_dir else {
+        return default_paths();
+    };
+    Ok(Paths {
+        peers: dir.join("peers.redb"),
+        headers: dir.join("headers.redb"),
+        corpus: dir.join("corpus.redb"),
+        venues: dir.join("entities.redb"),
+        peer_socket: dir.join("peer.sock"),
+        db_socket: dir.join("db.sock"),
+    })
+}
+
+fn live_share() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    PathBuf::from(home).join(".local/share/ratatoskr")
+}
+
+fn refuse_live(dir: &Path) -> eyre::Result<()> {
+    let live = live_share();
+    if dir == live {
+        return Err(eyre::eyre!("refusing to open the live catalog"));
+    }
+    if dir.exists() && live.exists() && std::fs::canonicalize(dir)? == std::fs::canonicalize(&live)?
+    {
+        return Err(eyre::eyre!("refusing to open the live catalog"));
+    }
+    Ok(())
+}
+
+fn resolve_rpcs(given: &[String], state: bool) -> eyre::Result<Vec<String>> {
+    if !given.is_empty() {
+        return Ok(given.to_vec());
+    }
+    if !state {
+        return Ok(Vec::new());
+    }
+    let Some(key) = alchemy_key() else {
+        return Err(eyre::eyre!("state needs --rpc or ALCHEMY_API_KEY"));
+    };
+    tracing::info!("state rpc is the alchemy endpoint");
+    Ok(vec![format!("https://eth-mainnet.g.alchemy.com/v2/{key}")])
+}
+
+fn alchemy_key() -> Option<String> {
+    if let Ok(key) = std::env::var("ALCHEMY_API_KEY") {
+        let key = key.trim().trim_matches('"').to_string();
+        if !key.is_empty() {
+            return Some(key);
+        }
+    }
+    let text = std::fs::read_to_string(".env").ok()?;
+    for line in text.lines() {
+        let Some(rest) = line.strip_prefix("ALCHEMY_API_KEY=") else {
+            continue;
+        };
+        let key = rest.trim().trim_matches('"').to_string();
+        if !key.is_empty() {
+            return Some(key);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,6 +702,16 @@ mod tests {
         assert!(!parse_pipelines("headers,venues").unwrap().receipts);
         assert!(!parse_pipelines("headers,venues").unwrap().state);
         assert!(parse_pipelines("state").unwrap().state);
+    }
+
+    #[test]
+    fn data_dir_paths_stay_inside_that_directory() {
+        let dir = TempDir::new();
+        let paths = paths_from(Some(&dir.0)).unwrap();
+        assert_eq!(paths.venues, dir.0.join("entities.redb"));
+        assert_eq!(paths.headers, dir.0.join("headers.redb"));
+        assert_eq!(paths.db_socket, dir.0.join("db.sock"));
+        assert!(refuse_live(&dir.0).is_ok());
     }
 
     #[test]

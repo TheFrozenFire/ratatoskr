@@ -176,6 +176,20 @@ pub struct WorkFail {
     pub error: String,
 }
 
+/// Counts for a sample catalog after a state pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StateSummary {
+    pub identities: u64,
+    pub immutable: u64,
+    pub mutable: u64,
+    pub curves: u64,
+    pub tick_pages: u64,
+    pub mismatches: u64,
+    pub jobs: u64,
+    pub jobs_by_stage: BTreeMap<u8, u64>,
+    pub errors: BTreeMap<String, u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PoolState {
     pub venue: Option<VenueRow>,
@@ -494,6 +508,34 @@ pub fn classify_log(
 }
 
 impl Catalog {
+    pub fn state_summary(&self) -> eyre::Result<StateSummary> {
+        let mut summary = StateSummary {
+            identities: count_bytes(&self.entities, VENUES)?,
+            immutable: count_bytes(&self.entities, IMMUTABLE)?,
+            mutable: count_bytes(&self.entities, MUTABLE)?,
+            curves: count_bytes(&self.entities, CURVES)?,
+            tick_pages: count_bytes(&self.entities, TICK_PAGES)?,
+            mismatches: count_bytes(&self.entities, MISMATCH)?,
+            ..StateSummary::default()
+        };
+        let read = self.work.begin_read()?;
+        let table = match read.open_table(JOBS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(summary),
+            Err(err) => return Err(err.into()),
+        };
+        for item in table.iter()? {
+            let (key, value) = item?;
+            let job = decode_job(key.value(), value.value())?;
+            summary.jobs += 1;
+            *summary.jobs_by_stage.entry(job.stage).or_default() += 1;
+            if !job.error.is_empty() {
+                *summary.errors.entry(job.error).or_default() += 1;
+            }
+        }
+        Ok(summary)
+    }
+
     pub fn read_venue(&self, kind: u8, id: B256) -> eyre::Result<Option<VenueRow>> {
         let read = self.entities.begin_read()?;
         let table = match read.open_table(VENUES) {
@@ -948,6 +990,22 @@ where
         opts.rpcs.clone()
     };
     let rpc = Rpc::new(urls)?;
+    let block = match opts.pin_block {
+        Some(pin) => pin,
+        None => match store.header_cursor().await? {
+            cursor if cursor > 0 => cursor - 1,
+            _ => {
+                let rpc = rpc.clone();
+                tokio::task::spawn_blocking(move || rpc.block_number())
+                    .await
+                    .wrap_err("block number task")??
+            }
+        },
+    };
+    tracing::info!(block, "state block");
+    let give_up_after = if opts.until_idle { 4 } else { 0 };
+    let mut quiet = 0_u32;
+    let mut batches = 0_u64;
     loop {
         if *stop.borrow() {
             return Ok(report);
@@ -969,23 +1027,31 @@ where
         if *stop.borrow() {
             return Ok(report);
         }
-        let now = unix_now();
-        let block = match store.header_cursor().await {
-            Ok(cursor) if cursor > 0 => Some(cursor - 1),
-            Ok(_) => None,
-            Err(err) => {
-                report.notes.push(format!("state: {err:#}"));
+        let mut notes = Vec::new();
+        let worked = drive_one(store, &rpc, block, unix_now(), give_up_after, &mut notes).await?;
+        report.notes.extend(notes);
+        if worked {
+            quiet = 0;
+            batches += 1;
+            if batches.is_multiple_of(25) {
+                tracing::info!(batches, "state progress");
+            }
+            continue;
+        }
+        if opts.until_idle {
+            quiet += 1;
+            if quiet >= 2 {
+                report.notes.push("state idle".into());
+                tracing::info!(batches, "state idle");
                 return Ok(report);
             }
-        };
-        let Some(block) = block else {
-            sleep_or_stop(&mut stop).await;
+            tokio::select! {
+                _ = stop.changed() => {}
+                _ = tokio::time::sleep(Duration::from_secs(RETRY_SECS + 5)) => {}
+            }
             continue;
-        };
-        let worked = drive_one(store, &rpc, block, now).await?;
-        if !worked {
-            sleep_or_stop(&mut stop).await;
         }
+        sleep_or_stop(&mut stop).await;
     }
 }
 
@@ -1001,6 +1067,8 @@ async fn drive_one<S: EntityStore>(
     rpc: &Rpc,
     block: u64,
     now: u64,
+    give_up_after: u32,
+    notes: &mut Vec<String>,
 ) -> eyre::Result<bool> {
     for stage in [STAGE_IMMUTABLE, STAGE_MUTABLE, STAGE_TICKS, STAGE_CURVE] {
         let jobs = store
@@ -1009,14 +1077,21 @@ async fn drive_one<S: EntityStore>(
         if jobs.is_empty() {
             continue;
         }
+        let started = std::time::Instant::now();
         match stage {
             STAGE_IMMUTABLE | STAGE_MUTABLE => {
-                drive_details(store, rpc, block, stage, &jobs).await?
+                drive_details(store, rpc, block, stage, &jobs, give_up_after, notes).await?
             }
-            STAGE_TICKS => drive_ticks(store, rpc, &jobs, now).await?,
-            STAGE_CURVE => drive_curves(store, &jobs).await?,
+            STAGE_TICKS => drive_ticks(store, rpc, &jobs, now, give_up_after, notes).await?,
+            STAGE_CURVE => drive_curves(store, &jobs, give_up_after, notes).await?,
             _ => {}
         }
+        tracing::info!(
+            stage,
+            jobs = jobs.len(),
+            ms = started.elapsed().as_millis() as u64,
+            "state batch"
+        );
         return Ok(true);
     }
     Ok(false)
@@ -1028,6 +1103,8 @@ async fn drive_details<S: EntityStore>(
     block: u64,
     stage: u8,
     jobs: &[WorkJob],
+    give_up_after: u32,
+    notes: &mut Vec<String>,
 ) -> eyre::Result<()> {
     let mut rows = Vec::new();
     let mut missing = Vec::new();
@@ -1043,37 +1120,59 @@ async fn drive_details<S: EntityStore>(
     if rows.is_empty() {
         return Ok(());
     }
-    let rpc = rpc.clone();
-    let queries = rows.clone();
-    let loaded = tokio::task::spawn_blocking(move || {
-        crate::detail::load_details_at(&rpc, &queries, Some(block))
-    })
-    .await
-    .wrap_err("detail task")??;
     let mut done = Vec::new();
     let mut failed = Vec::new();
     let mut follow = Vec::new();
+    let rpc = rpc.clone();
+    let queries = rows.clone();
+    let loaded = match tokio::task::spawn_blocking(move || {
+        crate::detail::load_details_at(&rpc, &queries, Some(block))
+    })
+    .await
+    {
+        Ok(Ok(loaded)) => loaded,
+        Ok(Err(err)) => {
+            let error = crate::rpc::redact_secret(&format!("{err:#}"));
+            for row in &rows {
+                let fallback = blank_job(stage, row.kind, row.id);
+                let job = job_for(jobs, row.kind, row.id).unwrap_or(&fallback);
+                keep_or_drop(
+                    job,
+                    error.clone(),
+                    give_up_after,
+                    &mut done,
+                    &mut failed,
+                    notes,
+                );
+            }
+            store.finish_work(&done, &failed).await?;
+            return Ok(());
+        }
+        Err(err) => return Err(eyre::eyre!("detail task: {err}")),
+    };
+    if loaded.len() != rows.len() {
+        return Err(eyre::eyre!("detail lens row count"));
+    }
     for (row, detail) in rows.iter().zip(loaded) {
         if detail_flags(&detail) & FLAG_FAILED != 0 {
-            failed.push(WorkFail {
-                stage,
-                kind: row.kind,
-                id: row.id,
-                not_before: unix_now().saturating_add(RETRY_SECS),
-                error: "pool read failed".into(),
-            });
+            let fallback = blank_job(stage, row.kind, row.id);
+            let job = job_for(jobs, row.kind, row.id).unwrap_or(&fallback);
+            keep_or_drop(
+                job,
+                "pool read failed".into(),
+                give_up_after,
+                &mut done,
+                &mut failed,
+                notes,
+            );
             continue;
         }
         let (immutable, mut mutable) = match split_detail(&detail) {
             Ok(parts) => parts,
             Err(err) => {
-                failed.push(WorkFail {
-                    stage,
-                    kind: row.kind,
-                    id: row.id,
-                    not_before: unix_now().saturating_add(RETRY_SECS),
-                    error: err,
-                });
+                let fallback = blank_job(stage, row.kind, row.id);
+                let job = job_for(jobs, row.kind, row.id).unwrap_or(&fallback);
+                keep_or_drop(job, err, give_up_after, &mut done, &mut failed, notes);
                 continue;
             }
         };
@@ -1125,6 +1224,8 @@ async fn drive_ticks<S: EntityStore>(
     rpc: &Rpc,
     jobs: &[WorkJob],
     now: u64,
+    give_up_after: u32,
+    notes: &mut Vec<String>,
 ) -> eyre::Result<()> {
     let mut requests = Vec::new();
     let mut metas = Vec::new();
@@ -1149,7 +1250,7 @@ async fn drive_ticks<S: EntityStore>(
         let detail = match join_detail(&immutable, &mutable.body, &[]) {
             Ok(detail) => detail,
             Err(err) => {
-                failed.push(fail_job(job, now, err));
+                keep_or_drop(job, err, give_up_after, &mut done, &mut failed, notes);
                 continue;
             }
         };
@@ -1187,6 +1288,7 @@ async fn drive_ticks<S: EntityStore>(
     }
     let mut words_by_index = vec![Vec::new(); metas.len()];
     let mut failed_by_index = vec![false; metas.len()];
+    let mut errors_by_index = vec![None; metas.len()];
     for (block, indexes) in groups {
         let batch: Vec<_> = indexes
             .iter()
@@ -1194,9 +1296,19 @@ async fn drive_ticks<S: EntityStore>(
             .collect();
         let rpc = rpc.clone();
         let loaded =
-            tokio::task::spawn_blocking(move || tick::load_ticks(&rpc, &batch, Some(block)))
+            match tokio::task::spawn_blocking(move || tick::load_ticks(&rpc, &batch, Some(block)))
                 .await
-                .wrap_err("tick task")??;
+            {
+                Ok(Ok(loaded)) => loaded,
+                Ok(Err(err)) => {
+                    let error = crate::rpc::redact_secret(&format!("{err:#}"));
+                    for index in &indexes {
+                        errors_by_index[*index] = Some(error.clone());
+                    }
+                    continue;
+                }
+                Err(err) => return Err(eyre::eyre!("tick task: {err}")),
+            };
         if loaded.ticks.len() != indexes.len() || loaded.failed.len() != indexes.len() {
             return Err(eyre::eyre!("tick lens row count"));
         }
@@ -1207,9 +1319,20 @@ async fn drive_ticks<S: EntityStore>(
     }
     for (index, (job, generation, _block, page, more)) in metas.into_iter().enumerate() {
         let words = std::mem::take(&mut words_by_index[index]);
+        if let Some(error) = errors_by_index[index].clone() {
+            keep_or_drop(&job, error, give_up_after, &mut done, &mut failed, notes);
+            continue;
+        }
         let failed_read = failed_by_index[index];
         if failed_read {
-            failed.push(fail_job(&job, now, "tick read failed".into()));
+            keep_or_drop(
+                &job,
+                "tick read failed".into(),
+                give_up_after,
+                &mut done,
+                &mut failed,
+                notes,
+            );
             continue;
         }
         let ticks = words
@@ -1249,10 +1372,14 @@ async fn drive_ticks<S: EntityStore>(
     Ok(())
 }
 
-async fn drive_curves<S: EntityStore>(store: &S, jobs: &[WorkJob]) -> eyre::Result<()> {
+async fn drive_curves<S: EntityStore>(
+    store: &S,
+    jobs: &[WorkJob],
+    give_up_after: u32,
+    notes: &mut Vec<String>,
+) -> eyre::Result<()> {
     let mut done = Vec::new();
     let mut failed = Vec::new();
-    let now = unix_now();
     for job in jobs {
         let state = store.read_state(job.kind, job.id).await?;
         let (Some(immutable), Some(mutable)) = (state.immutable, state.mutable) else {
@@ -1266,14 +1393,14 @@ async fn drive_curves<S: EntityStore>(store: &S, jobs: &[WorkJob]) -> eyre::Resu
         let detail = match join_detail(&immutable, &mutable.body, &state.ticks) {
             Ok(detail) => detail,
             Err(err) => {
-                failed.push(fail_job(job, now, err));
+                keep_or_drop(job, err, give_up_after, &mut done, &mut failed, notes);
                 continue;
             }
         };
         match derive_curve(&detail, mutable.generation) {
             Ok(curve) => store.put_curve(&curve).await?,
             Err(err) => {
-                failed.push(fail_job(job, now, err));
+                keep_or_drop(job, err, give_up_after, &mut done, &mut failed, notes);
                 continue;
             }
         }
@@ -1465,14 +1592,63 @@ fn curve_job(kind: u8, id: B256, generation: u64) -> WorkJob {
     job
 }
 
-fn fail_job(job: &WorkJob, now: u64, error: String) -> WorkFail {
-    WorkFail {
+fn keep_or_drop(
+    job: &WorkJob,
+    error: String,
+    give_up_after: u32,
+    done: &mut Vec<(u8, u8, B256)>,
+    failed: &mut Vec<WorkFail>,
+    notes: &mut Vec<String>,
+) {
+    let error = crate::rpc::redact_secret(&error);
+    let kind = crate::catalog::kind_name(job.kind);
+    if give_up_after > 0 && job.attempt >= give_up_after {
+        tracing::error!(
+            stage = job.stage,
+            kind,
+            id = %job.id,
+            attempt = job.attempt,
+            %error,
+            "state gave up"
+        );
+        notes.push(format!("gave up {kind} {}: {error}", job.id));
+        done.push((job.stage, job.kind, job.id));
+        return;
+    }
+    tracing::warn!(
+        stage = job.stage,
+        kind,
+        id = %job.id,
+        attempt = job.attempt,
+        %error,
+        "state job failed"
+    );
+    failed.push(WorkFail {
         stage: job.stage,
         kind: job.kind,
         id: job.id,
-        not_before: now.saturating_add(RETRY_SECS),
+        not_before: unix_now().saturating_add(RETRY_SECS),
         error,
+    });
+}
+
+fn job_for(jobs: &[WorkJob], kind: u8, id: B256) -> Option<&WorkJob> {
+    jobs.iter().find(|job| job.kind == kind && job.id == id)
+}
+
+fn count_bytes(db: &redb::Database, def: TableDefinition<&[u8], &[u8]>) -> eyre::Result<u64> {
+    let read = db.begin_read()?;
+    let table = match read.open_table(def) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(0),
+        Err(err) => return Err(err.into()),
+    };
+    let mut n = 0_u64;
+    for item in table.iter()? {
+        item?;
+        n += 1;
     }
+    Ok(n)
 }
 
 fn count_jobs(db: &redb::Database) -> eyre::Result<u64> {
@@ -2562,9 +2738,7 @@ mod tests {
             body: b"one".to_vec(),
         };
         assert_eq!(
-            catalog
-                .put_immutable(std::slice::from_ref(&first))
-                .unwrap(),
+            catalog.put_immutable(std::slice::from_ref(&first)).unwrap(),
             vec![ImmutablePut::Written]
         );
         assert_eq!(
@@ -2594,9 +2768,7 @@ mod tests {
             block: 5,
             class: CLASS_HEAD,
         };
-        assert!(catalog
-            .apply_watch(5, std::slice::from_ref(&hit))
-            .is_err());
+        assert!(catalog.apply_watch(5, std::slice::from_ref(&hit)).is_err());
         assert!(catalog.watch_through().unwrap().is_none());
         catalog.apply_watch(6, &[hit]).unwrap();
         assert_eq!(catalog.watch_through().unwrap(), Some(6));

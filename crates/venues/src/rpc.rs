@@ -198,6 +198,15 @@ impl Rpc {
         Ok(U256::from_be_slice(&call.bytes))
     }
 
+    pub fn block_number(&self) -> eyre::Result<u64> {
+        let response = self.exchange("eth_blockNumber", json!([]))?;
+        let Some(text) = response.result.as_ref().and_then(Value::as_str) else {
+            return Err(eyre!("block number"));
+        };
+        let hex = text.strip_prefix("0x").unwrap_or(text);
+        u64::from_str_radix(hex, 16).wrap_err("block number")
+    }
+
     fn exchange(&self, method: &str, params: Value) -> eyre::Result<RpcResponse> {
         let body = self.body(method, params);
         let start = self.next.get();
@@ -205,20 +214,42 @@ impl Rpc {
         for step in 0..self.urls.len() {
             let index = (start + step) % self.urls.len();
             let url = &self.urls[index];
-            match self.post(url, &body) {
-                Ok(response) if response.rotate() => {
-                    tracing::warn!(url, status = response.http_status, error = %response.error_message, "rpc rotate");
-                    last = Some(eyre!("{}: {}", url, response.error_message));
-                    std::thread::sleep(Duration::from_millis(400 * (step as u64 + 1)));
-                }
-                Ok(response) => {
-                    self.next.set(index);
-                    return Ok(response);
-                }
-                Err(err) => {
-                    tracing::warn!(url, error = %err, "rpc transport");
-                    last = Some(err);
-                    std::thread::sleep(Duration::from_millis(400 * (step as u64 + 1)));
+            for attempt in 0..5 {
+                match self.post(url, &body) {
+                    Ok(response) if response.rotate() => {
+                        tracing::warn!(
+                            endpoint = %redact_secret(url),
+                            status = response.http_status,
+                            error = %response.error_message,
+                            attempt,
+                            "rpc rotate"
+                        );
+                        last = Some(eyre::eyre!(
+                            "{}: {}",
+                            redact_secret(url),
+                            response.error_message
+                        ));
+                        if attempt + 1 < 5 {
+                            std::thread::sleep(Duration::from_millis(500 << attempt));
+                        }
+                    }
+                    Ok(response) => {
+                        self.next.set(index);
+                        return Ok(response);
+                    }
+                    Err(err) => {
+                        let shown = redact_secret(&format!("{err:#}"));
+                        tracing::warn!(
+                            endpoint = %redact_secret(url),
+                            error = %shown,
+                            attempt,
+                            "rpc transport"
+                        );
+                        last = Some(eyre::eyre!("{shown}"));
+                        if attempt + 1 < 5 {
+                            std::thread::sleep(Duration::from_millis(500 << attempt));
+                        }
+                    }
                 }
             }
         }
@@ -362,6 +393,25 @@ pub fn hex_0x(bytes: &[u8]) -> String {
     format!("0x{}", alloy_primitives::hex::encode(bytes))
 }
 
+pub(crate) fn redact_secret(text: &str) -> String {
+    let marker = "eth-mainnet.g.alchemy.com/v2/";
+    let mut out = text.to_string();
+    let mut search = 0;
+    while let Some(relative) = out[search..].find(marker) {
+        let from = search + relative + marker.len();
+        let end = out[from..]
+            .find(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
+            .map(|index| from + index)
+            .unwrap_or(out.len());
+        if from == end {
+            break;
+        }
+        out.replace_range(from..end, "redacted");
+        search = from + "redacted".len();
+    }
+    out
+}
+
 pub fn unhex(text: &str) -> eyre::Result<Vec<u8>> {
     let text = text.strip_prefix("0x").unwrap_or(text);
     if !text.len().is_multiple_of(2) {
@@ -394,6 +444,14 @@ mod tests {
             error_data: None,
         };
         assert!(values_unsupported(&response));
+    }
+
+    #[test]
+    fn redact_strips_an_alchemy_key() {
+        let text = "post https://eth-mainnet.g.alchemy.com/v2/secretkeyvalue: timeout";
+        let out = redact_secret(text);
+        assert!(!out.contains("secretkeyvalue"), "{out}");
+        assert!(out.contains("redacted"), "{out}");
     }
 
     #[test]

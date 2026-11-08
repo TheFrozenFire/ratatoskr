@@ -28,8 +28,8 @@ pub use wire::{
 };
 
 pub use catalog::{
-    decode_body, decode_row, encode_body, encode_row, kind_name, Catalog, Put, ReceiptBody,
-    VenueRow, PANCAKE_V3, SUSHI_V3, UNI_V3, V3_FORK,
+    decode_body, decode_row, encode_body, encode_row, kind_name, sample_identities, Catalog, Put,
+    ReceiptBody, SampleReport, VenueRow, PANCAKE_V3, SUSHI_V3, UNI_V3, V3_FORK,
 };
 pub use detail::{load_details, DetailQuery, PoolDetail, Quote};
 pub use entity::EntityStore;
@@ -37,7 +37,7 @@ pub use history::BloomScan;
 pub use logs::Walk;
 pub use state::{
     estimate, CurveRecord, ImmutablePut, ImmutableRow, MutableStored, MutableWrite, PoolState,
-    TickPage, WatchHit, WorkFail, WorkJob,
+    StateSummary, TickPage, WatchHit, WorkFail, WorkJob,
 };
 
 use ipc::HistoryPeer;
@@ -63,6 +63,11 @@ pub struct RunOpts {
     /// The caller opened the corpus file this import should scan.
     pub corpus_available: bool,
     pub phase: RunPhase,
+    /// `eth_call` block. When set, state does not wait on the header cursor.
+    pub pin_block: Option<u64>,
+    /// Leave the state loop once nothing is left to claim. A job that fails
+    /// four times is dropped and recorded.
+    pub until_idle: bool,
 }
 
 #[derive(Debug, Clone, Default)]
