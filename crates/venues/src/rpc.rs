@@ -89,6 +89,18 @@ impl Rpc {
     /// Callers then read those words with the tick lens. `eth_getStorageAt` is not a fallback:
     /// each call is one word, one compute unit, and a separate state lookup.
     pub fn storage_words(&self, reads: &[(Address, U256)]) -> Result<Vec<U256>, StorageError> {
+        self.storage_words_at(reads, None)
+    }
+
+    /// Same read as [`Self::storage_words`], at one block.
+    ///
+    /// `None` is the tag `latest`. A generation's detail call and tick call
+    /// pass the same block so the bitmap and the tick words match.
+    pub fn storage_words_at(
+        &self,
+        reads: &[(Address, U256)],
+        block: Option<u64>,
+    ) -> Result<Vec<U256>, StorageError> {
         if reads.is_empty() {
             return Ok(Vec::new());
         }
@@ -97,7 +109,7 @@ impl Rpc {
         }
         let mut out = Vec::with_capacity(reads.len());
         for chunk in reads.chunks(STORAGE_CHUNK) {
-            match self.storage_values_call(chunk) {
+            match self.storage_values_call(chunk, block) {
                 Ok(words) => out.extend(words),
                 Err(StorageError::Unsupported) => {
                     self.prefer_storage_values.set(false);
@@ -109,7 +121,11 @@ impl Rpc {
         Ok(out)
     }
 
-    fn storage_values_call(&self, chunk: &[(Address, U256)]) -> Result<Vec<U256>, StorageError> {
+    fn storage_values_call(
+        &self,
+        chunk: &[(Address, U256)],
+        block: Option<u64>,
+    ) -> Result<Vec<U256>, StorageError> {
         let mut grouped: BTreeMap<Address, Vec<U256>> = BTreeMap::new();
         for (account, slot) in chunk {
             grouped.entry(*account).or_default().push(*slot);
@@ -123,7 +139,7 @@ impl Rpc {
             map.insert(account.to_string(), json!(hexes));
         }
         let response = self
-            .exchange("eth_getStorageValues", json!([map, "latest"]))
+            .exchange("eth_getStorageValues", json!([map, block_tag(block)]))
             .map_err(StorageError::Failed)?;
         if values_unsupported(&response) {
             return Err(StorageError::Unsupported);
@@ -151,15 +167,26 @@ impl Rpc {
         Ok(out)
     }
 
-    /// `to` is omitted for a creation-code lens.
+    /// `to` is omitted for a creation-code lens. The block tag is `latest`.
     pub fn eth_call(&self, data: &[u8], to: Option<Address>, gas: u64) -> eyre::Result<CallBytes> {
+        self.eth_call_at(data, to, gas, None)
+    }
+
+    /// `to` is omitted for a creation-code lens.
+    pub fn eth_call_at(
+        &self,
+        data: &[u8],
+        to: Option<Address>,
+        gas: u64,
+        block: Option<u64>,
+    ) -> eyre::Result<CallBytes> {
         let mut tx = serde_json::Map::new();
         tx.insert("data".into(), json!(hex_0x(data)));
         tx.insert("gas".into(), json!(format!("0x{gas:x}")));
         if let Some(to) = to {
             tx.insert("to".into(), json!(to.to_string()));
         }
-        let response = self.exchange("eth_call", json!([tx, "latest"]))?;
+        let response = self.exchange("eth_call", json!([tx, block_tag(block)]))?;
         call_bytes(response)
     }
 
@@ -221,6 +248,13 @@ impl Rpc {
 pub enum StorageError {
     Unsupported,
     Failed(eyre::Report),
+}
+
+fn block_tag(block: Option<u64>) -> Value {
+    match block {
+        Some(number) => json!(format!("0x{number:x}")),
+        None => json!("latest"),
+    }
 }
 
 fn values_unsupported(response: &RpcResponse) -> bool {

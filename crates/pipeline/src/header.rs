@@ -403,6 +403,9 @@ mod tests {
         assert_eq!(rows[1].number, 1);
         assert!(!dir.0.join("corpus.redb").exists());
         assert!(!dir.0.join("venues.redb").exists());
+        assert!(!dir.0.join("entities.redb").exists());
+        assert!(!dir.0.join("discovery.redb").exists());
+        assert!(!dir.0.join("work.redb").exists());
     }
 
     #[tokio::test(start_paused = true)]

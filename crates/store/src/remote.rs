@@ -6,7 +6,11 @@ use eyre::{eyre, WrapErr};
 use model::{BlockRecord, HeaderRecord};
 use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
-use venues::{Put, ReceiptBody, VenueRow};
+use venues::{
+    decode_state_reply, encode_state_call, CurveRecord, ImmutablePut, ImmutableRow, MutableStored,
+    MutableWrite, PoolState, Put, ReceiptBody, StateCall, StateReply, TickPage, VenueRow, WatchHit,
+    WorkFail, WorkJob,
+};
 
 use crate::{short_header_range, EntityStore};
 
@@ -356,6 +360,142 @@ impl EntityStore for RemoteStore {
             })
             .await?,
         )
+    }
+
+    async fn read_venue(&self, kind: u8, id: B256) -> eyre::Result<Option<VenueRow>> {
+        match self.state(StateCall::ReadVenue { kind, id }).await? {
+            StateReply::Venue(row) => Ok(row),
+            _ => Err(eyre!("unexpected reply")),
+        }
+    }
+
+    async fn reconcile(&self, now: u64) -> eyre::Result<u64> {
+        match self.state(StateCall::Reconcile { now }).await? {
+            StateReply::Wrote(n) => Ok(n),
+            _ => Err(eyre!("unexpected reply")),
+        }
+    }
+
+    async fn claim_work(
+        &self,
+        stage: u8,
+        limit: u32,
+        now: u64,
+        lease_for: u64,
+    ) -> eyre::Result<Vec<WorkJob>> {
+        match self
+            .state(StateCall::ClaimWork {
+                stage,
+                limit,
+                now,
+                lease_for,
+            })
+            .await?
+        {
+            StateReply::Jobs(jobs) => Ok(jobs),
+            _ => Err(eyre!("unexpected reply")),
+        }
+    }
+
+    async fn finish_work(&self, done: &[(u8, u8, B256)], failed: &[WorkFail]) -> eyre::Result<()> {
+        empty_state(
+            self.state(StateCall::FinishWork {
+                done: done.to_vec(),
+                failed: failed.to_vec(),
+            })
+            .await?,
+        )
+    }
+
+    async fn enqueue_work(&self, jobs: &[WorkJob], now: u64) -> eyre::Result<()> {
+        empty_state(
+            self.state(StateCall::EnqueueWork {
+                jobs: jobs.to_vec(),
+                now,
+            })
+            .await?,
+        )
+    }
+
+    async fn put_immutable(&self, rows: &[ImmutableRow]) -> eyre::Result<Vec<ImmutablePut>> {
+        match self
+            .state(StateCall::PutImmutable {
+                rows: rows.to_vec(),
+            })
+            .await?
+        {
+            StateReply::Puts(puts) => Ok(puts),
+            _ => Err(eyre!("unexpected reply")),
+        }
+    }
+
+    async fn put_mutable(&self, row: &MutableWrite) -> eyre::Result<MutableStored> {
+        match self
+            .state(StateCall::PutMutable { row: row.clone() })
+            .await?
+        {
+            StateReply::Stored(stored) => Ok(stored),
+            _ => Err(eyre!("unexpected reply")),
+        }
+    }
+
+    async fn put_tick_pages(&self, pages: &[TickPage]) -> eyre::Result<()> {
+        empty_state(
+            self.state(StateCall::PutTickPages {
+                pages: pages.to_vec(),
+            })
+            .await?,
+        )
+    }
+
+    async fn put_curve(&self, curve: &CurveRecord) -> eyre::Result<()> {
+        empty_state(
+            self.state(StateCall::PutCurve {
+                curve: curve.clone(),
+            })
+            .await?,
+        )
+    }
+
+    async fn read_state(&self, kind: u8, id: B256) -> eyre::Result<PoolState> {
+        match self.state(StateCall::ReadState { kind, id }).await? {
+            StateReply::State(state) => Ok(*state),
+            _ => Err(eyre!("unexpected reply")),
+        }
+    }
+
+    async fn apply_watch(&self, through: u64, hits: &[WatchHit]) -> eyre::Result<()> {
+        empty_state(
+            self.state(StateCall::ApplyWatch {
+                through,
+                hits: hits.to_vec(),
+            })
+            .await?,
+        )
+    }
+
+    async fn watch_through(&self) -> eyre::Result<Option<u64>> {
+        match self.state(StateCall::WatchThrough).await? {
+            StateReply::Cursor(cursor) => Ok(cursor),
+            _ => Err(eyre!("unexpected reply")),
+        }
+    }
+}
+
+impl RemoteStore {
+    async fn state(&self, call: StateCall) -> eyre::Result<StateReply> {
+        let body = encode_state_call(&call)?;
+        match self.request(Op::PoolState { body }).await? {
+            Reply::PoolState(body) => decode_state_reply(&body),
+            _ => Err(eyre!("unexpected reply")),
+        }
+    }
+}
+
+fn empty_state(reply: StateReply) -> eyre::Result<()> {
+    match reply {
+        StateReply::Empty => Ok(()),
+        _ => Err(eyre!("unexpected reply")),
     }
 }
 

@@ -66,7 +66,11 @@ struct Decoded {
     failed: bool,
 }
 
-pub(crate) fn load_ticks(rpc: &Rpc, pools: &[PoolTicks]) -> eyre::Result<TickLoad> {
+pub(crate) fn load_ticks(
+    rpc: &Rpc,
+    pools: &[PoolTicks],
+    block: Option<u64>,
+) -> eyre::Result<TickLoad> {
     let mut ticks = vec![Vec::new(); pools.len()];
     let mut failed = vec![false; pools.len()];
     let pending = pools
@@ -82,7 +86,7 @@ pub(crate) fn load_ticks(rpc: &Rpc, pools: &[PoolTicks]) -> eyre::Result<TickLoa
             ticks: pool.ticks.clone(),
         })
         .collect();
-    send(rpc, &mut ticks, &mut failed, pending)?;
+    send(rpc, &mut ticks, &mut failed, pending, block)?;
     Ok(TickLoad { ticks, failed })
 }
 
@@ -91,11 +95,12 @@ fn send(
     ticks: &mut [Vec<TickWordRead>],
     failed: &mut [bool],
     mut pending: Vec<Work>,
+    block: Option<u64>,
 ) -> eyre::Result<()> {
     let mut cap = TICK_BATCH;
     while !pending.is_empty() {
         let (batch, rest) = take_batch(std::mem::take(&mut pending), cap);
-        match fetch(rpc, &batch) {
+        match fetch(rpc, &batch, block) {
             Ok(rows) => {
                 cap = TICK_BATCH;
                 let mut retry = Vec::new();
@@ -139,8 +144,8 @@ fn send(
     Ok(())
 }
 
-fn fetch(rpc: &Rpc, batch: &[Work]) -> eyre::Result<Vec<Decoded>> {
-    let call = rpc.eth_call(&call_data(batch), None, CALL_GAS)?;
+fn fetch(rpc: &Rpc, batch: &[Work], block: Option<u64>) -> eyre::Result<Vec<Decoded>> {
+    let call = rpc.eth_call_at(&call_data(batch), None, CALL_GAS, block)?;
     decode(&call.bytes, batch).map_err(|err| eyre!("{err}: {}", call.message))
 }
 

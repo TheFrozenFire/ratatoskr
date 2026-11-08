@@ -165,7 +165,56 @@ async fn dispatch(store: &LocalStore, op: Op) -> eyre::Result<Reply> {
             store.put_bodies(&bodies).await?;
             Ok(Reply::Empty)
         }
+        Op::PoolState { body } => {
+            let call = venues::decode_state_call(&body)?;
+            let reply = state_call(store, call).await?;
+            Ok(Reply::PoolState(venues::encode_state_reply(&reply)?))
+        }
     }
+}
+
+async fn state_call(
+    store: &LocalStore,
+    call: venues::StateCall,
+) -> eyre::Result<venues::StateReply> {
+    use venues::{StateCall, StateReply};
+    let reply = match call {
+        StateCall::ReadVenue { kind, id } => StateReply::Venue(store.read_venue(kind, id).await?),
+        StateCall::Reconcile { now } => StateReply::Wrote(store.reconcile(now).await?),
+        StateCall::ClaimWork {
+            stage,
+            limit,
+            now,
+            lease_for,
+        } => StateReply::Jobs(store.claim_work(stage, limit, now, lease_for).await?),
+        StateCall::FinishWork { done, failed } => {
+            store.finish_work(&done, &failed).await?;
+            StateReply::Empty
+        }
+        StateCall::EnqueueWork { jobs, now } => {
+            store.enqueue_work(&jobs, now).await?;
+            StateReply::Empty
+        }
+        StateCall::PutImmutable { rows } => StateReply::Puts(store.put_immutable(&rows).await?),
+        StateCall::PutMutable { row } => StateReply::Stored(store.put_mutable(&row).await?),
+        StateCall::PutTickPages { pages } => {
+            store.put_tick_pages(&pages).await?;
+            StateReply::Empty
+        }
+        StateCall::PutCurve { curve } => {
+            store.put_curve(&curve).await?;
+            StateReply::Empty
+        }
+        StateCall::ReadState { kind, id } => {
+            StateReply::State(Box::new(store.read_state(kind, id).await?))
+        }
+        StateCall::ApplyWatch { through, hits } => {
+            store.apply_watch(through, &hits).await?;
+            StateReply::Empty
+        }
+        StateCall::WatchThrough => StateReply::Cursor(store.watch_through().await?),
+    };
+    Ok(reply)
 }
 
 async fn read_headers(store: &LocalStore, from: u64, limit: u64) -> eyre::Result<Reply> {

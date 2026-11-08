@@ -1,8 +1,15 @@
-//! Venue identity catalog.
+//! Venue catalog across three redb files.
 //!
-//! One redb file. `venues` is keyed by kind and id. `cursors` is the next
-//! index or block a named job still has to read. A chunk writes its rows and
-//! its cursor in one transaction.
+//! `entities.redb` holds identities and later pool state. `discovery.redb`
+//! holds list cursors, bloom hits, and era1 receipt bodies. `work.redb` holds
+//! only leases. redb cannot commit across files. Identities are written
+//! first and the cursor second, so a crash retries the chunk instead of
+//! skipping it. Deleting `work.redb` drops leases, not rows.
+//!
+//! The identity table keeps the name `venues`. A directory that still has
+//! `venues.redb` and no `entities.redb` is renamed, and the crawl tables are
+//! copied into `discovery.redb`. An existing `entities.redb` is left in place
+//! and the old file is not read again.
 
 use alloy_primitives::{Address, B256};
 use eyre::WrapErr;
@@ -11,7 +18,7 @@ use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 
-const VENUES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("venues");
+pub(crate) const VENUES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("venues");
 const CURSORS: TableDefinition<&str, u64> = TableDefinition::new("cursors");
 /// Bloom hit. Key is the job name, `0xff`, then the block number in big-endian.
 const HITS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("hits");
@@ -62,6 +69,10 @@ impl VenueRow {
     }
 }
 
+pub(crate) fn entity_key(kind: u8, id: &B256) -> [u8; 33] {
+    key(kind, id)
+}
+
 fn key(kind: u8, id: &B256) -> [u8; 33] {
     let mut out = [0u8; 33];
     out[0] = kind;
@@ -105,29 +116,34 @@ pub fn kind_name(kind: u8) -> &'static str {
 }
 
 pub struct Catalog {
-    db: Database,
+    pub(crate) discovery: Database,
+    pub(crate) entities: Database,
+    pub(crate) work: Database,
 }
 
 impl Catalog {
+    /// Open the catalog directory.
+    ///
+    /// A path whose file name ends in `.redb` selects that file's parent, so
+    /// existing callers that pass `venues.redb` keep the same directory.
     pub fn open(path: &Path) -> eyre::Result<Self> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let db = if path.exists() {
-            Database::open(path).wrap_err("open venue catalog")?
-        } else {
-            Database::create(path).wrap_err("create venue catalog")?
-        };
-        Ok(Self { db })
+        let dir = catalog_dir(path);
+        std::fs::create_dir_all(&dir)?;
+        migrate(&dir)?;
+        Ok(Self {
+            discovery: open_db(&dir.join("discovery.redb"))?,
+            entities: open_db(&dir.join("entities.redb"))?,
+            work: open_db(&dir.join("work.redb"))?,
+        })
     }
 
     pub fn default_path() -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        PathBuf::from(home).join(".local/share/ratatoskr/venues.redb")
+        PathBuf::from(home).join(".local/share/ratatoskr/entities.redb")
     }
 
     pub fn cursor(&self, job: &str) -> eyre::Result<Option<u64>> {
-        let read = self.db.begin_read()?;
+        let read = self.discovery.begin_read()?;
         let table = match read.open_table(CURSORS) {
             Ok(table) => table,
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
@@ -136,7 +152,10 @@ impl Catalog {
         Ok(table.get(job)?.map(|value| value.value()))
     }
 
-    /// Write `rows` and set `job` so the next read starts at `next`.
+    /// Write identities, then set `job` so the next read starts at `next`.
+    ///
+    /// The two files commit separately. A crash after the identities and
+    /// before the cursor runs this chunk again. Merge is idempotent.
     pub fn commit_chunk(
         &self,
         job: &str,
@@ -144,45 +163,30 @@ impl Catalog {
         rows: &[VenueRow],
         put: Put,
     ) -> eyre::Result<u64> {
-        let mut write = self.db.begin_write()?;
+        if let Some(stored) = self.cursor(job)? {
+            if next < stored {
+                return Err(eyre::eyre!("cursor {job} is {stored}; {next} is below it"));
+            }
+        }
+        let written = write_identities(&self.entities, rows, put)?;
+        let mut write = self.discovery.begin_write()?;
         write.set_durability(Durability::Immediate);
-        let written = {
-            let mut venues = write.open_table(VENUES)?;
+        {
             let mut cursors = write.open_table(CURSORS)?;
             if let Some(stored) = cursors.get(job)?.map(|value| value.value()) {
                 if next < stored {
                     return Err(eyre::eyre!("cursor {job} is {stored}; {next} is below it"));
                 }
             }
-            let mut n = 0_u64;
-            for row in rows {
-                let key = row.key();
-                let previous = venues
-                    .get(key.as_slice())?
-                    .map(|value| value.value().to_vec());
-                let stored = match (previous, put) {
-                    (Some(_), Put::IfAbsent) => None,
-                    (Some(bytes), Put::Merge) => {
-                        let old = decode_row(row.kind, row.id, &bytes)?;
-                        Some(encode_row(&merge(old, row.clone()))?)
-                    }
-                    (None, _) => Some(encode_row(row)?),
-                };
-                if let Some(bytes) = stored {
-                    venues.insert(key.as_slice(), bytes.as_slice())?;
-                    n += 1;
-                }
-            }
             cursors.insert(job, next)?;
-            n
-        };
+        }
         write.commit()?;
         Ok(written)
     }
 
     /// Next block `job` has already tested against the header blooms.
     pub fn hit_scan(&self, job: &str) -> eyre::Result<Option<u64>> {
-        let read = self.db.begin_read()?;
+        let read = self.discovery.begin_read()?;
         let table = match read.open_table(HIT_SCAN) {
             Ok(table) => table,
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
@@ -209,7 +213,7 @@ impl Catalog {
         if from >= to || limit == 0 {
             return Ok(Vec::new());
         }
-        let read = self.db.begin_read()?;
+        let read = self.discovery.begin_read()?;
         let table = match read.open_table(HITS) {
             Ok(table) => table,
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
@@ -232,7 +236,7 @@ impl Catalog {
     ///
     /// A later call with a smaller `scanned_to` does not rewind the scan.
     pub fn commit_hits(&self, job: &str, scanned_to: u64, hits: &[u64]) -> eyre::Result<()> {
-        let mut write = self.db.begin_write()?;
+        let mut write = self.discovery.begin_write()?;
         write.set_durability(Durability::Immediate);
         {
             let mut table = write.open_table(HITS)?;
@@ -251,7 +255,7 @@ impl Catalog {
     }
 
     pub fn read_bodies(&self, numbers: &[u64]) -> eyre::Result<Vec<Option<ReceiptBody>>> {
-        let read = self.db.begin_read()?;
+        let read = self.discovery.begin_read()?;
         let table = match read.open_table(BODIES) {
             Ok(table) => table,
             Err(redb::TableError::TableDoesNotExist(_)) => {
@@ -274,7 +278,7 @@ impl Catalog {
         if bodies.is_empty() {
             return Ok(());
         }
-        let mut write = self.db.begin_write()?;
+        let mut write = self.discovery.begin_write()?;
         write.set_durability(Durability::Immediate);
         {
             let mut table = write.open_table(BODIES)?;
@@ -299,7 +303,7 @@ impl Catalog {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let read = self.db.begin_read()?;
+        let read = self.entities.begin_read()?;
         let table = match read.open_table(VENUES) {
             Ok(table) => table,
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
@@ -337,6 +341,199 @@ impl Catalog {
         }
         Ok(page)
     }
+}
+
+fn catalog_dir(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    if name.ends_with(".redb") {
+        path.parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf()
+    } else {
+        path.to_path_buf()
+    }
+}
+
+fn open_db(path: &Path) -> eyre::Result<Database> {
+    if path.exists() {
+        Database::open(path).wrap_err_with(|| format!("open {}", path.display()))
+    } else {
+        Database::create(path).wrap_err_with(|| format!("create {}", path.display()))
+    }
+}
+
+/// Move a legacy `venues.redb` onto the three-file layout.
+///
+/// Identities stay where they are: the file is renamed to `entities.redb`.
+/// Crawl tables are copied into `discovery.redb` and then removed. When
+/// `entities.redb` is already present, `venues.redb` is not opened.
+fn migrate(dir: &Path) -> eyre::Result<()> {
+    let venues = dir.join("venues.redb");
+    let entities = dir.join("entities.redb");
+    let discovery = dir.join("discovery.redb");
+    if entities.exists() {
+        // `venues.redb` beside an existing `entities.redb` is the pre-migration
+        // file. Leave it closed so a second open cannot copy it again.
+        if venues.exists() {
+            return Ok(());
+        }
+        if !discovery.exists() {
+            let from = Database::open(&entities).wrap_err("open entities for crawl copy")?;
+            let to = open_db(&discovery)?;
+            copy_crawl(&from, &to)?;
+            drop(from);
+        }
+        let entities = Database::open(&entities).wrap_err("open entities")?;
+        delete_crawl(&entities)?;
+        return Ok(());
+    }
+    if !venues.exists() {
+        return Ok(());
+    }
+    let from = Database::open(&venues).wrap_err("open venues.redb")?;
+    let to = open_db(&discovery)?;
+    copy_crawl(&from, &to)?;
+    drop(from);
+    drop(to);
+    std::fs::rename(&venues, &entities).wrap_err("rename venues.redb to entities.redb")?;
+    let entities = Database::open(&entities).wrap_err("open renamed entities")?;
+    delete_crawl(&entities)?;
+    Ok(())
+}
+
+fn copy_crawl(from: &Database, to: &Database) -> eyre::Result<()> {
+    copy_str_u64(from, to, CURSORS)?;
+    copy_str_u64(from, to, HIT_SCAN)?;
+    copy_bytes(from, to, HITS)?;
+    copy_u64_bytes(from, to, BODIES)?;
+    Ok(())
+}
+
+fn copy_str_u64(
+    from: &Database,
+    to: &Database,
+    table: TableDefinition<&str, u64>,
+) -> eyre::Result<()> {
+    let read = from.begin_read()?;
+    let source = match read.open_table(table) {
+        Ok(source) => source,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(()),
+        Err(err) => return Err(err.into()),
+    };
+    let mut write = to.begin_write()?;
+    write.set_durability(Durability::Immediate);
+    {
+        let mut dest = write.open_table(table)?;
+        for item in source.iter()? {
+            let (key, value) = item?;
+            dest.insert(key.value(), value.value())?;
+        }
+    }
+    write.commit()?;
+    Ok(())
+}
+
+fn copy_bytes(
+    from: &Database,
+    to: &Database,
+    table: TableDefinition<&[u8], &[u8]>,
+) -> eyre::Result<()> {
+    let read = from.begin_read()?;
+    let source = match read.open_table(table) {
+        Ok(source) => source,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(()),
+        Err(err) => return Err(err.into()),
+    };
+    let mut write = to.begin_write()?;
+    write.set_durability(Durability::Immediate);
+    {
+        let mut dest = write.open_table(table)?;
+        for item in source.iter()? {
+            let (key, value) = item?;
+            dest.insert(key.value(), value.value())?;
+        }
+    }
+    write.commit()?;
+    Ok(())
+}
+
+fn copy_u64_bytes(
+    from: &Database,
+    to: &Database,
+    table: TableDefinition<u64, &[u8]>,
+) -> eyre::Result<()> {
+    let read = from.begin_read()?;
+    let source = match read.open_table(table) {
+        Ok(source) => source,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(()),
+        Err(err) => return Err(err.into()),
+    };
+    let mut write = to.begin_write()?;
+    write.set_durability(Durability::Immediate);
+    {
+        let mut dest = write.open_table(table)?;
+        for item in source.iter()? {
+            let (key, value) = item?;
+            dest.insert(key.value(), value.value())?;
+        }
+    }
+    write.commit()?;
+    Ok(())
+}
+
+fn delete_crawl(db: &Database) -> eyre::Result<()> {
+    let mut write = db.begin_write()?;
+    write.set_durability(Durability::Immediate);
+    write
+        .delete_table(CURSORS)
+        .map_err(|err| eyre::eyre!("delete cursors: {err}"))?;
+    write
+        .delete_table(HITS)
+        .map_err(|err| eyre::eyre!("delete hits: {err}"))?;
+    write
+        .delete_table(HIT_SCAN)
+        .map_err(|err| eyre::eyre!("delete hit scan: {err}"))?;
+    write
+        .delete_table(BODIES)
+        .map_err(|err| eyre::eyre!("delete bodies: {err}"))?;
+    write.commit()?;
+    Ok(())
+}
+
+fn write_identities(db: &Database, rows: &[VenueRow], put: Put) -> eyre::Result<u64> {
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let mut write = db.begin_write()?;
+    write.set_durability(Durability::Immediate);
+    let written = {
+        let mut venues = write.open_table(VENUES)?;
+        let mut n = 0_u64;
+        for row in rows {
+            let key = row.key();
+            let previous = venues
+                .get(key.as_slice())?
+                .map(|value| value.value().to_vec());
+            let stored = match (previous, put) {
+                (Some(_), Put::IfAbsent) => None,
+                (Some(bytes), Put::Merge) => {
+                    let old = decode_row(row.kind, row.id, &bytes)?;
+                    Some(encode_row(&merge(old, row.clone()))?)
+                }
+                (None, _) => Some(encode_row(row)?),
+            };
+            if let Some(bytes) = stored {
+                venues.insert(key.as_slice(), bytes.as_slice())?;
+                n += 1;
+            }
+        }
+        n
+    };
+    write.commit()?;
+    Ok(written)
 }
 
 fn hit_key(job: &str, block: u64) -> Vec<u8> {
@@ -604,7 +801,7 @@ pub fn tally_kind(key: &[u8]) -> Option<u8> {
 
 impl Catalog {
     pub fn tally_by_kind(&self) -> eyre::Result<BTreeMap<(u8, Address), u64>> {
-        let read = self.db.begin_read()?;
+        let read = self.entities.begin_read()?;
         let table = match read.open_table(VENUES) {
             Ok(table) => table,
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(BTreeMap::new()),
@@ -644,6 +841,29 @@ mod tests {
             block_hash: None,
             tx_index: None,
             log_index: None,
+        }
+    }
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "ratatoskr-catalog-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
         }
     }
 
@@ -721,16 +941,8 @@ mod tests {
 
     #[test]
     fn page_venues_excludes_the_after_id_and_other_kinds() {
-        let path = std::env::temp_dir().join(format!(
-            "ratatoskr-venues-page-{}-{}.redb",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_file(&path);
-        let catalog = Catalog::open(&path).unwrap();
+        let dir = TempDir::new();
+        let catalog = Catalog::open(&dir.0).unwrap();
         let mut rows = Vec::new();
         for n in 1..=3 {
             let mut row = sample();
@@ -756,7 +968,6 @@ mod tests {
             .page_venues(UNI_V3, Some(next[0].id), 2)
             .unwrap()
             .is_empty());
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -774,16 +985,8 @@ mod tests {
 
     #[test]
     fn commit_is_resumable_and_if_absent_does_not_replace() {
-        let path = std::env::temp_dir().join(format!(
-            "ratatoskr-venues-{}-{}.redb",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_file(&path);
-        let catalog = Catalog::open(&path).unwrap();
+        let dir = TempDir::new();
+        let catalog = Catalog::open(&dir.0).unwrap();
         let row = sample();
         catalog
             .commit_chunk("list:test", 10, std::slice::from_ref(&row), Put::Merge)
@@ -797,20 +1000,15 @@ mod tests {
         assert_eq!(wrote, 0);
         let counts = catalog.tally_by_kind().unwrap();
         assert_eq!(counts.get(&(1, row.factory)).copied(), Some(1));
-        let _ = std::fs::remove_file(&path);
+        assert!(dir.0.join("entities.redb").exists());
+        assert!(dir.0.join("discovery.redb").exists());
+        assert!(dir.0.join("work.redb").exists());
+        assert!(!dir.0.join("venues.redb").exists());
     }
 
     #[test]
     fn hits_and_bodies_survive_a_reopen() {
-        let path = std::env::temp_dir().join(format!(
-            "ratatoskr-venues-hits-{}-{}.redb",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_file(&path);
+        let dir = TempDir::new();
         let body = ReceiptBody {
             hash: alloy_primitives::b256!(
                 "1111111111111111111111111111111111111111111111111111111111111111"
@@ -821,13 +1019,13 @@ mod tests {
             payload: vec![1, 2, 3],
         };
         {
-            let catalog = Catalog::open(&path).unwrap();
+            let catalog = Catalog::open(&dir.0).unwrap();
             assert!(catalog.hit_scan("logs:test").unwrap().is_none());
             catalog.commit_hits("logs:test", 10, &[3, 4]).unwrap();
             catalog.commit_hits("logs:test", 8, &[1]).unwrap();
             catalog.put_bodies(&[(4, body.clone())]).unwrap();
         }
-        let catalog = Catalog::open(&path).unwrap();
+        let catalog = Catalog::open(&dir.0).unwrap();
         assert_eq!(catalog.hit_scan("logs:test").unwrap(), Some(10));
         assert_eq!(
             catalog.hits_from("logs:test", 0, 10).unwrap(),
@@ -837,7 +1035,42 @@ mod tests {
         let stored = catalog.read_bodies(&[4, 5]).unwrap();
         assert_eq!(stored[0].as_ref(), Some(&body));
         assert!(stored[1].is_none());
+    }
+
+    #[test]
+    fn a_legacy_venues_file_is_renamed_and_crawl_tables_move() {
+        let dir = TempDir::new();
+        let legacy = dir.0.join("venues.redb");
+        let db = Database::create(&legacy).unwrap();
+        {
+            let mut write = db.begin_write().unwrap();
+            write.set_durability(Durability::Immediate);
+            {
+                let mut cursors = write.open_table(CURSORS).unwrap();
+                cursors.insert("logs:old", 42_u64).unwrap();
+                let mut venues = write.open_table(VENUES).unwrap();
+                let row = sample();
+                let bytes = encode_row(&row).unwrap();
+                venues
+                    .insert(row.key().as_slice(), bytes.as_slice())
+                    .unwrap();
+            }
+            write.commit().unwrap();
+        }
+        drop(db);
+        let catalog = Catalog::open(&legacy).unwrap();
+        assert!(!legacy.exists());
+        assert!(dir.0.join("entities.redb").exists());
+        assert_eq!(catalog.cursor("logs:old").unwrap(), Some(42));
+        let page = catalog.page_venues(sample().kind, None, 10).unwrap();
+        assert_eq!(page, vec![sample()]);
         drop(catalog);
-        let _ = std::fs::remove_file(&path);
+        let again = Catalog::open(&dir.0.join("entities.redb")).unwrap();
+        assert_eq!(again.cursor("logs:old").unwrap(), Some(42));
+        let untouched = dir.0.join("venues.redb");
+        std::fs::write(&untouched, b"leave-me").unwrap();
+        drop(again);
+        let _ = Catalog::open(&dir.0).unwrap();
+        assert_eq!(std::fs::read(&untouched).unwrap(), b"leave-me");
     }
 }

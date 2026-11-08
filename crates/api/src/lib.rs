@@ -92,6 +92,10 @@ pub enum Op {
     PutBodies {
         bodies: Vec<(u64, ReceiptBody)>,
     },
+    /// Pool-state arguments. The body is the JSON document from `venues`.
+    PoolState {
+        body: Vec<u8>,
+    },
 }
 
 impl Op {
@@ -116,6 +120,7 @@ impl Op {
             Op::CommitHits { .. } => "commit_hits",
             Op::ReadBodies { .. } => "read_bodies",
             Op::PutBodies { .. } => "put_bodies",
+            Op::PoolState { .. } => "pool_state",
         }
     }
 }
@@ -136,6 +141,7 @@ pub enum Reply {
     HitScan(Option<u64>),
     Hits(Vec<u64>),
     Bodies(Vec<Option<ReceiptBody>>),
+    PoolState(Vec<u8>),
 }
 
 /// How many raw bytes follow the JSON line. Absent means none.
@@ -221,6 +227,7 @@ pub fn encode_request(op: &Op) -> eyre::Result<(Value, Vec<u8>)> {
         ),
         Op::ReadBodies { numbers } => with_body("read_bodies", json!({}), encode_u64s(numbers)),
         Op::PutBodies { bodies } => with_body("put_bodies", json!({}), encode_put_bodies(bodies)?),
+        Op::PoolState { body } => with_body("pool_state", json!({}), body.clone()),
     };
     Ok(encoded)
 }
@@ -347,6 +354,9 @@ pub fn decode_request(value: &Value, body: &[u8]) -> eyre::Result<Op> {
         "put_bodies" => Op::PutBodies {
             bodies: decode_put_bodies(body)?,
         },
+        "pool_state" => Op::PoolState {
+            body: body.to_vec(),
+        },
         other => return Err(eyre!("unknown op {other}")),
     };
     Ok(op)
@@ -398,6 +408,10 @@ pub fn encode_response(reply: &Reply) -> eyre::Result<(Value, Vec<u8>)> {
             let body = encode_stored_bodies(bodies)?;
             let bytes = body.len();
             (json!({"ok": true, "bytes": bytes}), body)
+        }
+        Reply::PoolState(body) => {
+            let bytes = body.len();
+            (json!({"ok": true, "bytes": bytes}), body.clone())
         }
     };
     Ok(encoded)
@@ -505,6 +519,7 @@ pub fn decode_response(op: &str, value: &Value, body: &[u8]) -> eyre::Result<Rep
             Ok(Reply::Hits(hits))
         }
         "read_bodies" => Ok(Reply::Bodies(decode_stored_bodies(body)?)),
+        "pool_state" => Ok(Reply::PoolState(body.to_vec())),
         other => Err(eyre!("unexpected reply for {other}")),
     }
 }

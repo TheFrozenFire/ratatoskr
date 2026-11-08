@@ -18,7 +18,14 @@ mod lens;
 mod lists;
 mod logs;
 mod rpc;
+mod state;
 mod tick;
+mod wire;
+
+pub use wire::{
+    decode_state_call, decode_state_reply, encode_state_call, encode_state_reply, StateCall,
+    StateReply,
+};
 
 pub use catalog::{
     decode_body, decode_row, encode_body, encode_row, kind_name, Catalog, Put, ReceiptBody,
@@ -28,6 +35,10 @@ pub use detail::{load_details, DetailQuery, PoolDetail, Quote};
 pub use entity::EntityStore;
 pub use history::BloomScan;
 pub use logs::Walk;
+pub use state::{
+    estimate, CurveRecord, ImmutablePut, ImmutableRow, MutableStored, MutableWrite, PoolState,
+    TickPage, WatchHit, WorkFail, WorkJob,
+};
 
 use ipc::HistoryPeer;
 
@@ -39,6 +50,8 @@ pub enum RunPhase {
     Corpus,
     ListsAndCorpus,
     History,
+    /// Pool details, tick pages, curves, and the watch. Not part of [`Self::All`].
+    State,
     All,
 }
 
@@ -79,6 +92,9 @@ where
     S: EntityStore + Clone + 'static,
     P: HistoryPeer + Clone + 'static,
 {
+    if opts.phase == RunPhase::State {
+        return state::run(store, peer, opts, stop).await;
+    }
     let mut report = RunReport::default();
     let lists = matches!(
         opts.phase,

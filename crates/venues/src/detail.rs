@@ -281,14 +281,23 @@ impl PoolDetail {
 }
 
 pub fn load_details(rpc: &Rpc, rows: &[VenueRow]) -> eyre::Result<Vec<PoolDetail>> {
+    load_details_at(rpc, rows, None)
+}
+
+/// Detail lens only. Tick words are a later stage, at the same `block` when
+/// the caller pinned one. `None` uses the tag `latest`.
+pub fn load_details_at(
+    rpc: &Rpc,
+    rows: &[VenueRow],
+    block: Option<u64>,
+) -> eyre::Result<Vec<PoolDetail>> {
     let queries = rows.iter().map(DetailQuery::from_row).collect::<Vec<_>>();
     let mut out = Vec::with_capacity(queries.len());
     for chunk in queries.chunks(LENS_BATCH) {
-        let mut page = fetch_page(rpc, chunk)?;
+        let mut page = fetch_page(rpc, chunk, block)?;
         for (query, detail) in chunk.iter().zip(page.iter_mut()) {
-            resume_one(rpc, query, detail)?;
+            resume_one(rpc, query, detail, block)?;
         }
-        attach_ticks(rpc, &mut page)?;
         out.extend(page);
     }
     Ok(out)
@@ -318,31 +327,40 @@ pub fn call_data(queries: &[DetailQuery]) -> Vec<u8> {
     out
 }
 
-fn fetch_page(rpc: &Rpc, queries: &[DetailQuery]) -> eyre::Result<Vec<PoolDetail>> {
+fn fetch_page(
+    rpc: &Rpc,
+    queries: &[DetailQuery],
+    block: Option<u64>,
+) -> eyre::Result<Vec<PoolDetail>> {
     if queries.is_empty() {
         return Ok(Vec::new());
     }
-    let call = rpc.eth_call(&call_data(queries), None, CALL_GAS)?;
+    let call = rpc.eth_call_at(&call_data(queries), None, CALL_GAS, block)?;
     match decode_details(&call.bytes, queries) {
         Ok(rows) => Ok(rows),
         Err(_err) if queries.len() > 1 => {
             let mid = queries.len() / 2;
-            let mut rows = fetch_page(rpc, &queries[..mid])?;
-            rows.extend(fetch_page(rpc, &queries[mid..])?);
+            let mut rows = fetch_page(rpc, &queries[..mid], block)?;
+            rows.extend(fetch_page(rpc, &queries[mid..], block)?);
             Ok(rows)
         }
         Err(err) => Err(eyre!("{err}: {}", call.message)),
     }
 }
 
-fn resume_one(rpc: &Rpc, query: &DetailQuery, detail: &mut PoolDetail) -> eyre::Result<()> {
+fn resume_one(
+    rpc: &Rpc,
+    query: &DetailQuery,
+    detail: &mut PoolDetail,
+    block: Option<u64>,
+) -> eyre::Result<()> {
     for _ in 0..RESUME_ROUNDS {
         let Some(at) = resume_at(detail) else {
             return Ok(());
         };
         let mut next = query.clone();
         next.scan_from = ScanFrom::At(at);
-        let mut page = fetch_page(rpc, &[next])?;
+        let mut page = fetch_page(rpc, &[next], block)?;
         let Some(page) = page.pop() else {
             return Ok(());
         };
@@ -382,7 +400,12 @@ fn merge_page(base: PoolDetail, page: PoolDetail) -> PoolDetail {
     }
 }
 
-fn attach_ticks(rpc: &Rpc, details: &mut [PoolDetail]) -> eyre::Result<()> {
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn attach_ticks(
+    rpc: &Rpc,
+    details: &mut [PoolDetail],
+    block: Option<u64>,
+) -> eyre::Result<()> {
     let mut indexes = Vec::new();
     let mut requests = Vec::new();
     let mut reads = Vec::new();
@@ -413,7 +436,7 @@ fn attach_ticks(rpc: &Rpc, details: &mut [PoolDetail]) -> eyre::Result<()> {
     if requests.is_empty() {
         return Ok(());
     }
-    match rpc.storage_words(&reads) {
+    match rpc.storage_words_at(&reads, block) {
         Ok(words) => {
             apply_storage_words(details, &indexes, &requests, &words)?;
             return Ok(());
@@ -421,7 +444,7 @@ fn attach_ticks(rpc: &Rpc, details: &mut [PoolDetail]) -> eyre::Result<()> {
         Err(StorageError::Unsupported) => {}
         Err(StorageError::Failed(err)) => return Err(err),
     }
-    let loaded = tick::load_ticks(rpc, &requests)?;
+    let loaded = tick::load_ticks(rpc, &requests, block)?;
     for ((index, request), (words, failed)) in indexes
         .into_iter()
         .zip(&requests)
@@ -452,6 +475,7 @@ fn attach_ticks(rpc: &Rpc, details: &mut [PoolDetail]) -> eyre::Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn apply_storage_words(
     details: &mut [PoolDetail],
     indexes: &[usize],
@@ -781,6 +805,16 @@ impl Concentrated {
     }
 }
 
+pub(crate) fn tick_request(pool: &Concentrated, ticks: Vec<i32>) -> crate::tick::PoolTicks {
+    crate::tick::PoolTicks {
+        kind: pool.kind,
+        id: pool.id,
+        home: pool.home,
+        slot_base: tick_slot_base(pool),
+        ticks,
+    }
+}
+
 fn tick_slot_base(pool: &Concentrated) -> U256 {
     match pool.kind {
         PANCAKE_V3 => U256::from(6u8),
@@ -790,6 +824,7 @@ fn tick_slot_base(pool: &Concentrated) -> U256 {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn tick_storage(pool: &Concentrated, tick: i32) -> (Address, U256) {
     (
         pool.home,
@@ -801,6 +836,7 @@ fn v4_state_slot(id: B256) -> U256 {
     keccak_pair(id, U256::from(6u8))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn mapping_slot(key: I256, slot: U256) -> U256 {
     keccak_pair(B256::from(key.to_be_bytes::<32>()), slot)
 }
@@ -812,6 +848,7 @@ fn keccak_pair(left: B256, right: U256) -> U256 {
     U256::from_be_bytes(keccak256(buf).0)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn unpack_tick(word: U256) -> (u128, i128) {
     let gross = (word & U256::from(u128::MAX)).to::<u128>();
     let high: U256 = word >> 128;
@@ -1787,6 +1824,192 @@ fn optional_u256(word: U256) -> Option<U256> {
     }
 }
 
+/// One priced span of a concentrated pool, with the cumulative input that
+/// reaches its end. The partial span uses the same `swap_step` as `quote`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LadderStep {
+    pub liquidity: u128,
+    pub sqrt_start: U256,
+    pub sqrt_end: U256,
+    pub tick_end: i32,
+    pub input: U256,
+    pub output: U256,
+    pub fee: U256,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConcentratedLadder {
+    pub zero_for_one: Vec<LadderStep>,
+    pub one_for_zero: Vec<LadderStep>,
+}
+
+pub(crate) fn concentrated_ladder(pool: &Concentrated) -> Result<ConcentratedLadder, String> {
+    Ok(ConcentratedLadder {
+        zero_for_one: walk_ladder(pool, true)?,
+        one_for_zero: walk_ladder(pool, false)?,
+    })
+}
+
+pub(crate) fn quote_ladder(
+    pool: &Concentrated,
+    ladder: &ConcentratedLadder,
+    token_in: Address,
+    token_out: Address,
+    amount_in: U256,
+) -> Result<Quote, String> {
+    if amount_in.is_zero() {
+        return Ok(Quote {
+            amount_in,
+            amount_out: U256::ZERO,
+            fee_paid: U256::ZERO,
+            exhausted: false,
+        });
+    }
+    let fee = pool.fee_pips.ok_or_else(|| "fee unread".to_string())?;
+    let zero_for_one = if token_in == pool.token0 && token_out == pool.token1 {
+        true
+    } else if token_in == pool.token1 && token_out == pool.token0 {
+        false
+    } else {
+        return Err("token".into());
+    };
+    let steps = if zero_for_one {
+        &ladder.zero_for_one
+    } else {
+        &ladder.one_for_zero
+    };
+    let Some(last) = steps.last() else {
+        return Err("ladder".into());
+    };
+    let mut previous_in = U256::ZERO;
+    let mut previous_out = U256::ZERO;
+    let mut previous_fee = U256::ZERO;
+    for step in steps {
+        if amount_in > step.input {
+            previous_in = step.input;
+            previous_out = step.output;
+            previous_fee = step.fee;
+            continue;
+        }
+        if amount_in == step.input {
+            return Ok(Quote {
+                amount_in,
+                amount_out: step.output,
+                fee_paid: step.fee,
+                exhausted: false,
+            });
+        }
+        let partial = swap_step(
+            step.sqrt_start,
+            step.sqrt_end,
+            step.liquidity,
+            amount_in - previous_in,
+            fee,
+            zero_for_one,
+        )?;
+        return Ok(Quote {
+            amount_in: previous_in + partial.amount_in + partial.fee,
+            amount_out: previous_out + partial.amount_out,
+            fee_paid: previous_fee + partial.fee,
+            exhausted: false,
+        });
+    }
+    Ok(Quote {
+        amount_in: last.input,
+        amount_out: last.output,
+        fee_paid: last.fee,
+        exhausted: true,
+    })
+}
+
+fn walk_ladder(pool: &Concentrated, zero_for_one: bool) -> Result<Vec<LadderStep>, String> {
+    let fee = pool.fee_pips.ok_or_else(|| "fee unread".to_string())?;
+    if fee > 1_000_000 {
+        return Err("fee".into());
+    }
+    if pool.sqrt_price_x96.is_zero() {
+        return Err("sqrt price".into());
+    }
+    let mut sqrt = pool.sqrt_price_x96;
+    let mut liquidity = pool.liquidity;
+    let mut tick = pool.tick;
+    let mut input = U256::ZERO;
+    let mut output = U256::ZERO;
+    let mut fee_paid = U256::ZERO;
+    let mut steps = Vec::new();
+    let limit = pool.ticks.len() + 1;
+    for _ in 0..=limit {
+        let boundary = next_initialized(pool, tick, zero_for_one);
+        let (target, tick_end) = match boundary {
+            Some(next) => (sqrt_at_tick(next)?, next),
+            None if zero_for_one => (min_sqrt(), -MAX_TICK),
+            None => (max_sqrt(), MAX_TICK),
+        };
+        if zero_for_one && target >= sqrt || !zero_for_one && target <= sqrt {
+            break;
+        }
+        if liquidity == 0 {
+            let Some(crossed) = boundary else {
+                break;
+            };
+            liquidity = add_liquidity(liquidity, net_on_cross(pool, crossed, zero_for_one))?;
+            sqrt = target;
+            tick = crossed;
+            continue;
+        }
+        let sqrt_start = sqrt;
+        let (spent, gained, step_fee) = cost_to_target(sqrt, target, liquidity, fee, zero_for_one)?;
+        input = input.checked_add(spent).ok_or("input")?;
+        output = output.checked_add(gained).ok_or("output")?;
+        fee_paid = fee_paid.checked_add(step_fee).ok_or("fee")?;
+        steps.push(LadderStep {
+            liquidity,
+            sqrt_start,
+            sqrt_end: target,
+            tick_end,
+            input,
+            output,
+            fee: fee_paid,
+        });
+        let Some(crossed) = boundary else {
+            break;
+        };
+        liquidity = add_liquidity(liquidity, net_on_cross(pool, crossed, zero_for_one))?;
+        sqrt = target;
+        tick = crossed;
+    }
+    Ok(steps)
+}
+
+fn cost_to_target(
+    sqrt: U256,
+    target: U256,
+    liquidity: u128,
+    fee: u32,
+    zero_for_one: bool,
+) -> Result<(U256, U256, U256), String> {
+    let (in_to_target, out_to_target) = if zero_for_one {
+        (
+            amount0_delta(target, sqrt, liquidity, true)?,
+            amount1_delta(target, sqrt, liquidity, false)?,
+        )
+    } else {
+        (
+            amount1_delta(sqrt, target, liquidity, true)?,
+            amount0_delta(sqrt, target, liquidity, false)?,
+        )
+    };
+    let fee_word = U256::from(fee);
+    let denom = U256::from(1_000_000u64);
+    let step_fee = if fee_word.is_zero() {
+        U256::ZERO
+    } else {
+        mul_div_up(in_to_target, fee_word, denom - fee_word)?
+    };
+    let spent = in_to_target.checked_add(step_fee).ok_or("input")?;
+    Ok((spent, out_to_target, step_fee))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1950,7 +2173,7 @@ mod tests {
         push(&mut payload, U256::from(7u8));
         push(&mut payload, U256::MAX);
         push(&mut payload, U256::from(9u8));
-        let rows = decode_details(&payload, &[query.clone()]).unwrap();
+        let rows = decode_details(&payload, std::slice::from_ref(&query)).unwrap();
         let PoolDetail::ConstantProduct(pool) = &rows[0] else {
             panic!("product");
         };
@@ -2121,7 +2344,7 @@ mod tests {
             tx_index: None,
             log_index: None,
         };
-        let details = load_details(&rpc, &[row])
+        let mut details = load_details(&rpc, &[row])
             .unwrap_or_else(|err| panic!("{}", redact(&format!("{err:#}"))));
         let PoolDetail::Concentrated(detail) = &details[0] else {
             panic!("uniswap v3 detail");
@@ -2131,6 +2354,15 @@ mod tests {
         assert_eq!(detail.home, pool);
         assert!(!detail.sqrt_price_x96.is_zero());
         assert!(detail.liquidity > 0);
+        assert!(
+            detail.ticks.is_empty(),
+            "detail lens must not read tick words"
+        );
+        attach_ticks(&rpc, &mut details, None)
+            .unwrap_or_else(|err| panic!("{}", redact(&format!("{err:#}"))));
+        let PoolDetail::Concentrated(detail) = &details[0] else {
+            panic!("uniswap v3 detail");
+        };
         assert!(!detail.ticks.is_empty(), "bitmap produced no ticks");
         assert_eq!(detail.ticks.len(), detail.initialized_ticks().len());
         assert_eq!(detail.flags & FLAG_FAILED, 0);
@@ -2197,5 +2429,207 @@ mod tests {
         let mut out = text.to_string();
         out.replace_range(from..end, "redacted");
         out
+    }
+
+    #[test]
+    fn ladder_matches_quote_across_a_tick() {
+        let pool = Concentrated {
+            kind: UNI_V3,
+            id: B256::ZERO,
+            home: Address::ZERO,
+            hooks: Address::ZERO,
+            token0: address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            token1: address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+            fee_pips: Some(3000),
+            protocol_fee: 0,
+            tick_spacing: 60,
+            sqrt_price_x96: U256::from(1u8) << 96,
+            tick: 0,
+            liquidity: 1_000_000,
+            next_scan: None,
+            bitmaps: Vec::new(),
+            ticks: vec![
+                TickWord {
+                    tick: -120,
+                    liquidity_gross: 5,
+                    liquidity_net: -400_000,
+                },
+                TickWord {
+                    tick: 120,
+                    liquidity_gross: 5,
+                    liquidity_net: 400_000,
+                },
+            ],
+            flags: 0,
+        };
+        let ladder = concentrated_ladder(&pool).unwrap();
+        assert!(ladder.zero_for_one.len() >= 2);
+        let mut amounts = vec![
+            U256::from(1u8),
+            U256::from(1_000u64),
+            U256::from(1_000_000u64),
+        ];
+        if let Some(step) = ladder.zero_for_one.first() {
+            amounts.push(step.input);
+            if !step.input.is_zero() {
+                amounts.push(step.input - U256::from(1u8));
+            }
+        }
+        amounts.push(U256::from(10u64).pow(U256::from(30u8)));
+        for amount in amounts {
+            for (token_in, token_out) in [(pool.token0, pool.token1), (pool.token1, pool.token0)] {
+                let direct = PoolDetail::Concentrated(pool.clone())
+                    .quote(token_in, token_out, amount)
+                    .unwrap();
+                let via = quote_ladder(&pool, &ladder, token_in, token_out, amount).unwrap();
+                assert_eq!(via, direct, "{amount}");
+            }
+        }
+    }
+
+    #[test]
+    fn load_details_does_not_fetch_ticks() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = calls.clone();
+        let server = std::thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            let mut answered = 0_usize;
+            let started = std::time::Instant::now();
+            while started.elapsed() < std::time::Duration::from_secs(5) {
+                if shutdown_rx.try_recv().is_ok() && answered > 0 {
+                    break;
+                }
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        answered += 1;
+                        seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        stream
+                            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                            .unwrap();
+                        let mut collected = Vec::new();
+                        let mut buf = [0u8; 8192];
+                        while collected.len() < 1024 * 1024 {
+                            match stream.read(&mut buf) {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    collected.extend_from_slice(&buf[..n]);
+                                    if http_complete(&collected) {
+                                        break;
+                                    }
+                                }
+                                Err(err)
+                                    if err.kind() == std::io::ErrorKind::WouldBlock
+                                        || err.kind() == std::io::ErrorKind::TimedOut =>
+                                {
+                                    if http_complete(&collected) {
+                                        break;
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        let text = String::from_utf8_lossy(&collected);
+                        assert!(text.contains("\"method\":\"eth_call\""), "{text}");
+                        assert!(!text.contains("eth_getStorageValues"), "{text}");
+                        let body = format!(
+                            "{{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{{\"code\":3,\"message\":\"revert\",\"data\":\"0x{}\"}}}}",
+                            alloy_primitives::hex::encode(detail_with_bitmap())
+                        );
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        stream.write_all(response.as_bytes()).unwrap();
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+            answered
+        });
+        let pool = address!("8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8");
+        let row = VenueRow {
+            kind: UNI_V3,
+            id: VenueRow::address_id(pool),
+            factory: Address::ZERO,
+            tokens: vec![
+                address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+            ],
+            fee: Some(3000),
+            tick_spacing: Some(60),
+            block_number: None,
+            extra: None,
+            block_hash: None,
+            tx_index: None,
+            log_index: None,
+        };
+        let rpc = Rpc::new(vec![format!("http://127.0.0.1:{port}")]).unwrap();
+        let details = load_details(&rpc, &[row]).unwrap();
+        let _ = shutdown_tx.send(());
+        let answered = server.join().unwrap();
+        assert_eq!(answered, 1);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let PoolDetail::Concentrated(detail) = &details[0] else {
+            panic!("concentrated");
+        };
+        assert!(detail.ticks.is_empty());
+        assert_eq!(detail.initialized_ticks(), vec![0]);
+    }
+
+    fn http_complete(bytes: &[u8]) -> bool {
+        let Some(split) = bytes.windows(4).position(|mark| mark == b"\r\n\r\n") else {
+            return false;
+        };
+        let header = String::from_utf8_lossy(&bytes[..split]);
+        let length = header.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if name.eq_ignore_ascii_case("content-length") {
+                value.trim().parse::<usize>().ok()
+            } else {
+                None
+            }
+        });
+        match length {
+            Some(length) => bytes.len() >= split + 4 + length,
+            None => true,
+        }
+    }
+
+    fn detail_with_bitmap() -> Vec<u8> {
+        let id = VenueRow::address_id(address!("8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8"));
+        let mut body = Vec::new();
+        push(
+            &mut body,
+            address_word(address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")),
+        );
+        push(
+            &mut body,
+            address_word(address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")),
+        );
+        push(&mut body, U256::from(3000u64));
+        push(&mut body, U256::from(60u8));
+        push(&mut body, U256::from(1u8) << 96);
+        push(&mut body, U256::ZERO);
+        push(&mut body, U256::from(1_000u64));
+        push(&mut body, U256::from_be_bytes(scan_all()));
+        push(&mut body, U256::from(1u8));
+        push(&mut body, U256::ZERO);
+        push(&mut body, U256::from(1u8));
+        let mut payload = Vec::new();
+        push(&mut payload, U256::from_be_bytes(MAGIC));
+        push(&mut payload, U256::from(1u8));
+        push(&mut payload, U256::from(4 + body.len() / 32));
+        push(&mut payload, U256::from(UNI_V3));
+        push(&mut payload, U256::from_be_bytes(id.0));
+        push(&mut payload, U256::ZERO);
+        payload.extend_from_slice(&body);
+        payload
     }
 }

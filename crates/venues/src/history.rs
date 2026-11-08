@@ -788,6 +788,55 @@ mod tests {
         async fn put_bodies(&self, bodies: &[(u64, ReceiptBody)]) -> eyre::Result<()> {
             self.catalog.put_bodies(bodies)
         }
+        async fn read_venue(&self, _: u8, _: B256) -> eyre::Result<Option<crate::VenueRow>> {
+            Err(eyre::eyre!("unused"))
+        }
+        async fn reconcile(&self, _: u64) -> eyre::Result<u64> {
+            Err(eyre::eyre!("unused"))
+        }
+        async fn claim_work(
+            &self,
+            _: u8,
+            _: u32,
+            _: u64,
+            _: u64,
+        ) -> eyre::Result<Vec<crate::WorkJob>> {
+            Err(eyre::eyre!("unused"))
+        }
+        async fn finish_work(
+            &self,
+            _: &[(u8, u8, B256)],
+            _: &[crate::WorkFail],
+        ) -> eyre::Result<()> {
+            Err(eyre::eyre!("unused"))
+        }
+        async fn enqueue_work(&self, _: &[crate::WorkJob], _: u64) -> eyre::Result<()> {
+            Err(eyre::eyre!("unused"))
+        }
+        async fn put_immutable(
+            &self,
+            _: &[crate::ImmutableRow],
+        ) -> eyre::Result<Vec<crate::ImmutablePut>> {
+            Err(eyre::eyre!("unused"))
+        }
+        async fn put_mutable(&self, _: &crate::MutableWrite) -> eyre::Result<crate::MutableStored> {
+            Err(eyre::eyre!("unused"))
+        }
+        async fn put_tick_pages(&self, _: &[crate::TickPage]) -> eyre::Result<()> {
+            Err(eyre::eyre!("unused"))
+        }
+        async fn put_curve(&self, _: &crate::CurveRecord) -> eyre::Result<()> {
+            Err(eyre::eyre!("unused"))
+        }
+        async fn read_state(&self, _: u8, _: B256) -> eyre::Result<crate::PoolState> {
+            Err(eyre::eyre!("unused"))
+        }
+        async fn apply_watch(&self, _: u64, _: &[crate::WatchHit]) -> eyre::Result<()> {
+            Err(eyre::eyre!("unused"))
+        }
+        async fn watch_through(&self) -> eyre::Result<Option<u64>> {
+            Err(eyre::eyre!("unused"))
+        }
     }
 
     #[test]

@@ -6,6 +6,10 @@
 use alloy_primitives::B256;
 use model::{BlockRecord, HeaderRecord};
 
+use crate::state::{
+    CurveRecord, ImmutablePut, ImmutableRow, MutableStored, MutableWrite, PoolState, TickPage,
+    WatchHit, WorkFail, WorkJob,
+};
 use crate::{Put, ReceiptBody, VenueRow};
 
 #[allow(async_fn_in_trait)]
@@ -44,4 +48,23 @@ pub trait EntityStore: Send + Sync {
     async fn commit_hits(&self, job: &str, scanned_to: u64, hits: &[u64]) -> eyre::Result<()>;
     async fn read_bodies(&self, numbers: &[u64]) -> eyre::Result<Vec<Option<ReceiptBody>>>;
     async fn put_bodies(&self, bodies: &[(u64, ReceiptBody)]) -> eyre::Result<()>;
+
+    async fn read_venue(&self, kind: u8, id: B256) -> eyre::Result<Option<VenueRow>>;
+    async fn reconcile(&self, now: u64) -> eyre::Result<u64>;
+    async fn claim_work(
+        &self,
+        stage: u8,
+        limit: u32,
+        now: u64,
+        lease_for: u64,
+    ) -> eyre::Result<Vec<WorkJob>>;
+    async fn finish_work(&self, done: &[(u8, u8, B256)], failed: &[WorkFail]) -> eyre::Result<()>;
+    async fn enqueue_work(&self, jobs: &[WorkJob], now: u64) -> eyre::Result<()>;
+    async fn put_immutable(&self, rows: &[ImmutableRow]) -> eyre::Result<Vec<ImmutablePut>>;
+    async fn put_mutable(&self, row: &MutableWrite) -> eyre::Result<MutableStored>;
+    async fn put_tick_pages(&self, pages: &[TickPage]) -> eyre::Result<()>;
+    async fn put_curve(&self, curve: &CurveRecord) -> eyre::Result<()>;
+    async fn read_state(&self, kind: u8, id: B256) -> eyre::Result<PoolState>;
+    async fn apply_watch(&self, through: u64, hits: &[WatchHit]) -> eyre::Result<()>;
+    async fn watch_through(&self) -> eyre::Result<Option<u64>>;
 }

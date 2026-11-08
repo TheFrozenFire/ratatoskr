@@ -26,8 +26,8 @@ struct Args {
     /// Comma-separated file owners: `db`, `peer`. Default is `db,peer`.
     #[arg(long, default_value = "db,peer")]
     services: String,
-    /// Comma-separated pipelines: `headers`, `venues`, `receipts`. Default is `headers,venues`.
-    /// `receipts` runs only when named.
+    /// Comma-separated pipelines: `headers`, `venues`, `receipts`, `state`.
+    /// Default is `headers,venues`. `receipts` and `state` run only when named.
     #[arg(long, default_value = "headers,venues")]
     pipeline: String,
     /// JSON-RPC URL for venue lists. Repeat to rotate.
@@ -61,6 +61,8 @@ struct Pipelines {
     headers: bool,
     venues: bool,
     receipts: bool,
+    /// Pool details, ticks, curves, and the watch. Off unless named.
+    state: bool,
 }
 
 struct Paths {
@@ -152,7 +154,8 @@ async fn supervise(args: Args) -> eyre::Result<()> {
         corpus_available: !args.no_corpus,
         phase: RunPhase::All,
     };
-    let pipelines_started = pipelines.headers || pipelines.venues || pipelines.receipts;
+    let pipelines_started =
+        pipelines.headers || pipelines.venues || pipelines.receipts || pipelines.state;
     let mut peer_task = peer_task;
     let mut stop_rx = stop_rx;
     let mut failed = tokio::task::LocalSet::new()
@@ -237,8 +240,22 @@ fn spawn_pipelines(
         });
     }
     if pipelines.venues {
-        let store = store.expect("venues needs db");
+        let store = store.clone().expect("venues needs db");
+        let venue_peer = local.clone();
+        let venue_opts = opts.clone();
         let stop = stop.clone();
+        tasks.spawn_local(async move {
+            let mut sink = StoreSink::new(store.clone());
+            VenueSource::new(store, venue_peer, venue_opts)
+                .run(&mut sink, stop)
+                .await
+        });
+    }
+    if pipelines.state {
+        let store = store.expect("state needs db");
+        let stop = stop.clone();
+        let mut opts = opts;
+        opts.phase = RunPhase::State;
         tasks.spawn_local(async move {
             let mut sink = StoreSink::new(store.clone());
             VenueSource::new(store, local, opts)
@@ -397,6 +414,7 @@ fn parse_pipelines(text: &str) -> eyre::Result<Pipelines> {
             "headers" => pipelines.headers = true,
             "venues" => pipelines.venues = true,
             "receipts" => pipelines.receipts = true,
+            "state" => pipelines.state = true,
             other => return Err(eyre::eyre!("unknown pipeline {other}")),
         }
     }
@@ -412,6 +430,9 @@ fn check_combination(services: &Services, pipelines: &Pipelines) -> eyre::Result
     }
     if pipelines.venues && !services.db {
         return Err(eyre::eyre!("venues needs db"));
+    }
+    if pipelines.state && !services.db {
+        return Err(eyre::eyre!("state needs db"));
     }
     Ok(())
 }
@@ -513,6 +534,7 @@ mod tests {
             headers: true,
             venues: true,
             receipts: false,
+            state: false,
         }
     }
 
@@ -521,6 +543,10 @@ mod tests {
         assert!(!paths.headers.exists());
         assert!(!paths.corpus.exists());
         assert!(!paths.venues.exists());
+        let dir = paths.venues.parent().expect("catalog dir");
+        assert!(!dir.join("entities.redb").exists());
+        assert!(!dir.join("discovery.redb").exists());
+        assert!(!dir.join("work.redb").exists());
     }
 
     #[test]
@@ -541,6 +567,29 @@ mod tests {
         assert!(!parse_pipelines(&args.pipeline).unwrap().receipts);
         assert!(parse_pipelines("receipts").unwrap().receipts);
         assert!(!parse_pipelines("headers,venues").unwrap().receipts);
+        assert!(!parse_pipelines("headers,venues").unwrap().state);
+        assert!(parse_pipelines("state").unwrap().state);
+    }
+
+    #[test]
+    fn state_without_db_opens_nothing() {
+        let dir = TempDir::new();
+        let paths = paths_in(&dir.0);
+        let err = must_err(open_owned(
+            &Services {
+                db: false,
+                peer: true,
+            },
+            &Pipelines {
+                headers: false,
+                venues: false,
+                receipts: false,
+                state: true,
+            },
+            &paths,
+        ));
+        assert!(err.to_string().contains("state"), "{err}");
+        assert_no_databases(&paths);
     }
 
     #[test]
@@ -574,6 +623,7 @@ mod tests {
                 headers: true,
                 venues: false,
                 receipts: false,
+                state: false,
             },
             &paths,
         ));
@@ -588,6 +638,7 @@ mod tests {
                 headers: false,
                 venues: false,
                 receipts: true,
+                state: false,
             },
             &paths,
         ));
@@ -602,6 +653,7 @@ mod tests {
                 headers: false,
                 venues: true,
                 receipts: false,
+                state: false,
             },
             &paths,
         ));
@@ -642,6 +694,7 @@ mod tests {
                 headers: false,
                 venues: true,
                 receipts: false,
+                state: false,
             },
             &paths,
         )
@@ -649,7 +702,10 @@ mod tests {
         assert!(!paths.peers.exists());
         assert!(paths.headers.exists());
         assert!(paths.corpus.exists());
-        assert!(paths.venues.exists());
+        assert!(dir.0.join("entities.redb").exists());
+        assert!(dir.0.join("discovery.redb").exists());
+        assert!(dir.0.join("work.redb").exists());
+        assert!(!paths.venues.exists());
         drop(owned);
     }
 
@@ -705,6 +761,7 @@ mod tests {
                 headers: false,
                 venues: false,
                 receipts: false,
+                state: false,
             },
             &paths,
         )

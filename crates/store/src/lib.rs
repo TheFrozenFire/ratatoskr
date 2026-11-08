@@ -1,8 +1,9 @@
-//! Owner of the three entity files.
+//! Owner of the header chain, the receipt corpus, and the venue catalog.
 //!
-//! Header append and `write_records` stay Eventual. Venue commits, hit commits,
-//! era bodies, `put_blocks`, `put_meta`, and `write_hole` stay Immediate.
-//! Those choices live in `HeaderChain`, `Corpus`, and `Catalog`.
+//! The catalog is `discovery.redb`, `entities.redb`, and `work.redb`. Header
+//! append and `write_records` stay Eventual. Venue commits, hit commits, era
+//! bodies, state writes, `put_blocks`, `put_meta`, and `write_hole` stay
+//! Immediate. Those choices live in `HeaderChain`, `Corpus`, and `Catalog`.
 
 use alloy_primitives::B256;
 use chain::HeaderChain;
@@ -314,6 +315,87 @@ impl EntityStore for LocalStore {
         let bodies = bodies.to_vec();
         blocking(move || catalog.put_bodies(&bodies)).await
     }
+
+    async fn read_venue(&self, kind: u8, id: B256) -> eyre::Result<Option<VenueRow>> {
+        let catalog = self.catalog_db()?;
+        blocking(move || catalog.read_venue(kind, id)).await
+    }
+
+    async fn reconcile(&self, now: u64) -> eyre::Result<u64> {
+        let catalog = self.catalog_db()?;
+        blocking(move || catalog.reconcile(now)).await
+    }
+
+    async fn claim_work(
+        &self,
+        stage: u8,
+        limit: u32,
+        now: u64,
+        lease_for: u64,
+    ) -> eyre::Result<Vec<venues::WorkJob>> {
+        let catalog = self.catalog_db()?;
+        blocking(move || catalog.claim_work(stage, limit, now, lease_for)).await
+    }
+
+    async fn finish_work(
+        &self,
+        done: &[(u8, u8, B256)],
+        failed: &[venues::WorkFail],
+    ) -> eyre::Result<()> {
+        let catalog = self.catalog_db()?;
+        let done = done.to_vec();
+        let failed = failed.to_vec();
+        blocking(move || catalog.finish_work(&done, &failed)).await
+    }
+
+    async fn enqueue_work(&self, jobs: &[venues::WorkJob], now: u64) -> eyre::Result<()> {
+        let catalog = self.catalog_db()?;
+        let jobs = jobs.to_vec();
+        blocking(move || catalog.enqueue_work(&jobs, now)).await
+    }
+
+    async fn put_immutable(
+        &self,
+        rows: &[venues::ImmutableRow],
+    ) -> eyre::Result<Vec<venues::ImmutablePut>> {
+        let catalog = self.catalog_db()?;
+        let rows = rows.to_vec();
+        blocking(move || catalog.put_immutable(&rows)).await
+    }
+
+    async fn put_mutable(&self, row: &venues::MutableWrite) -> eyre::Result<venues::MutableStored> {
+        let catalog = self.catalog_db()?;
+        let row = row.clone();
+        blocking(move || catalog.put_mutable(&row)).await
+    }
+
+    async fn put_tick_pages(&self, pages: &[venues::TickPage]) -> eyre::Result<()> {
+        let catalog = self.catalog_db()?;
+        let pages = pages.to_vec();
+        blocking(move || catalog.put_tick_pages(&pages)).await
+    }
+
+    async fn put_curve(&self, curve: &venues::CurveRecord) -> eyre::Result<()> {
+        let catalog = self.catalog_db()?;
+        let curve = curve.clone();
+        blocking(move || catalog.put_curve(&curve)).await
+    }
+
+    async fn read_state(&self, kind: u8, id: B256) -> eyre::Result<venues::PoolState> {
+        let catalog = self.catalog_db()?;
+        blocking(move || catalog.read_state(kind, id)).await
+    }
+
+    async fn apply_watch(&self, through: u64, hits: &[venues::WatchHit]) -> eyre::Result<()> {
+        let catalog = self.catalog_db()?;
+        let hits = hits.to_vec();
+        blocking(move || catalog.apply_watch(through, &hits)).await
+    }
+
+    async fn watch_through(&self) -> eyre::Result<Option<u64>> {
+        let catalog = self.catalog_db()?;
+        blocking(move || catalog.watch_through()).await
+    }
 }
 
 pub(crate) fn short_header_range(seen: u64, from: u64, to: u64) -> eyre::Report {
@@ -569,6 +651,9 @@ mod tests {
         assert!(path.exists());
         assert!(!dir.0.join("headers.redb").exists());
         assert!(!dir.0.join("venues.redb").exists());
+        assert!(!dir.0.join("entities.redb").exists());
+        assert!(!dir.0.join("discovery.redb").exists());
+        assert!(!dir.0.join("work.redb").exists());
         let err = store.header_cursor().await.unwrap_err();
         assert!(err.to_string().contains("headers are not open"));
         let err = store.cursor("job").await.unwrap_err();
@@ -622,6 +707,9 @@ mod tests {
         assert!(headers.exists());
         assert!(!dir.0.join("corpus.redb").exists());
         assert!(!dir.0.join("venues.redb").exists());
+        assert!(!dir.0.join("entities.redb").exists());
+        assert!(!dir.0.join("discovery.redb").exists());
+        assert!(!dir.0.join("work.redb").exists());
         let err = store.put_blocks(&[]).await.unwrap_err();
         assert!(err.to_string().contains("corpus is not open"));
         let err = store.cursor("list").await.unwrap_err();
@@ -852,6 +940,9 @@ mod tests {
         assert_eq!(encode_row(&page[0]).unwrap()[0], 2);
         assert!(!serving._dir.0.join("univ3-pools.redb").exists());
         assert!(!serving._dir.0.join("corpus.redb").exists());
-        assert!(serving._dir.0.join("venues.redb").exists());
+        assert!(!serving._dir.0.join("venues.redb").exists());
+        assert!(serving._dir.0.join("entities.redb").exists());
+        assert!(serving._dir.0.join("discovery.redb").exists());
+        assert!(serving._dir.0.join("work.redb").exists());
     }
 }
