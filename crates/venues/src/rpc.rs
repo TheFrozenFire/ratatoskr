@@ -446,6 +446,20 @@ mod tests {
         assert!(values_unsupported(&response));
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocking_client_is_built_off_the_worker() {
+        let urls = vec!["http://127.0.0.1:9".into()];
+        let rpc = tokio::task::spawn_blocking(move || Rpc::new(urls))
+            .await
+            .unwrap()
+            .unwrap();
+        let clone = rpc.clone();
+        tokio::task::spawn_blocking(move || drop(clone))
+            .await
+            .unwrap();
+        drop(rpc);
+    }
+
     #[test]
     fn redact_strips_an_alchemy_key() {
         let text = "post https://eth-mainnet.g.alchemy.com/v2/secretkeyvalue: timeout";

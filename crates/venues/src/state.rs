@@ -989,7 +989,11 @@ where
     } else {
         opts.rpcs.clone()
     };
-    let rpc = Rpc::new(urls)?;
+    // reqwest's blocking client builds a shell runtime. Doing that on a
+    // worker panics in debug. The blocking pool is allowed to block.
+    let rpc = tokio::task::spawn_blocking(move || Rpc::new(urls))
+        .await
+        .wrap_err("rpc client task")??;
     let block = match opts.pin_block {
         Some(pin) => pin,
         None => match store.header_cursor().await? {

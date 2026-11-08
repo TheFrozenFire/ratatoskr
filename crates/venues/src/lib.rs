@@ -116,7 +116,9 @@ where
         } else {
             opts.rpcs.clone()
         };
-        let calls = rpc::Rpc::new(call_urls)?;
+        let calls = tokio::task::spawn_blocking(move || rpc::Rpc::new(call_urls))
+            .await
+            .map_err(|err| eyre::eyre!("rpc client task: {err}"))??;
         for job in lists::jobs() {
             if *stop.borrow() {
                 return Ok(report);
