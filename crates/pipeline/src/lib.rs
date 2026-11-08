@@ -4,9 +4,11 @@
 //! [`Fanout`] awaits required sinks in order, then `try_send`s each tee.
 //! A full or closed tee is dropped and is not [`SinkReply::Rejected`].
 
+mod header;
 mod receipt;
 mod venue;
 
+pub use header::HeaderSource;
 pub use receipt::ReceiptSource;
 pub use venue::VenueSource;
 

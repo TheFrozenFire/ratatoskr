@@ -49,6 +49,15 @@ impl LocalStore {
         Self::parts(None, Some(CorpusOpen::Create(path)), None)
     }
 
+    /// Header sync creates `headers.redb` and does not lock the other entity files.
+    pub fn open_headers(headers: &Path) -> eyre::Result<Self> {
+        Ok(Self {
+            chain: Some(Arc::new(HeaderChain::create(headers)?)),
+            corpus: None,
+            catalog: None,
+        })
+    }
+
     /// Open only the files this process already opens. `None` does not create
     /// that database, so a list walk does not take the header lock.
     pub fn parts(
@@ -562,5 +571,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(numbers, vec![1, 2, 4]);
+    }
+
+    #[tokio::test]
+    async fn open_headers_does_not_open_corpus_or_venues() {
+        let dir = TempDir::new();
+        let headers = dir.0.join("headers.redb");
+        let store = LocalStore::open_headers(&headers).unwrap();
+        assert!(headers.exists());
+        assert!(!dir.0.join("corpus.redb").exists());
+        assert!(!dir.0.join("venues.redb").exists());
+        let err = store.put_blocks(&[]).await.unwrap_err();
+        assert!(err.to_string().contains("corpus is not open"));
+        let err = store.cursor("list").await.unwrap_err();
+        assert!(err.to_string().contains("venues are not open"));
+        assert_eq!(store.header_cursor().await.unwrap(), 0);
     }
 }
