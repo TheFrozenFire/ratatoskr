@@ -150,7 +150,7 @@ impl HistoryPeer for LocalPeer {
 
     async fn headers(&self, start: u64, count: u64) -> eyre::Result<Vec<HeaderRecord>> {
         let count = ipc::clamp_count(BatchKind::Headers, Some(count));
-        match range_response(&self.slots, &self.wanted, start, count, RangeKind::Headers).await {
+        match range_response(&self.slots, &self.wanted, start, count, BatchKind::Headers).await {
             Ok(RangeRecords::Headers(records)) => Ok(records),
             Ok(RangeRecords::Blocks(_)) => Err(eyre::eyre!("header request returned blocks")),
             Err(err) => Err(eyre::eyre!(err)),
@@ -159,7 +159,7 @@ impl HistoryPeer for LocalPeer {
 
     async fn chunk(&self, start: u64, count: u64) -> eyre::Result<Vec<BlockRecord>> {
         let count = ipc::clamp_count(BatchKind::Chunk, Some(count));
-        match range_response(&self.slots, &self.wanted, start, count, RangeKind::Chunk).await {
+        match range_response(&self.slots, &self.wanted, start, count, BatchKind::Chunk).await {
             Ok(RangeRecords::Blocks(records)) => Ok(records),
             Ok(RangeRecords::Headers(_)) => Err(eyre::eyre!("chunk request returned headers")),
             Err(err) => Err(eyre::eyre!(err)),
@@ -699,7 +699,9 @@ async fn run_job(
             count,
             reply,
         } => {
-            let result = fetch_chunk(&session, start, count).await;
+            let result = fetch_block_range(&session, start, count)
+                .await
+                .map_err(|err| format!("{err:#}"));
             // A peer can refuse one old block and still serve others.
             // Drop the socket only when the stream itself failed.
             let failed = result.as_ref().is_err_and(|err| session_is_dead(err));
@@ -721,7 +723,9 @@ async fn run_job(
             count,
             reply,
         } => {
-            let result = fetch_headers_job(&session, start, count).await;
+            let result = fetch_header_range(&session, start, count)
+                .await
+                .map_err(|err| format!("{err:#}"));
             let failed = result.as_ref().is_err_and(|err| session_is_dead(err));
             match &result {
                 Ok(records) if !records.is_empty() => {
@@ -768,26 +772,6 @@ fn session_is_dead(err: &str) -> bool {
         || err.contains("broken pipe")
 }
 
-async fn fetch_chunk(
-    session: &OutboundSession,
-    start: u64,
-    count: u64,
-) -> Result<Vec<BlockRecord>, String> {
-    fetch_block_range(session, start, count)
-        .await
-        .map_err(|err| format!("{err:#}"))
-}
-
-async fn fetch_headers_job(
-    session: &OutboundSession,
-    start: u64,
-    count: u64,
-) -> Result<Vec<HeaderRecord>, String> {
-    fetch_header_range(session, start, count)
-        .await
-        .map_err(|err| format!("{err:#}"))
-}
-
 fn apply_catalog_cmd(catalog: &catalog::Catalog, cmd: CatalogCmd) {
     match cmd {
         CatalogCmd::WritePublished { peers, reply } => {
@@ -799,7 +783,7 @@ fn apply_catalog_cmd(catalog: &catalog::Catalog, cmd: CatalogCmd) {
     }
 }
 
-fn census_counts(peers: &[DnsPeer]) -> (usize, usize, usize, usize) {
+fn census_json(peers: &[DnsPeer], catalog_path: &Path) -> Value {
     let all = peers
         .iter()
         .filter(|peer| peer.source & DNS_ALL != 0)
@@ -816,11 +800,6 @@ fn census_counts(peers: &[DnsPeer]) -> (usize, usize, usize, usize) {
         .iter()
         .filter(|peer| peer.source & DNS_SNAP != 0 && peer.source & DNS_ALL == 0)
         .count();
-    (all, snap, both, snap_only)
-}
-
-fn census_json(peers: &[DnsPeer], catalog_path: &Path) -> Value {
-    let (all, snap, both, snap_only) = census_counts(peers);
     json!({
         "ok": true,
         "peers": peers.len(),
@@ -890,11 +869,6 @@ async fn handle_conn(
             BatchKind::Chunk
         };
         let count = ipc::clamp_count(kind, request.count);
-        let kind = if request.op == "headers" {
-            RangeKind::Headers
-        } else {
-            RangeKind::Chunk
-        };
         match range_response(&slots, &wanted, start, count, kind).await {
             Ok(records) => {
                 let body = match records {
@@ -1002,18 +976,12 @@ async fn fetch_response(slots: &Mutex<Vec<Slot>>, block: Option<u64>) -> Value {
     json!({"ok": false, "error": errors.join("; ")})
 }
 
-#[derive(Clone, Copy)]
-enum RangeKind {
-    Chunk,
-    Headers,
-}
-
 async fn range_response(
     slots: &Mutex<Vec<Slot>>,
     wanted: &AtomicU64,
     start: u64,
     count: u64,
-    kind: RangeKind,
+    kind: BatchKind,
 ) -> Result<RangeRecords, String> {
     // A pipeline asks for later blocks alongside the cursor. The dial
     // target stays on the oldest block a client still needs.
@@ -1050,12 +1018,12 @@ async fn range_response(
                 }
                 let (reply_tx, reply_rx) = oneshot::channel();
                 let job = match kind {
-                    RangeKind::Chunk => Job::Chunk {
+                    BatchKind::Chunk => Job::Chunk {
                         start,
                         count,
                         reply: reply_tx,
                     },
-                    RangeKind::Headers => Job::Headers {
+                    BatchKind::Headers => Job::Headers {
                         start,
                         count,
                         reply: reply_tx,
