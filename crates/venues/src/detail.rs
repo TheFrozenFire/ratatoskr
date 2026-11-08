@@ -939,6 +939,7 @@ fn quote_concentrated(
     let mut sqrt = pool.sqrt_price_x96;
     let mut liquidity = pool.liquidity;
     let mut tick = pool.tick;
+    let mut include_tick = zero_for_one;
     let mut remaining = amount_in;
     let mut amount_out = U256::ZERO;
     let mut fee_paid = U256::ZERO;
@@ -947,14 +948,26 @@ fn quote_concentrated(
         if remaining.is_zero() {
             break;
         }
-        let boundary = next_initialized(pool, tick, zero_for_one);
+        let boundary = next_initialized(pool, tick, zero_for_one, include_tick);
+        include_tick = false;
         let target = match boundary {
             Some(next) => sqrt_at_tick(next)?,
             None if zero_for_one => min_sqrt(),
             None => max_sqrt(),
         };
-        if zero_for_one && target >= sqrt || !zero_for_one && target <= sqrt {
+        // A price already on an initialized tick still has to cross it. The
+        // snapshot's liquidity includes that tick.
+        let on_tick = boundary.is_some() && target == sqrt;
+        if !on_tick && (zero_for_one && target >= sqrt || !zero_for_one && target <= sqrt) {
             break;
+        }
+        if on_tick {
+            let Some(crossed) = boundary else {
+                break;
+            };
+            liquidity = add_liquidity(liquidity, net_on_cross(pool, crossed, zero_for_one))?;
+            tick = crossed;
+            continue;
         }
         if liquidity == 0 {
             let Some(crossed) = boundary else {
@@ -1052,11 +1065,22 @@ fn swap_step(
     })
 }
 
-fn next_initialized(pool: &Concentrated, tick: i32, zero_for_one: bool) -> Option<i32> {
+fn next_initialized(
+    pool: &Concentrated,
+    tick: i32,
+    zero_for_one: bool,
+    include_tick: bool,
+) -> Option<i32> {
     if zero_for_one {
         pool.ticks
             .iter()
-            .filter(|word| word.tick < tick)
+            .filter(|word| {
+                if include_tick {
+                    word.tick <= tick
+                } else {
+                    word.tick < tick
+                }
+            })
             .map(|word| word.tick)
             .max()
     } else {
@@ -1933,20 +1957,33 @@ fn walk_ladder(pool: &Concentrated, zero_for_one: bool) -> Result<Vec<LadderStep
     let mut sqrt = pool.sqrt_price_x96;
     let mut liquidity = pool.liquidity;
     let mut tick = pool.tick;
+    let mut include_tick = zero_for_one;
     let mut input = U256::ZERO;
     let mut output = U256::ZERO;
     let mut fee_paid = U256::ZERO;
     let mut steps = Vec::new();
     let limit = pool.ticks.len() + 1;
     for _ in 0..=limit {
-        let boundary = next_initialized(pool, tick, zero_for_one);
+        let boundary = next_initialized(pool, tick, zero_for_one, include_tick);
+        include_tick = false;
         let (target, tick_end) = match boundary {
             Some(next) => (sqrt_at_tick(next)?, next),
             None if zero_for_one => (min_sqrt(), -MAX_TICK),
             None => (max_sqrt(), MAX_TICK),
         };
-        if zero_for_one && target >= sqrt || !zero_for_one && target <= sqrt {
+        // A price already on an initialized tick still has to cross it. The
+        // snapshot's liquidity includes that tick.
+        let on_tick = boundary.is_some() && target == sqrt;
+        if !on_tick && (zero_for_one && target >= sqrt || !zero_for_one && target <= sqrt) {
             break;
+        }
+        if on_tick {
+            let Some(crossed) = boundary else {
+                break;
+            };
+            liquidity = add_liquidity(liquidity, net_on_cross(pool, crossed, zero_for_one))?;
+            tick = crossed;
+            continue;
         }
         if liquidity == 0 {
             let Some(crossed) = boundary else {
@@ -2485,6 +2522,54 @@ mod tests {
                 assert_eq!(via, direct, "{amount}");
             }
         }
+    }
+
+    #[test]
+    fn ladder_crosses_the_initialized_tick_under_the_price() {
+        let sqrt = sqrt_at_tick(200).unwrap();
+        let pool = Concentrated {
+            kind: UNI_V3,
+            id: B256::ZERO,
+            home: Address::ZERO,
+            hooks: Address::ZERO,
+            token0: address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            token1: address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+            fee_pips: Some(3000),
+            protocol_fee: 0,
+            tick_spacing: 60,
+            sqrt_price_x96: sqrt,
+            tick: 200,
+            liquidity: 0,
+            next_scan: None,
+            bitmaps: Vec::new(),
+            ticks: vec![
+                TickWord {
+                    tick: 0,
+                    liquidity_gross: 1_000,
+                    liquidity_net: 1_000,
+                },
+                TickWord {
+                    tick: 200,
+                    liquidity_gross: 1_000,
+                    liquidity_net: -1_000,
+                },
+            ],
+            flags: 0,
+        };
+        let ladder = concentrated_ladder(&pool).unwrap();
+        let step = ladder.zero_for_one.first().expect("down ladder");
+        assert_eq!(step.liquidity, 1_000);
+        assert_eq!(step.sqrt_start, sqrt);
+        // Price sits above tick 200, so that tick is already crossed and the
+        // in-range liquidity is zero. The downward walk has to uncross it
+        // before quoting the range underneath.
+        let above = sqrt_at_tick(201).unwrap();
+        let mut mid = pool.clone();
+        mid.sqrt_price_x96 = sqrt + (above - sqrt) / U256::from(2u8);
+        let ladder = concentrated_ladder(&mid).unwrap();
+        assert_eq!(ladder.zero_for_one.len(), 1);
+        assert_eq!(ladder.zero_for_one[0].liquidity, 1_000);
+        assert_eq!(ladder.zero_for_one[0].sqrt_start, sqrt);
     }
 
     #[test]

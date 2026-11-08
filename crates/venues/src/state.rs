@@ -366,6 +366,18 @@ pub fn is_canonical(detail: &PoolDetail) -> bool {
 
 pub fn derive_curve(detail: &PoolDetail, generation: u64) -> Result<CurveRecord, String> {
     let (kind, id) = detail_id(detail)?;
+    if let PoolDetail::Concentrated(pool) = detail {
+        if pool.sqrt_price_x96.is_zero() {
+            // Tag 0, reason 5: the pool was created and never initialized.
+            return Ok(CurveRecord {
+                kind,
+                id,
+                generation,
+                version: CURVE_VERSION,
+                payload: vec![0, 5],
+            });
+        }
+    }
     let payload = if !is_canonical(detail) {
         let mut payload = vec![0];
         payload.push(skip_reason(detail));
@@ -951,11 +963,14 @@ impl Catalog {
             }
             if needs_ticks(row.kind, &mutable) {
                 let cursor = first_missing_page(&self.entities, row.kind, row.id, &mutable)?;
-                let mut job = blank_job(STAGE_TICKS, row.kind, row.id);
-                job.generation = mutable.generation;
-                job.tick_cursor = i32::try_from(cursor).unwrap_or(i32::MAX);
-                jobs.push(job);
-                continue;
+                let pages = mutable.tick_count.div_ceil(TICK_PAGE);
+                if cursor < pages {
+                    let mut job = blank_job(STAGE_TICKS, row.kind, row.id);
+                    job.generation = mutable.generation;
+                    job.tick_cursor = i32::try_from(cursor).unwrap_or(i32::MAX);
+                    jobs.push(job);
+                    continue;
+                }
             }
             let stale = match &state.curve {
                 Some(curve) => {
@@ -2978,6 +2993,59 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_does_not_reread_a_complete_tick_page() {
+        let (_dir, catalog) = open();
+        let mut sample = row(9);
+        sample.kind = UNI_V3;
+        catalog
+            .commit_chunk("list", 1, std::slice::from_ref(&sample), Put::Merge)
+            .unwrap();
+        catalog
+            .put_immutable(&[ImmutableRow {
+                kind: UNI_V3,
+                id: sample.id,
+                body: b"i".to_vec(),
+            }])
+            .unwrap();
+        let write = MutableWrite {
+            kind: UNI_V3,
+            id: sample.id,
+            block: 4,
+            class: CLASS_NONE,
+            bitmap: B256::ZERO,
+            tick_count: 1,
+            truncated: false,
+            next_scan: None,
+            body: b"m".to_vec(),
+        };
+        let stored = catalog.put_mutable(&write).unwrap();
+        assert_eq!(catalog.reconcile(1).unwrap(), 1);
+        assert_eq!(catalog.claim_work(STAGE_TICKS, 4, 1, 10).unwrap().len(), 1);
+        catalog
+            .put_tick_pages(&[TickPage {
+                kind: UNI_V3,
+                id: sample.id,
+                page: 0,
+                generation: stored.generation,
+                ticks: vec![TickWord {
+                    tick: 60,
+                    liquidity_gross: 1,
+                    liquidity_net: 1,
+                }],
+            }])
+            .unwrap();
+        catalog
+            .finish_work(&[(STAGE_TICKS, UNI_V3, sample.id)], &[])
+            .unwrap();
+        assert_eq!(catalog.reconcile(2).unwrap(), 1);
+        assert!(catalog
+            .claim_work(STAGE_TICKS, 4, 2, 10)
+            .unwrap()
+            .is_empty());
+        assert_eq!(catalog.claim_work(STAGE_CURVE, 4, 2, 10).unwrap().len(), 1);
+    }
+
+    #[test]
     fn a_stored_product_curve_uses_the_row_kind() {
         let (_dir, catalog) = open();
         let sample = row(3);
@@ -3072,5 +3140,31 @@ mod tests {
             ..mint.clone()
         };
         assert!(classify_log(&factory, has, address).is_none());
+    }
+
+    #[test]
+    fn an_uninitialized_pool_stores_a_skipped_curve() {
+        let detail = PoolDetail::Concentrated(crate::detail::Concentrated {
+            kind: UNI_V3,
+            id: row(1).id,
+            home: Address::ZERO,
+            hooks: Address::ZERO,
+            token0: Address::ZERO,
+            token1: Address::ZERO,
+            fee_pips: Some(3000),
+            protocol_fee: 0,
+            tick_spacing: 60,
+            sqrt_price_x96: U256::ZERO,
+            tick: 0,
+            liquidity: 0,
+            next_scan: None,
+            bitmaps: Vec::new(),
+            ticks: Vec::new(),
+            flags: 0,
+        });
+        let curve = derive_curve(&detail, 3).unwrap();
+        assert_eq!(curve.kind, UNI_V3);
+        assert_eq!(curve.id, row(1).id);
+        assert_eq!(curve.payload, vec![0, 5]);
     }
 }
