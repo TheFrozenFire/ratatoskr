@@ -24,9 +24,7 @@ Sockets are for other processes. Colocated pipelines call `LocalStore` and `Loca
 
 ## Cursor
 
-Header sync is the path that awaits `Sink::push`. `HeaderSource` moves its cursor only when the sink returns `Applied`. A rejected header push retries the same cursor.
-
-A rejected receipt push fails the run. The supervisor stops the pipelines.
+Header sync and the receipt walk both await `Sink::push`. `HeaderSource` moves its cursor only when the sink returns `Applied`. A rejected header push retries the same cursor. A rejected receipt push fails the run, and the supervisor stops the pipelines.
 
 Venue job cursors move inside `commit_chunk`. `VenueSource` does not await `Sink::push`.
 
