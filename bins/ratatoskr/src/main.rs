@@ -117,39 +117,13 @@ async fn supervise(args: Args) -> eyre::Result<()> {
     let services = parse_services(&args.services)?;
     let pipelines = parse_pipelines(&args.pipeline)?;
     let egress = egress_from(args.bind4, args.bind6)?;
-    check_combination(&services, &pipelines)?;
-    if pipelines.state && args.data_dir.is_none() {
-        return Err(eyre::eyre!(
-            "state needs --data-dir and does not open the live catalog"
-        ));
-    }
-    if args.summarize && args.data_dir.is_none() {
-        return Err(eyre::eyre!("--summarize needs --data-dir"));
-    }
     if args.export_fit.is_some() && args.data_dir.is_none() {
         return Err(eyre::eyre!("--export-fit needs --data-dir"));
-    }
-    if args.copy_from.is_some() && args.data_dir.is_none() {
-        return Err(eyre::eyre!("--copy-from needs --data-dir"));
     }
     if let Some(dir) = &args.data_dir {
         refuse_live(dir)?;
     }
     let paths = paths_from(args.data_dir.as_deref())?;
-    if let Some(src) = &args.copy_from {
-        let report = venues::sample_identities(src, &paths.venues, args.sample_size)?;
-        tracing::info!(
-            copied = report.copied,
-            anchor = report.anchor,
-            "identity sample"
-        );
-        for (kind, count) in &report.by_kind {
-            tracing::info!(kind = venues::kind_name(*kind), count, "sample kind");
-        }
-        if !report.anchor {
-            tracing::warn!("sample did not include the USDC/WETH 0.3% pool");
-        }
-    }
     if let Some(out) = args.export_fit.clone() {
         let rpcs = resolve_rpcs(&args.rpc, true)?;
         let venues_path = paths.venues.clone();
@@ -166,6 +140,32 @@ async fn supervise(args: Args) -> eyre::Result<()> {
         println!("chain_fail {}", report.chain_fail);
         println!("chain_absent {}", report.chain_absent);
         return Ok(());
+    }
+    check_combination(&services, &pipelines)?;
+    if pipelines.state && args.data_dir.is_none() {
+        return Err(eyre::eyre!(
+            "state needs --data-dir and does not open the live catalog"
+        ));
+    }
+    if args.summarize && args.data_dir.is_none() {
+        return Err(eyre::eyre!("--summarize needs --data-dir"));
+    }
+    if args.copy_from.is_some() && args.data_dir.is_none() {
+        return Err(eyre::eyre!("--copy-from needs --data-dir"));
+    }
+    if let Some(src) = &args.copy_from {
+        let report = venues::sample_identities(src, &paths.venues, args.sample_size)?;
+        tracing::info!(
+            copied = report.copied,
+            anchor = report.anchor,
+            "identity sample"
+        );
+        for (kind, count) in &report.by_kind {
+            tracing::info!(kind = venues::kind_name(*kind), count, "sample kind");
+        }
+        if !report.anchor {
+            tracing::warn!("sample did not include the USDC/WETH 0.3% pool");
+        }
     }
     if args.summarize {
         let catalog = venues::Catalog::open(&paths.venues)?;
