@@ -17,7 +17,7 @@ mod remote;
 mod serve;
 
 pub use remote::RemoteStore;
-pub use serve::serve;
+pub use serve::{db_socket, serve};
 pub use venues::EntityStore;
 
 const HEADER_BATCH: u64 = 8192;

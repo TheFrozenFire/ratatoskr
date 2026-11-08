@@ -12,7 +12,6 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 eyre.workspace = true
-chain.workspace = true
 ipc.workspace = true
 pipeline.workspace = true
 store.workspace = true

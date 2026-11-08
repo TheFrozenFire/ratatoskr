@@ -1,12 +1,9 @@
 //! Serve the entity files on `~/.config/ratatoskr/db.sock`.
 
 use clap::Parser;
-use eyre::WrapErr;
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
-use store::{serve, LocalStore};
+use store::{db_socket, serve, LocalStore};
 
 #[derive(Debug, Parser)]
 #[command(name = "ratatoskr-db")]
@@ -38,12 +35,4 @@ async fn main() -> eyre::Result<()> {
 fn data_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     PathBuf::from(home).join(".local/share/ratatoskr")
-}
-
-fn db_socket() -> eyre::Result<PathBuf> {
-    let home = std::env::var("HOME").wrap_err("HOME")?;
-    let dir = PathBuf::from(home).join(".config/ratatoskr");
-    fs::create_dir_all(&dir)?;
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
-    Ok(dir.join("db.sock"))
 }

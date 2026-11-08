@@ -1,8 +1,7 @@
-//! List walks and corpus import.
+//! List walks, corpus import, and history.
 //!
-//! The standalone binary opens the header chain only for the bloom scan, then
-//! drops it before receipt fetch. Cache rows are `put_bodies` / `put_blocks`
-//! on the store, awaited before `commit_chunk`.
+//! Cache rows are `put_bodies` / `put_blocks` on the store, awaited before
+//! `commit_chunk`.
 
 use crate::{Sink, Source};
 use ipc::HistoryPeer;

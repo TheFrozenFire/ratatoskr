@@ -7,7 +7,7 @@ use api::{decode_request, encode_error, encode_response, payload_len, Op, Reply,
 use eyre::WrapErr;
 use serde_json::Value;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -15,6 +15,15 @@ use tokio::{
 };
 
 use crate::{EntityStore, LocalStore};
+
+/// `~/.config/ratatoskr/db.sock`. The directory is created mode 0700.
+pub fn db_socket() -> eyre::Result<PathBuf> {
+    let home = std::env::var("HOME").wrap_err("HOME")?;
+    let dir = PathBuf::from(home).join(".config/ratatoskr");
+    std::fs::create_dir_all(&dir)?;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    Ok(dir.join("db.sock"))
+}
 
 /// Remove a stale socket file, bind mode 0600, and serve until the listener fails.
 pub async fn serve(store: Arc<LocalStore>, socket: &Path) -> eyre::Result<()> {

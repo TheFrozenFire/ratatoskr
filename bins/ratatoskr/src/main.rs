@@ -6,7 +6,6 @@ use eyre::WrapErr;
 use peer::LocalPeer;
 use pipeline::{HeaderSource, ReceiptSource, Source, StoreSink, VenueSource};
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use store::LocalStore;
@@ -449,16 +448,8 @@ fn default_paths() -> eyre::Result<Paths> {
         corpus: corpus::Corpus::default_path(),
         venues: venues::Catalog::default_path(),
         peer_socket: peer::socket_path()?,
-        db_socket: db_socket()?,
+        db_socket: store::db_socket()?,
     })
-}
-
-fn db_socket() -> eyre::Result<PathBuf> {
-    let home = std::env::var("HOME").wrap_err("HOME")?;
-    let dir = PathBuf::from(home).join(".config/ratatoskr");
-    std::fs::create_dir_all(&dir)?;
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
-    Ok(dir.join("db.sock"))
 }
 
 #[cfg(test)]

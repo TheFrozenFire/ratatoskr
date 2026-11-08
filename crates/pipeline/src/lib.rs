@@ -16,7 +16,7 @@ use model::{BlockRecord, HeaderRecord};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use store::{EntityStore, LocalStore};
+use store::{EntityStore, LocalStore, RemoteStore};
 use tokio::sync::mpsc;
 use venues::{Put, ReceiptBody, VenueRow};
 
@@ -129,49 +129,60 @@ impl<S: EntityStore> StoreSink<S> {
     }
 }
 
-// `EntityStore` does not promise `Send` futures. `LocalStore`'s are, which
-// this `dyn Sink` future needs. The trait stays concrete, not `dyn`.
-impl Sink for StoreSink<LocalStore> {
-    fn name(&self) -> &str {
-        "store"
-    }
-
-    fn push<'a>(
-        &'a mut self,
-        batch: RecordBatch,
-    ) -> Pin<Box<dyn Future<Output = eyre::Result<SinkReply>> + Send + 'a>> {
-        pin(async move {
-            match batch {
-                RecordBatch::Headers(records) => applied(self.store.append_headers(&records).await),
-                RecordBatch::Blocks {
-                    cursor_key: Some(key),
-                    records,
-                } => {
-                    if key.is_empty() {
-                        return Err(eyre::eyre!("empty cursor key"));
-                    }
-                    applied(self.store.write_records(&key, &records).await)
-                }
-                RecordBatch::Blocks {
-                    cursor_key: None,
-                    records,
-                } => applied(self.store.put_blocks(&records).await),
-                RecordBatch::Hits {
-                    job,
-                    scanned_to,
-                    blocks,
-                } => applied(self.store.commit_hits(&job, scanned_to, &blocks).await),
-                RecordBatch::Bodies(bodies) => applied(self.store.put_bodies(&bodies).await),
-                RecordBatch::Venues {
-                    job,
-                    next,
-                    put,
-                    rows,
-                } => applied(self.store.commit_chunk(&job, next, &rows, put).await),
+// `EntityStore` does not promise `Send` futures. These stores' futures are
+// `Send`, which this `dyn Sink` needs. The trait stays concrete, not `dyn`.
+macro_rules! impl_store_sink {
+    ($ty:ty) => {
+        impl Sink for StoreSink<$ty> {
+            fn name(&self) -> &str {
+                "store"
             }
-        })
-    }
+
+            fn push<'a>(
+                &'a mut self,
+                batch: RecordBatch,
+            ) -> Pin<Box<dyn Future<Output = eyre::Result<SinkReply>> + Send + 'a>> {
+                pin(async move {
+                    match batch {
+                        RecordBatch::Headers(records) => {
+                            applied(self.store.append_headers(&records).await)
+                        }
+                        RecordBatch::Blocks {
+                            cursor_key: Some(key),
+                            records,
+                        } => {
+                            if key.is_empty() {
+                                return Err(eyre::eyre!("empty cursor key"));
+                            }
+                            applied(self.store.write_records(&key, &records).await)
+                        }
+                        RecordBatch::Blocks {
+                            cursor_key: None,
+                            records,
+                        } => applied(self.store.put_blocks(&records).await),
+                        RecordBatch::Hits {
+                            job,
+                            scanned_to,
+                            blocks,
+                        } => applied(self.store.commit_hits(&job, scanned_to, &blocks).await),
+                        RecordBatch::Bodies(bodies) => {
+                            applied(self.store.put_bodies(&bodies).await)
+                        }
+                        RecordBatch::Venues {
+                            job,
+                            next,
+                            put,
+                            rows,
+                        } => applied(self.store.commit_chunk(&job, next, &rows, put).await),
+                    }
+                })
+            }
+        }
+    };
 }
+
+impl_store_sink!(LocalStore);
+impl_store_sink!(RemoteStore);
 
 fn pin<'a, T>(
     future: impl Future<Output = T> + Send + 'a,

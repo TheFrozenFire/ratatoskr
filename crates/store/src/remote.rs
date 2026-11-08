@@ -10,6 +10,7 @@ use venues::{Put, ReceiptBody, VenueRow};
 
 use crate::{short_header_range, EntityStore};
 
+#[derive(Clone)]
 pub struct RemoteStore {
     socket: PathBuf,
 }

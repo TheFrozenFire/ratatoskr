@@ -10,9 +10,7 @@ name = "ratatoskr-venues"
 path = "src/main.rs"
 
 [dependencies]
-chain.workspace = true
 clap.workspace = true
-corpus.workspace = true
 eyre.workspace = true
 ipc.workspace = true
 pipeline.workspace = true

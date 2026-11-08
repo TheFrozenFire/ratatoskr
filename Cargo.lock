@@ -2276,7 +2276,6 @@ dependencies = [
 name = "headers"
 version = "0.1.0"
 dependencies = [
- "chain",
  "clap",
  "eyre",
  "ipc",
@@ -2733,7 +2732,6 @@ name = "ingest"
 version = "0.1.0"
 dependencies = [
  "clap",
- "corpus",
  "eyre",
  "ipc",
  "pipeline",
@@ -5707,9 +5705,7 @@ dependencies = [
 name = "venues-cli"
 version = "0.1.0"
 dependencies = [
- "chain",
  "clap",
- "corpus",
  "eyre",
  "ipc",
  "pipeline",
