@@ -164,6 +164,9 @@ fn pair_row(log: &NormalizedLog) -> Option<VenueRow> {
         None,
         Some(log.block_number),
         None,
+        Some(log.block_hash),
+        Some(log.tx_index),
+        Some(log.log_index),
     ))
 }
 
@@ -178,6 +181,9 @@ fn pool_row(log: &NormalizedLog) -> Option<VenueRow> {
         Some(pool.tick_spacing),
         Some(log.block_number),
         None,
+        Some(log.block_hash),
+        Some(log.tx_index),
+        Some(log.log_index),
     ))
 }
 
@@ -200,6 +206,9 @@ fn v4_row(log: &NormalizedLog) -> Option<VenueRow> {
         tick_spacing,
         Some(log.block_number),
         Some(hooks),
+        Some(log.block_hash),
+        Some(log.tx_index),
+        Some(log.log_index),
     ))
 }
 
@@ -216,6 +225,9 @@ fn bal_v2_pool(log: &NormalizedLog) -> Option<VenueRow> {
         None,
         Some(log.block_number),
         Some(address_from_topic(log.topics[2])),
+        Some(log.block_hash),
+        Some(log.tx_index),
+        Some(log.log_index),
     ))
 }
 
@@ -232,6 +244,9 @@ fn bal_v2_tokens(log: &NormalizedLog) -> Option<VenueRow> {
         None,
         Some(log.block_number),
         None,
+        Some(log.block_hash),
+        Some(log.tx_index),
+        Some(log.log_index),
     ))
 }
 
@@ -248,6 +263,9 @@ fn bal_v3_row(log: &NormalizedLog) -> Option<VenueRow> {
         None,
         Some(log.block_number),
         None,
+        Some(log.block_hash),
+        Some(log.tx_index),
+        Some(log.log_index),
     ))
 }
 
@@ -268,6 +286,9 @@ fn metric_row(log: &NormalizedLog) -> Option<VenueRow> {
         None,
         Some(log.block_number),
         None,
+        Some(log.block_hash),
+        Some(log.tx_index),
+        Some(log.log_index),
     ))
 }
 
@@ -281,6 +302,9 @@ fn row(
     tick_spacing: Option<i32>,
     block_number: Option<u64>,
     extra: Option<Address>,
+    block_hash: Option<B256>,
+    tx_index: Option<u64>,
+    log_index: Option<u64>,
 ) -> VenueRow {
     VenueRow {
         kind,
@@ -291,6 +315,9 @@ fn row(
         tick_spacing,
         block_number,
         extra,
+        block_hash,
+        tx_index,
+        log_index,
     }
 }
 
@@ -559,7 +586,7 @@ mod tests {
         let mut data = Vec::new();
         data.extend_from_slice(&be_word(60));
         data.extend_from_slice(&addr_word(pool));
-        let log = bare(
+        let mut log = bare(
             known().raw_v3_a,
             vec![
                 topic_pool(),
@@ -569,9 +596,15 @@ mod tests {
             ],
             data,
         );
+        log.block_hash = b256!("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+        log.tx_index = 4;
+        log.log_index = 8;
         let row = rows_from_log(&log);
         assert_eq!(row[0].kind, V3_FORK);
         assert_eq!(row[0].fee, Some(3000));
         assert_eq!(row[0].tick_spacing, Some(60));
+        assert_eq!(row[0].block_hash, Some(log.block_hash));
+        assert_eq!(row[0].tx_index, Some(log.tx_index));
+        assert_eq!(row[0].log_index, Some(log.log_index));
     }
 }

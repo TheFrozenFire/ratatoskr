@@ -136,6 +136,9 @@ async fn dispatch(store: &LocalStore, op: Op) -> eyre::Result<Reply> {
         Op::ScanBlocks { after, limit } => {
             Ok(Reply::Scan(store.page_blocks(after, limit as usize).await?))
         }
+        Op::ScanVenues { kind, after, limit } => Ok(Reply::Venues(
+            store.page_venues(kind, after, limit as usize).await?,
+        )),
         Op::Cursor { job } => Ok(Reply::Cursor(store.cursor(&job).await?)),
         Op::CommitChunk {
             job,

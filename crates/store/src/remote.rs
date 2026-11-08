@@ -48,6 +48,39 @@ impl RemoteStore {
         decode_response(name, &value, &body)
     }
 
+    /// Every stored row of `kind`, one page at a time.
+    pub async fn scan_venues(&self, kind: u8) -> eyre::Result<Vec<VenueRow>> {
+        let mut after = None;
+        let mut rows = Vec::new();
+        loop {
+            let page = match self
+                .request(Op::ScanVenues {
+                    kind,
+                    after,
+                    limit: SCAN_PAGE,
+                })
+                .await?
+            {
+                Reply::Venues(page) => page,
+                _ => return Err(eyre!("unexpected reply")),
+            };
+            let short = (page.len() as u64) < SCAN_PAGE;
+            let end = page.last().map(|row| row.id);
+            rows.extend(page);
+            if short {
+                break;
+            }
+            let Some(end) = end else {
+                break;
+            };
+            if after.is_some_and(|after| end <= after) {
+                break;
+            }
+            after = Some(end);
+        }
+        Ok(rows)
+    }
+
     async fn request(&self, op: Op) -> eyre::Result<Reply> {
         let socket = self.socket.clone();
         tokio::task::spawn_blocking(move || RemoteStore { socket }.call(op))

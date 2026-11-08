@@ -8,6 +8,7 @@ use alloy_primitives::{Address, B256};
 use eyre::WrapErr;
 use redb::{Database, Durability, ReadableTable, TableDefinition};
 use std::collections::BTreeMap;
+use std::ops::Bound;
 use std::path::{Path, PathBuf};
 
 const VENUES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("venues");
@@ -19,10 +20,12 @@ const HIT_SCAN: TableDefinition<&str, u64> = TableDefinition::new("hit_scan");
 /// Era1 receipt payload for one block, so a retry does not range-read it again.
 const BODIES: TableDefinition<u64, &[u8]> = TableDefinition::new("bodies");
 const RECORD_VERSION: u8 = 1;
+const RECORD_VERSION_OBS: u8 = 2;
 const FLAG_FEE: u8 = 1;
 const FLAG_TICK: u8 = 2;
 const FLAG_BLOCK: u8 = 4;
 const FLAG_EXTRA: u8 = 8;
+const FLAG_OBS: u8 = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Put {
@@ -42,6 +45,9 @@ pub struct VenueRow {
     pub tick_spacing: Option<i32>,
     pub block_number: Option<u64>,
     pub extra: Option<Address>,
+    pub block_hash: Option<B256>,
+    pub tx_index: Option<u64>,
+    pub log_index: Option<u64>,
 }
 
 impl VenueRow {
@@ -158,9 +164,9 @@ impl Catalog {
                     (Some(_), Put::IfAbsent) => None,
                     (Some(bytes), Put::Merge) => {
                         let old = decode_row(row.kind, row.id, &bytes)?;
-                        Some(encode_row(&merge(old, row.clone())))
+                        Some(encode_row(&merge(old, row.clone()))?)
                     }
-                    (None, _) => Some(encode_row(row)),
+                    (None, _) => Some(encode_row(row)?),
                 };
                 if let Some(bytes) = stored {
                     venues.insert(key.as_slice(), bytes.as_slice())?;
@@ -280,6 +286,57 @@ impl Catalog {
         write.commit()?;
         Ok(())
     }
+
+    /// At most `limit` rows of `kind` whose id is greater than `after`.
+    ///
+    /// The read stops when the page is full. Later keys are not visited.
+    pub fn page_venues(
+        &self,
+        kind: u8,
+        after: Option<B256>,
+        limit: usize,
+    ) -> eyre::Result<Vec<VenueRow>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let read = self.db.begin_read()?;
+        let table = match read.open_table(VENUES) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(err) => return Err(err.into()),
+        };
+        let start_key = match after {
+            Some(id) => key(kind, &id),
+            None => key(kind, &B256::ZERO),
+        };
+        let mut end_key = [0u8; 33];
+        if kind != u8::MAX {
+            end_key[0] = kind + 1;
+        }
+        let start = match after {
+            Some(_) => Bound::Excluded(start_key.as_slice()),
+            None => Bound::Included(start_key.as_slice()),
+        };
+        let end = if kind == u8::MAX {
+            Bound::Unbounded
+        } else {
+            Bound::Excluded(end_key.as_slice())
+        };
+        let mut page = Vec::with_capacity(limit);
+        for item in table.range::<&[u8]>((start, end))? {
+            if page.len() == limit {
+                break;
+            }
+            let (key_bytes, value) = item?;
+            let key_bytes = key_bytes.value();
+            if key_bytes.len() != 33 || key_bytes[0] != kind {
+                return Err(eyre::eyre!("venue key"));
+            }
+            let id = B256::from_slice(&key_bytes[1..]);
+            page.push(decode_row(kind, id, value.value())?);
+        }
+        Ok(page)
+    }
 }
 
 fn hit_key(job: &str, block: u64) -> Vec<u8> {
@@ -338,7 +395,7 @@ pub fn decode_body(bytes: &[u8]) -> eyre::Result<ReceiptBody> {
 }
 
 fn factory_of(bytes: &[u8]) -> eyre::Result<Address> {
-    if bytes.len() < 22 || bytes[0] != RECORD_VERSION {
+    if bytes.len() < 22 || !matches!(bytes[0], RECORD_VERSION | RECORD_VERSION_OBS) {
         return Err(eyre::eyre!("venue row header"));
     }
     Ok(Address::from_slice(&bytes[2..22]))
@@ -363,10 +420,20 @@ fn merge(mut old: VenueRow, new: VenueRow) -> VenueRow {
     if new.extra.is_some() {
         old.extra = new.extra;
     }
+    if new.block_hash.is_some() && new.tx_index.is_some() && new.log_index.is_some() {
+        old.block_hash = new.block_hash;
+        old.tx_index = new.tx_index;
+        old.log_index = new.log_index;
+    }
     old
 }
 
-pub fn encode_row(row: &VenueRow) -> Vec<u8> {
+pub fn encode_row(row: &VenueRow) -> eyre::Result<Vec<u8>> {
+    let observation = match (row.block_hash, row.tx_index, row.log_index) {
+        (None, None, None) => None,
+        (Some(hash), Some(tx_index), Some(log_index)) => Some((hash, tx_index, log_index)),
+        _ => return Err(eyre::eyre!("venue row observation")),
+    };
     let mut flags = 0_u8;
     if row.fee.is_some() {
         flags |= FLAG_FEE;
@@ -380,9 +447,17 @@ pub fn encode_row(row: &VenueRow) -> Vec<u8> {
     if row.extra.is_some() {
         flags |= FLAG_EXTRA;
     }
+    if observation.is_some() {
+        flags |= FLAG_OBS;
+    }
     let tokens = row.tokens.len().min(16);
-    let mut out = Vec::with_capacity(2 + 20 + 1 + tokens * 20 + 16);
-    out.push(RECORD_VERSION);
+    let mut out = Vec::with_capacity(2 + 20 + 1 + tokens * 20 + 16 + 48);
+    // No observation keeps version 1, so those rows stay the bytes they are today.
+    out.push(if observation.is_some() {
+        RECORD_VERSION_OBS
+    } else {
+        RECORD_VERSION
+    });
     out.push(flags);
     out.extend_from_slice(row.factory.as_slice());
     out.push(tokens as u8);
@@ -401,14 +476,28 @@ pub fn encode_row(row: &VenueRow) -> Vec<u8> {
     if let Some(extra) = row.extra {
         out.extend_from_slice(extra.as_slice());
     }
-    out
+    if let Some((hash, tx_index, log_index)) = observation {
+        out.extend_from_slice(hash.as_slice());
+        out.extend_from_slice(&tx_index.to_le_bytes());
+        out.extend_from_slice(&log_index.to_le_bytes());
+    }
+    Ok(out)
 }
 
 pub fn decode_row(kind: u8, id: B256, bytes: &[u8]) -> eyre::Result<VenueRow> {
-    if bytes.len() < 23 || bytes[0] != RECORD_VERSION {
+    if bytes.len() < 23 {
         return Err(eyre::eyre!("venue row header"));
     }
+    let version = bytes[0];
     let flags = bytes[1];
+    let observed = flags & FLAG_OBS != 0;
+    match (version, observed) {
+        (RECORD_VERSION, false) | (RECORD_VERSION_OBS, true) => {}
+        (RECORD_VERSION, true) | (RECORD_VERSION_OBS, false) => {
+            return Err(eyre::eyre!("venue row observation"));
+        }
+        _ => return Err(eyre::eyre!("venue row header")),
+    }
     let factory = Address::from_slice(&bytes[2..22]);
     let n = bytes[22] as usize;
     let mut at = 23;
@@ -445,6 +534,18 @@ pub fn decode_row(kind: u8, id: B256, bytes: &[u8]) -> eyre::Result<VenueRow> {
     } else {
         None
     };
+    let (block_hash, tx_index, log_index) = if observed {
+        if bytes.len() < at + 32 {
+            return Err(eyre::eyre!("venue row observation"));
+        }
+        let hash = B256::from_slice(&bytes[at..at + 32]);
+        at += 32;
+        let tx_index = read_u64(bytes, &mut at)?;
+        let log_index = read_u64(bytes, &mut at)?;
+        (Some(hash), Some(tx_index), Some(log_index))
+    } else {
+        (None, None, None)
+    };
     if at != bytes.len() {
         return Err(eyre::eyre!("venue row trailing bytes"));
     }
@@ -457,6 +558,9 @@ pub fn decode_row(kind: u8, id: B256, bytes: &[u8]) -> eyre::Result<VenueRow> {
         tick_spacing,
         block_number,
         extra,
+        block_hash,
+        tx_index,
+        log_index,
     })
 }
 
@@ -537,15 +641,122 @@ mod tests {
             tick_spacing: Some(-10),
             block_number: Some(12_345),
             extra: Some(address!("5555555555555555555555555555555555555555")),
+            block_hash: None,
+            tx_index: None,
+            log_index: None,
         }
+    }
+
+    fn history() -> VenueRow {
+        let mut row = sample();
+        row.block_hash = Some(alloy_primitives::b256!(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ));
+        row.tx_index = Some(4);
+        row.log_index = Some(9);
+        row
     }
 
     #[test]
     fn row_codec_roundtrip() {
         let row = sample();
-        let bytes = encode_row(&row);
+        let bytes = encode_row(&row).unwrap();
         let back = decode_row(row.kind, row.id, &bytes).unwrap();
         assert_eq!(back, row);
+    }
+
+    #[test]
+    fn a_row_without_an_observation_stays_version_one() {
+        let row = sample();
+        let bytes = encode_row(&row).unwrap();
+        assert_eq!(bytes[0], RECORD_VERSION);
+        assert_eq!(bytes[1] & FLAG_OBS, 0);
+        assert_eq!(decode_row(row.kind, row.id, &bytes).unwrap(), row);
+    }
+
+    #[test]
+    fn a_history_row_is_version_two() {
+        let row = history();
+        let bytes = encode_row(&row).unwrap();
+        assert_eq!(bytes[0], RECORD_VERSION_OBS);
+        assert_ne!(bytes[1] & FLAG_OBS, 0);
+        let back = decode_row(row.kind, row.id, &bytes).unwrap();
+        assert_eq!(back.block_hash, row.block_hash);
+        assert_eq!(back.tx_index, row.tx_index);
+        assert_eq!(back.log_index, row.log_index);
+        assert_eq!(back, row);
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(decode_row(row.kind, row.id, &trailing).is_err());
+        let mut bare = encode_row(&sample()).unwrap();
+        bare[0] = RECORD_VERSION_OBS;
+        assert!(decode_row(row.kind, row.id, &bare).is_err());
+    }
+
+    #[test]
+    fn version_one_with_the_observation_flag_fails() {
+        let row = sample();
+        let mut bytes = encode_row(&row).unwrap();
+        bytes[1] |= FLAG_OBS;
+        assert!(decode_row(row.kind, row.id, &bytes).is_err());
+    }
+
+    #[test]
+    fn merge_keeps_a_stored_observation_when_the_new_row_has_none() {
+        let stored = history();
+        let bytes = encode_row(&stored).unwrap();
+        assert_eq!(bytes[0], RECORD_VERSION_OBS);
+        let old = decode_row(stored.kind, stored.id, &bytes).unwrap();
+        let mut incoming = sample();
+        incoming.fee = Some(100);
+        let merged = merge(old, incoming);
+        assert_eq!(merged.block_hash, stored.block_hash);
+        assert_eq!(merged.tx_index, stored.tx_index);
+        assert_eq!(merged.log_index, stored.log_index);
+        assert_eq!(merged.fee, Some(100));
+        let again = encode_row(&merged).unwrap();
+        assert_eq!(again[0], RECORD_VERSION_OBS);
+        assert_eq!(decode_row(merged.kind, merged.id, &again).unwrap(), merged);
+    }
+
+    #[test]
+    fn page_venues_excludes_the_after_id_and_other_kinds() {
+        let path = std::env::temp_dir().join(format!(
+            "ratatoskr-venues-page-{}-{}.redb",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let catalog = Catalog::open(&path).unwrap();
+        let mut rows = Vec::new();
+        for n in 1..=3 {
+            let mut row = sample();
+            row.kind = UNI_V3;
+            let mut id = B256::ZERO;
+            id[31] = n;
+            row.id = id;
+            rows.push(row);
+        }
+        let mut other = rows[0].clone();
+        other.kind = UNI_V2;
+        catalog.commit_chunk("page", 1, &rows, Put::Merge).unwrap();
+        catalog
+            .commit_chunk("page", 2, &[other], Put::Merge)
+            .unwrap();
+        let page = catalog.page_venues(UNI_V3, None, 2).unwrap();
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0].id[31], 1);
+        let next = catalog.page_venues(UNI_V3, Some(page[1].id), 2).unwrap();
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].id[31], 3);
+        assert!(catalog
+            .page_venues(UNI_V3, Some(next[0].id), 2)
+            .unwrap()
+            .is_empty());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

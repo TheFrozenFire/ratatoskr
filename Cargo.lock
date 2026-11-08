@@ -5600,13 +5600,15 @@ dependencies = [
 name = "univ3-cli"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "clap",
- "corpus",
  "eyre",
  "serde_json",
+ "store",
+ "tokio",
  "tracing",
  "tracing-subscriber",
- "univ3",
+ "venues",
 ]
 
 [[package]]

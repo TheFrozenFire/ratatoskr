@@ -294,6 +294,9 @@ fn hits_to_rows(job: &ListJob, hits: Vec<LensHit>) -> Vec<VenueRow> {
             tick_spacing: hit.tick_spacing,
             block_number: None,
             extra: None,
+            block_hash: None,
+            tx_index: None,
+            log_index: None,
         })
         .collect()
 }

@@ -20,7 +20,7 @@ mod rpc;
 
 pub use catalog::{
     decode_body, decode_row, encode_body, encode_row, kind_name, Catalog, Put, ReceiptBody,
-    VenueRow,
+    VenueRow, PANCAKE_V3, SUSHI_V3, UNI_V3, V3_FORK,
 };
 pub use entity::EntityStore;
 pub use history::BloomScan;

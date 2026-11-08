@@ -422,6 +422,9 @@ mod tests {
             tick_spacing: None,
             block_number: None,
             extra: None,
+            block_hash: None,
+            tx_index: None,
+            log_index: None,
         }
     }
 

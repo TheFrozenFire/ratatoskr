@@ -116,6 +116,16 @@ impl LocalStore {
         blocking(move || corpus.page_blocks(after, limit)).await
     }
 
+    pub(crate) async fn page_venues(
+        &self,
+        kind: u8,
+        after: Option<B256>,
+        limit: usize,
+    ) -> eyre::Result<Vec<VenueRow>> {
+        let catalog = self.catalog_db()?;
+        blocking(move || catalog.page_venues(kind, after, limit)).await
+    }
+
     pub(crate) async fn hits_page(
         &self,
         job: &str,
@@ -331,7 +341,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
-    use venues::{Put, VenueRow};
+    use venues::{encode_row, Put, VenueRow, UNI_V3};
 
     struct TempDir(PathBuf);
 
@@ -401,6 +411,9 @@ mod tests {
             tick_spacing: None,
             block_number: None,
             extra: None,
+            block_hash: None,
+            tx_index: None,
+            log_index: None,
         }
     }
 
@@ -626,13 +639,17 @@ mod tests {
 
     impl Serving {
         async fn start() -> Self {
-            static NEXT: AtomicU64 = AtomicU64::new(0);
             let dir = TempDir::new();
+            let store = Arc::new(open(&dir.0));
+            Self::from_store(dir, store).await
+        }
+
+        async fn from_store(dir: TempDir, store: Arc<LocalStore>) -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
             let n = NEXT.fetch_add(1, Ordering::Relaxed);
             let socket = std::env::temp_dir().join(format!("rsk-{}-{n}.sock", std::process::id()));
             let _ = std::fs::remove_file(&socket);
             std::fs::write(&socket, b"stale").unwrap();
-            let store = Arc::new(open(&dir.0));
             let path = socket.clone();
             let (cancel, cancel_rx) = tokio::sync::oneshot::channel();
             let thread = std::thread::spawn(move || {
@@ -795,5 +812,46 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(numbers, (0..70).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn remote_scan_venues_returns_a_version_two_pool_row() {
+        let dir = TempDir::new();
+        let store =
+            Arc::new(LocalStore::parts(None, None, Some(&dir.0.join("venues.redb"))).unwrap());
+        let serving = Serving::from_store(dir, store).await;
+        let hash = b256!("abababababababababababababababababababababababababababababababab");
+        let pool = VenueRow {
+            kind: UNI_V3,
+            id: VenueRow::address_id(address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")),
+            factory: address!("1F98431c8aD98523631AE4a59f267346ea31F984"),
+            tokens: vec![
+                address!("1111111111111111111111111111111111111111"),
+                address!("2222222222222222222222222222222222222222"),
+            ],
+            fee: Some(3000),
+            tick_spacing: Some(60),
+            block_number: Some(12_369_621),
+            extra: None,
+            block_hash: Some(hash),
+            tx_index: Some(2),
+            log_index: Some(5),
+        };
+        let mut other = pool.clone();
+        other.kind = 1;
+        other.block_hash = None;
+        other.tx_index = None;
+        other.log_index = None;
+        serving
+            .remote
+            .commit_chunk("history", 1, &[pool.clone(), other], Put::Merge)
+            .await
+            .unwrap();
+        let page = serving.remote.scan_venues(UNI_V3).await.unwrap();
+        assert_eq!(page, vec![pool]);
+        assert_eq!(encode_row(&page[0]).unwrap()[0], 2);
+        assert!(!serving._dir.0.join("univ3-pools.redb").exists());
+        assert!(!serving._dir.0.join("corpus.redb").exists());
+        assert!(serving._dir.0.join("venues.redb").exists());
     }
 }

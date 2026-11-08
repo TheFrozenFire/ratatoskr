@@ -59,6 +59,11 @@ pub enum Op {
         after: Option<u64>,
         limit: u64,
     },
+    ScanVenues {
+        kind: u8,
+        after: Option<B256>,
+        limit: u64,
+    },
     Cursor {
         job: String,
     },
@@ -103,6 +108,7 @@ impl Op {
             Op::Meta { .. } => "meta",
             Op::PutMeta { .. } => "put_meta",
             Op::ScanBlocks { .. } => "scan_blocks",
+            Op::ScanVenues { .. } => "scan_venues",
             Op::Cursor { .. } => "cursor",
             Op::CommitChunk { .. } => "commit_chunk",
             Op::HitScan { .. } => "hit_scan",
@@ -126,6 +132,7 @@ pub enum Reply {
     Meta(Option<u64>),
     Cursor(Option<u64>),
     Scan(Vec<(u64, Vec<u8>)>),
+    Venues(Vec<VenueRow>),
     HitScan(Option<u64>),
     Hits(Vec<u64>),
     Bodies(Vec<Option<ReceiptBody>>),
@@ -175,6 +182,13 @@ pub fn encode_request(op: &Op) -> eyre::Result<(Value, Vec<u8>)> {
         ),
         Op::ScanBlocks { after, limit } => {
             let mut value = json!({"op": "scan_blocks", "limit": limit});
+            if let Some(after) = after {
+                value["after"] = json!(after);
+            }
+            (value, Vec::new())
+        }
+        Op::ScanVenues { kind, after, limit } => {
+            let mut value = json!({"op": "scan_venues", "kind": kind, "limit": limit});
             if let Some(after) = after {
                 value["after"] = json!(after);
             }
@@ -277,6 +291,21 @@ pub fn decode_request(value: &Value, body: &[u8]) -> eyre::Result<Op> {
             };
             plain(body, Op::ScanBlocks { after, limit })?
         }
+        "scan_venues" => {
+            let kind = u8::try_from(field_u64(value, "kind")?).map_err(|_| eyre!("kind"))?;
+            let after = match value.get("after") {
+                None => None,
+                Some(after) => {
+                    let text = after.as_str().ok_or_else(|| eyre!("after"))?;
+                    Some(text.parse().map_err(|_| eyre!("after"))?)
+                }
+            };
+            let limit = match value.get("limit") {
+                None => SCAN_PAGE,
+                Some(limit) => limit.as_u64().ok_or_else(|| eyre!("limit"))?.min(SCAN_PAGE),
+            };
+            plain(body, Op::ScanVenues { kind, after, limit })?
+        }
         "cursor" => plain(
             body,
             Op::Cursor {
@@ -352,6 +381,11 @@ pub fn encode_response(reply: &Reply) -> eyre::Result<(Value, Vec<u8>)> {
         Reply::HitScan(Some(cursor)) => (json!({"ok": true, "cursor": cursor}), Vec::new()),
         Reply::Scan(rows) => {
             let body = encode_scan(rows)?;
+            let bytes = body.len();
+            (json!({"ok": true, "bytes": bytes}), body)
+        }
+        Reply::Venues(rows) => {
+            let body = encode_rows(rows)?;
             let bytes = body.len();
             (json!({"ok": true, "bytes": bytes}), body)
         }
@@ -456,6 +490,13 @@ pub fn decode_response(op: &str, value: &Value, body: &[u8]) -> eyre::Result<Rep
             }
             Ok(Reply::Scan(rows))
         }
+        "scan_venues" => {
+            let rows = decode_rows(body)?;
+            if rows.len() > SCAN_PAGE as usize {
+                return Err(eyre!("scan page is larger than {SCAN_PAGE}"));
+            }
+            Ok(Reply::Venues(rows))
+        }
         "hits_from" => {
             let hits = decode_u64s(body)?;
             if hits.len() > READ_CAP as usize {
@@ -549,7 +590,7 @@ fn encode_blocks(records: &[BlockRecord]) -> Vec<u8> {
 fn encode_rows(rows: &[VenueRow]) -> eyre::Result<Vec<u8>> {
     let mut out = Vec::new();
     for row in rows {
-        let encoded = encode_row(row);
+        let encoded = encode_row(row)?;
         let len = u32::try_from(encoded.len()).map_err(|_| eyre!("venue row"))?;
         out.push(row.kind);
         out.extend_from_slice(row.id.as_slice());
@@ -700,7 +741,7 @@ fn decode_scan(mut bytes: &[u8]) -> eyre::Result<Vec<(u64, Vec<u8>)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{address, Address};
+    use alloy_primitives::{address, b256, Address};
 
     fn row() -> VenueRow {
         VenueRow {
@@ -712,6 +753,9 @@ mod tests {
             tick_spacing: None,
             block_number: None,
             extra: None,
+            block_hash: None,
+            tx_index: None,
+            log_index: None,
         }
     }
 
@@ -766,6 +810,40 @@ mod tests {
         };
         let (value, body) = encode_request(&op).unwrap();
         assert_eq!(decode_request(&value, &body).unwrap(), op);
+    }
+
+    #[test]
+    fn scan_venues_uses_the_commit_chunk_row_frame() {
+        let mut row = row();
+        row.kind = 5;
+        row.block_hash = Some(b256!(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ));
+        row.tx_index = Some(2);
+        row.log_index = Some(5);
+        let id = row.id;
+        let (value, body) = encode_response(&Reply::Venues(vec![row.clone()])).unwrap();
+        let decoded = decode_response("scan_venues", &value, &body).unwrap();
+        assert_eq!(decoded, Reply::Venues(vec![row]));
+        assert_eq!(body[ROW_HEAD], 2);
+        let request = json!({"op": "scan_venues", "kind": 5});
+        assert_eq!(
+            decode_request(&request, &[]).unwrap(),
+            Op::ScanVenues {
+                kind: 5,
+                after: None,
+                limit: SCAN_PAGE
+            }
+        );
+        let request = json!({"op": "scan_venues", "kind": 5, "limit": 1000, "after": id});
+        assert_eq!(
+            decode_request(&request, &[]).unwrap(),
+            Op::ScanVenues {
+                kind: 5,
+                after: Some(id),
+                limit: SCAN_PAGE
+            }
+        );
     }
 
     #[test]
