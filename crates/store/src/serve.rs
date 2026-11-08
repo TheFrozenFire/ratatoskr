@@ -3,9 +3,7 @@
 //! One connection, one request. Parent checks stay in `HeaderChain`. Cursor
 //! monotonicity stays in `Catalog`. `put_blocks` does not move `cursor-*`.
 
-use api::{
-    decode_request, encode_error, encode_response, payload_len, Op, Reply, READ_CAP, SCAN_PAGE,
-};
+use api::{decode_request, encode_error, encode_response, payload_len, Op, Reply, READ_CAP};
 use eyre::WrapErr;
 use serde_json::Value;
 use std::os::unix::fs::PermissionsExt;
@@ -126,7 +124,9 @@ async fn dispatch(store: &LocalStore, op: Op) -> eyre::Result<Reply> {
             store.put_meta(&key, value).await?;
             Ok(Reply::Empty)
         }
-        Op::ScanBlocks { after, limit } => scan_blocks(store, after, limit).await,
+        Op::ScanBlocks { after, limit } => {
+            Ok(Reply::Scan(store.page_blocks(after, limit as usize).await?))
+        }
         Op::Cursor { job } => Ok(Reply::Cursor(store.cursor(&job).await?)),
         Op::CommitChunk {
             job,
@@ -173,9 +173,4 @@ async fn read_headers(store: &LocalStore, from: u64, limit: u64) -> eyre::Result
         })
         .await?;
     Ok(Reply::Headers(batch))
-}
-
-async fn scan_blocks(store: &LocalStore, after: Option<u64>, limit: u64) -> eyre::Result<Reply> {
-    let limit = (limit.min(SCAN_PAGE)) as usize;
-    Ok(Reply::Scan(store.page_blocks(after, limit).await?))
 }
