@@ -11,11 +11,11 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
-eyre.workspace = true
 corpus.workspace = true
+eyre.workspace = true
 ipc.workspace = true
-model.workspace = true
-serde_json.workspace = true
+pipeline.workspace = true
+store.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

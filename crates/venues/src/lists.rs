@@ -11,7 +11,7 @@ use crate::catalog::{Put, VenueRow, AERO, CURVE, METRIC, V2_FORK};
 use crate::decode::{known, v2_kind};
 use crate::lens::{self, LensHit, CALL_GAS};
 use crate::rpc::Rpc;
-use crate::Catalog;
+use crate::EntityStore;
 
 const ALL_PAIRS_LEN: [u8; 4] = [0x57, 0x4f, 0x2b, 0xa3];
 const ALL_PAIRS: [u8; 4] = [0x1e, 0x3d, 0xd1, 0x8b];
@@ -177,16 +177,25 @@ fn addr(text: &str) -> Address {
     text.parse().unwrap_or_else(|err| panic!("{text}: {err}"))
 }
 
-pub fn walk(rpc: &Rpc, catalog: &Catalog, job: &ListJob) -> eyre::Result<u64> {
-    let mut at = catalog
-        .cursor(&job.name)?
+pub async fn walk<S: EntityStore>(
+    rpc: &Rpc,
+    store: &S,
+    job: &ListJob,
+    stop: &tokio::sync::watch::Receiver<bool>,
+) -> eyre::Result<u64> {
+    let mut at = store
+        .cursor(&job.name)
+        .await?
         .unwrap_or(job.origin)
         .max(job.origin);
     let mut wrote = 0_u64;
     loop {
+        if *stop.borrow() {
+            return Ok(wrote);
+        }
         let end = length(rpc, job)?;
         if at >= end {
-            catalog.commit_chunk(&job.name, at, &[], job.put)?;
+            store.commit_chunk(&job.name, at, &[], job.put).await?;
             tracing::info!(job = %job.name, at, end, "list done");
             return Ok(wrote);
         }
@@ -196,7 +205,7 @@ pub fn walk(rpc: &Rpc, catalog: &Catalog, job: &ListJob) -> eyre::Result<u64> {
                 Ok(hits) => {
                     let rows = hits_to_rows(job, hits);
                     let next = at + count;
-                    let n = catalog.commit_chunk(&job.name, next, &rows, job.put)?;
+                    let n = store.commit_chunk(&job.name, next, &rows, job.put).await?;
                     wrote += n;
                     tracing::info!(job = %job.name, at, next, end, rows = rows.len(), "lens");
                     at = next;

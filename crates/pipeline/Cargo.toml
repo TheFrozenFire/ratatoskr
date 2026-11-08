@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 eyre.workspace = true
+ipc.workspace = true
 model.workspace = true
 store.workspace = true
 tokio.workspace = true

@@ -559,7 +559,7 @@ mod tests {
         let catalog = Catalog::open(&path).unwrap();
         let row = sample();
         catalog
-            .commit_chunk("list:test", 10, &[row.clone()], Put::Merge)
+            .commit_chunk("list:test", 10, std::slice::from_ref(&row), Put::Merge)
             .unwrap();
         assert_eq!(catalog.cursor("list:test").unwrap(), Some(10));
         let mut other = row.clone();

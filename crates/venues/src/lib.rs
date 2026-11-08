@@ -10,6 +10,7 @@
 
 mod catalog;
 mod decode;
+mod entity;
 mod history;
 mod import;
 mod lens;
@@ -18,53 +19,88 @@ mod logs;
 mod rpc;
 
 pub use catalog::{kind_name, Catalog, Put, ReceiptBody, VenueRow};
+pub use entity::EntityStore;
 pub use logs::Walk;
 
-use std::path::PathBuf;
+use ipc::HistoryPeer;
 
-pub struct RunOpts {
-    pub out: PathBuf,
-    pub rpcs: Vec<String>,
-    pub only: Option<String>,
-    /// `None` skips the corpus. `Some` opens that file.
-    pub corpus: Option<PathBuf>,
+/// Which part of a venue run to perform. A standalone binary splits these so
+/// a list walk does not hold the header file open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunPhase {
+    ListsAndCorpus,
+    History,
+    All,
 }
 
+#[derive(Clone)]
+pub struct RunOpts {
+    pub rpcs: Vec<String>,
+    pub only: Option<String>,
+    pub no_corpus: bool,
+    /// The caller opened the corpus file this import should scan.
+    pub corpus_available: bool,
+    pub phase: RunPhase,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct RunReport {
     pub list_errors: Vec<String>,
     pub notes: Vec<String>,
 }
 
-pub fn run(opts: RunOpts) -> eyre::Result<RunReport> {
-    let catalog = Catalog::open(&opts.out)?;
-    let call_urls = if opts.rpcs.is_empty() {
-        rpc::default_call_rpcs()
-    } else {
-        opts.rpcs.clone()
-    };
-    let calls = rpc::Rpc::new(call_urls)?;
-    let mut report = RunReport {
-        list_errors: Vec::new(),
-        notes: Vec::new(),
-    };
+pub fn job_wanted(only: &Option<String>, name: &str) -> bool {
+    match only {
+        None => true,
+        Some(part) => name.to_lowercase().contains(&part.to_lowercase()),
+    }
+}
 
-    for job in lists::jobs() {
-        if !wanted(&opts.only, &job.name) {
-            continue;
-        }
-        match lists::walk(&calls, &catalog, &job) {
-            Ok(wrote) => tracing::info!(job = %job.name, wrote, "list finished"),
-            Err(err) => {
-                let message = format!("{}: {err}", job.name);
-                tracing::error!(%message, "list failed");
-                report.list_errors.push(message);
+pub fn history_selected(only: &Option<String>) -> bool {
+    logs::jobs().iter().any(|job| job_wanted(only, &job.name))
+}
+
+pub async fn execute<S, P>(
+    store: &S,
+    peer: Option<&P>,
+    opts: &RunOpts,
+    stop: tokio::sync::watch::Receiver<bool>,
+) -> eyre::Result<RunReport>
+where
+    S: EntityStore + Clone + 'static,
+    P: HistoryPeer + Clone + 'static,
+{
+    let mut report = RunReport::default();
+    let lists = matches!(opts.phase, RunPhase::ListsAndCorpus | RunPhase::All);
+    let history = matches!(opts.phase, RunPhase::History | RunPhase::All);
+    if lists {
+        let call_urls = if opts.rpcs.is_empty() {
+            rpc::default_call_rpcs()
+        } else {
+            opts.rpcs.clone()
+        };
+        let calls = rpc::Rpc::new(call_urls)?;
+        for job in lists::jobs() {
+            if *stop.borrow() {
+                return Ok(report);
+            }
+            if !job_wanted(&opts.only, &job.name) {
+                continue;
+            }
+            match lists::walk(&calls, store, &job, &stop).await {
+                Ok(wrote) => tracing::info!(job = %job.name, wrote, "list finished"),
+                Err(err) => {
+                    let message = format!("{}: {err}", job.name);
+                    tracing::error!(%message, "list failed");
+                    report.list_errors.push(message);
+                }
             }
         }
-    }
-
-    if let Some(path) = &opts.corpus {
-        if wanted(&opts.only, "corpus") {
-            match import::import_corpus(&catalog, path) {
+        if !opts.no_corpus && opts.corpus_available && job_wanted(&opts.only, "corpus") {
+            if *stop.borrow() {
+                return Ok(report);
+            }
+            match import::import_corpus(store).await {
                 Ok(wrote) => {
                     let note = format!("corpus wrote {wrote}");
                     tracing::info!(%note);
@@ -78,37 +114,24 @@ pub fn run(opts: RunOpts) -> eyre::Result<RunReport> {
             }
         }
     }
-
-    let logs_wanted = logs::jobs()
-        .into_iter()
-        .filter(|job| wanted(&opts.only, &job.name))
-        .collect::<Vec<_>>();
-    if !logs_wanted.is_empty() {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(4)
-            .enable_all()
-            .build()?;
-        runtime.block_on(async {
-            match history::ingest_all(&catalog, &logs_wanted).await {
-                Ok(notes) => {
-                    for note in notes {
-                        report.notes.push(note);
-                    }
-                }
+    if history {
+        if *stop.borrow() {
+            return Ok(report);
+        }
+        let logs_wanted = logs::jobs()
+            .into_iter()
+            .filter(|job| job_wanted(&opts.only, &job.name))
+            .collect::<Vec<_>>();
+        if !logs_wanted.is_empty() {
+            match history::ingest_all(store, peer, &logs_wanted, &stop).await {
+                Ok(notes) => report.notes.extend(notes),
                 Err(err) => {
                     let note = format!("history: {err:#}");
                     tracing::error!(%note);
                     report.notes.push(note);
                 }
             }
-        });
+        }
     }
     Ok(report)
-}
-
-fn wanted(only: &Option<String>, name: &str) -> bool {
-    match only {
-        None => true,
-        Some(part) => name.to_lowercase().contains(&part.to_lowercase()),
-    }
 }

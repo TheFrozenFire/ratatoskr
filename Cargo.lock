@@ -2712,8 +2712,8 @@ dependencies = [
  "corpus",
  "eyre",
  "ipc",
- "model",
- "serde_json",
+ "pipeline",
+ "store",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -3546,6 +3546,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "eyre",
+ "ipc",
  "model",
  "store",
  "tokio",
@@ -5630,7 +5631,6 @@ name = "venues"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
- "chain",
  "corpus",
  "discover",
  "era",
@@ -5643,15 +5643,21 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "zstd",
 ]
 
 [[package]]
 name = "venues-cli"
 version = "0.1.0"
 dependencies = [
+ "chain",
  "clap",
  "corpus",
  "eyre",
+ "ipc",
+ "pipeline",
+ "store",
+ "tokio",
  "tracing",
  "tracing-subscriber",
  "venues",

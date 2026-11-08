@@ -7,22 +7,18 @@
 //! retry reads redb instead of the network.
 
 use std::collections::BTreeMap;
-use std::path::Path;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alloy_primitives::Bloom;
-use chain::HeaderChain;
-use corpus::{logs_in_block, Corpus};
-use eyre::WrapErr;
-use ipc::{body_call, socket_path};
-use model::{decode_block_records, BlockRecord};
-use serde_json::{json, Value};
+use corpus::logs_in_block;
+use eyre::{eyre, WrapErr};
+use ipc::{socket_path, HistoryPeer};
+use model::BlockRecord;
 
 use crate::catalog::{Put, ReceiptBody};
 use crate::decode::rows_from_log;
 use crate::logs::{job_filter, LogJob, Walk, MERGE_BLOCK};
-use crate::Catalog;
+use crate::EntityStore;
 
 const CHUNK_MAX: u64 = 64;
 const RECEIPT_PIPELINE: usize = 8;
@@ -49,16 +45,52 @@ struct PendingJob {
     fresh: Vec<u64>,
 }
 
-pub async fn ingest_all(catalog: &Catalog, jobs: &[LogJob]) -> eyre::Result<Vec<String>> {
+trait EraFetch {
+    fn fetch<'a>(
+        &'a mut self,
+        missing: &'a [u64],
+        filter: &'a filter::LogFilter,
+    ) -> impl std::future::Future<Output = eyre::Result<Vec<era::EraBlock>>> + Send + 'a;
+}
+
+struct LiveEra {
+    http: Option<era::EraHttp>,
+}
+
+impl EraFetch for LiveEra {
+    async fn fetch(
+        &mut self,
+        missing: &[u64],
+        filter: &filter::LogFilter,
+    ) -> eyre::Result<Vec<era::EraBlock>> {
+        if self.http.is_none() {
+            self.http = Some(era::EraHttp::new(ERA_INFLIGHT)?);
+        }
+        let client = self.http.as_ref().expect("http client");
+        era::receipts_for_blocks(client, MIRROR, "mainnet", missing, filter, ERA_INFLIGHT).await
+    }
+}
+
+pub async fn ingest_all<S, P>(
+    store: &S,
+    peer: Option<&P>,
+    jobs: &[LogJob],
+    stop: &tokio::sync::watch::Receiver<bool>,
+) -> eyre::Result<Vec<String>>
+where
+    S: EntityStore,
+    P: HistoryPeer + Clone + 'static,
+{
     let mut pending = Vec::new();
     for job in jobs {
-        let at = catalog
-            .cursor(&job.name)?
+        let at = store
+            .cursor(&job.name)
+            .await?
             .unwrap_or(job.deploy_block)
             .max(job.deploy_block);
-        let scan = catalog.hit_scan(&job.name)?.unwrap_or(at).max(at);
-        let hits = catalog.hits_from(&job.name, at, scan)?;
-        let after = catalog.cursor(&format!("{}:after", job.name))?;
+        let scan = store.hit_scan(&job.name).await?.unwrap_or(at).max(at);
+        let hits = store.hits_from(&job.name, at, scan).await?;
+        let after = store.cursor(&format!("{}:after", job.name)).await?;
         tracing::info!(
             job = %job.name,
             at,
@@ -81,8 +113,7 @@ pub async fn ingest_all(catalog: &Catalog, jobs: &[LogJob]) -> eyre::Result<Vec<
             fresh: Vec::new(),
         });
     }
-    let chain = HeaderChain::open(&HeaderChain::default_path()).wrap_err("header chain")?;
-    let end = chain.cursor()?;
+    let end = store.header_cursor().await?;
     let start = pending
         .iter()
         .map(|job| job.scan)
@@ -92,25 +123,38 @@ pub async fn ingest_all(catalog: &Catalog, jobs: &[LogJob]) -> eyre::Result<Vec<
     tracing::info!(start, end, "scanning stored header blooms");
     let started = Instant::now();
     let mut scanned = 0_u64;
-    let seen = chain.visit(start, end, |header| {
-        scanned += 1;
-        let through = header.number.saturating_add(1);
-        for job in &mut pending {
-            if header.number < job.scan {
-                continue;
-            }
-            if job.filter.bloom_maybe(&Bloom::from(header.logs_bloom)) {
-                job.hits.push(header.number);
-                job.fresh.push(header.number);
-            }
+    let mut seen = 0_u64;
+    let mut at = start;
+    while at < end {
+        if *stop.borrow() {
+            return Ok(Vec::new());
         }
-        if scanned.is_multiple_of(SCAN_FLUSH) {
-            tracing::info!(block = header.number, scanned, "bloom scan");
-            flush_hits(catalog, &mut pending, through)?;
+        let to = at.saturating_add(SCAN_FLUSH).min(end);
+        let window = store
+            .for_each_header(at, to, &mut |batch| {
+                for header in batch {
+                    scanned += 1;
+                    for job in &mut pending {
+                        if header.number < job.scan {
+                            continue;
+                        }
+                        if job.filter.bloom_maybe(&Bloom::from(header.logs_bloom)) {
+                            job.hits.push(header.number);
+                            job.fresh.push(header.number);
+                        }
+                    }
+                }
+                Ok(())
+            })
+            .await?;
+        seen += window;
+        flush_hits(store, &mut pending, to).await?;
+        if to - at == SCAN_FLUSH {
+            tracing::info!(block = to.saturating_sub(1), scanned, "bloom scan");
         }
-        Ok(())
-    })?;
-    flush_hits(catalog, &mut pending, end)?;
+        at = to;
+    }
+    flush_hits(store, &mut pending, end).await?;
     let secs = started.elapsed().as_secs_f32().max(0.001);
     tracing::info!(
         scanned = seen,
@@ -129,18 +173,23 @@ pub async fn ingest_all(catalog: &Catalog, jobs: &[LogJob]) -> eyre::Result<Vec<
             "bloom hits"
         );
     }
-    drop(chain);
     tracing::info!("released header chain");
 
-    let corpus = Arc::new(open_receipt_cache()?);
-    let socket = socket_path().wrap_err("peer socket")?;
+    let Some(peer) = peer else {
+        socket_path().wrap_err("peer socket")?;
+        return Err(eyre!("peer socket"));
+    };
+    let mut era = LiveEra { http: None };
     let mut notes = Vec::new();
     for job in pending {
+        if *stop.borrow() {
+            break;
+        }
         if job.at >= end {
             tracing::info!(job = %job.job.name, at = job.at, end, "history caught up");
             continue;
         }
-        match fetch_job(catalog, &corpus, &job, &socket, end).await {
+        match fetch_job(store, peer, &mut era, &job, end, stop).await {
             Ok(Walk::Done) => tracing::info!(job = %job.job.name, "history finished"),
             Ok(Walk::Stopped { at, reason }) => {
                 let note = format!("{} stopped at {at}: {reason}", job.job.name);
@@ -157,7 +206,11 @@ pub async fn ingest_all(catalog: &Catalog, jobs: &[LogJob]) -> eyre::Result<Vec<
     Ok(notes)
 }
 
-fn flush_hits(catalog: &Catalog, jobs: &mut [PendingJob], to: u64) -> eyre::Result<()> {
+async fn flush_hits<S: EntityStore>(
+    store: &S,
+    jobs: &mut [PendingJob],
+    to: u64,
+) -> eyre::Result<()> {
     for job in jobs.iter_mut() {
         if to <= job.scan {
             continue;
@@ -172,7 +225,7 @@ fn flush_hits(catalog: &Catalog, jobs: &mut [PendingJob], to: u64) -> eyre::Resu
             }
         }
         job.fresh = kept;
-        catalog.commit_hits(&job.job.name, to, &write)?;
+        store.commit_hits(&job.job.name, to, &write).await?;
         job.scan = to;
         tracing::info!(
             job = %job.job.name,
@@ -184,22 +237,19 @@ fn flush_hits(catalog: &Catalog, jobs: &mut [PendingJob], to: u64) -> eyre::Resu
     Ok(())
 }
 
-fn open_receipt_cache() -> eyre::Result<Corpus> {
-    let path = Corpus::default_path();
-    if path.exists() {
-        Corpus::open(&path).wrap_err("receipt cache")
-    } else {
-        Corpus::create(&path).wrap_err("receipt cache")
-    }
-}
-
-async fn fetch_job(
-    catalog: &Catalog,
-    corpus: &Arc<Corpus>,
+async fn fetch_job<S, P, E>(
+    store: &S,
+    peer: &P,
+    era: &mut E,
     job: &PendingJob,
-    socket: &Path,
     end: u64,
-) -> eyre::Result<Walk> {
+    stop: &tokio::sync::watch::Receiver<bool>,
+) -> eyre::Result<Walk>
+where
+    S: EntityStore,
+    P: HistoryPeer + Clone + 'static,
+    E: EraFetch,
+{
     let pre: Vec<u64> = job
         .hits
         .iter()
@@ -213,30 +263,43 @@ async fn fetch_job(
         .filter(|block| *block >= MERGE_BLOCK)
         .collect();
     if job.at < MERGE_BLOCK {
-        if let Some(stopped) = fetch_era(catalog, job, &pre).await? {
+        if let Some(stopped) = fetch_era(store, era, job, &pre, stop).await? {
             return Ok(stopped);
         }
-        catalog.commit_chunk(&job.job.name, MERGE_BLOCK.min(end), &[], Put::Merge)?;
+        store
+            .commit_chunk(&job.job.name, MERGE_BLOCK.min(end), &[], Put::Merge)
+            .await?;
     }
     if end <= MERGE_BLOCK {
         return Ok(Walk::Done);
     }
-    fetch_peer(catalog, corpus, job, socket, &post, end).await
+    fetch_peer(store, peer, job, &post, end, stop).await
 }
 
-async fn fetch_era(
-    catalog: &Catalog,
+async fn fetch_era<S, E>(
+    store: &S,
+    era: &mut E,
     job: &PendingJob,
     hits: &[u64],
-) -> eyre::Result<Option<Walk>> {
+    stop: &tokio::sync::watch::Receiver<bool>,
+) -> eyre::Result<Option<Walk>>
+where
+    S: EntityStore,
+    E: EraFetch,
+{
     if hits.is_empty() {
         return Ok(None);
     }
-    let mut http: Option<era::EraHttp> = None;
     let mut done_through = job.at;
     for chunk in hits.chunks(ERA_BATCH) {
+        if *stop.borrow() {
+            return Ok(Some(Walk::Stopped {
+                at: done_through,
+                reason: "stop".into(),
+            }));
+        }
         let started = Instant::now();
-        let cached = catalog.read_bodies(chunk)?;
+        let cached = store.read_bodies(chunk).await?;
         let mut missing = Vec::new();
         let mut logs = Vec::new();
         let mut from_cache = 0_usize;
@@ -265,22 +328,10 @@ async fn fetch_era(
             }
         }
         if !missing.is_empty() {
-            if http.is_none() {
-                http = Some(era::EraHttp::new(ERA_INFLIGHT)?);
-            }
-            let client = http.as_ref().expect("http client");
-            let fetched = era::receipts_for_blocks(
-                client,
-                MIRROR,
-                "mainnet",
-                &missing,
-                &job.filter,
-                ERA_INFLIGHT,
-            )
-            .await?;
-            let mut store = Vec::with_capacity(fetched.len());
+            let fetched = era.fetch(&missing, &job.filter).await?;
+            let mut store_bodies = Vec::with_capacity(fetched.len());
             for block in fetched {
-                store.push((
+                store_bodies.push((
                     block.header.number,
                     ReceiptBody {
                         hash: block.header.hash,
@@ -292,7 +343,7 @@ async fn fetch_era(
                 ));
                 logs.extend(block.logs);
             }
-            catalog.put_bodies(&store)?;
+            store.put_bodies(&store_bodies).await?;
         }
         logs.sort_by_key(|log| (log.block_number, log.tx_index, log.log_index));
         let rows = logs.iter().flat_map(rows_from_log).collect::<Vec<_>>();
@@ -301,7 +352,9 @@ async fn fetch_era(
             .copied()
             .unwrap_or(done_through)
             .saturating_add(1);
-        let wrote = catalog.commit_chunk(&job.job.name, next, &rows, Put::Merge)?;
+        let wrote = store
+            .commit_chunk(&job.job.name, next, &rows, Put::Merge)
+            .await?;
         let secs = started.elapsed().as_secs_f32().max(0.001);
         tracing::info!(
             job = %job.job.name,
@@ -321,14 +374,18 @@ async fn fetch_era(
     Ok(None)
 }
 
-async fn fetch_peer(
-    catalog: &Catalog,
-    corpus: &Arc<Corpus>,
+async fn fetch_peer<S, P>(
+    store: &S,
+    peer: &P,
     job: &PendingJob,
-    socket: &Path,
     hits: &[u64],
     end: u64,
-) -> eyre::Result<Walk> {
+    stop: &tokio::sync::watch::Receiver<bool>,
+) -> eyre::Result<Walk>
+where
+    S: EntityStore,
+    P: HistoryPeer + Clone + 'static,
+{
     let spans = hit_spans(hits);
     let mut next_span = 0_usize;
     let mut pending: BTreeMap<u64, tokio::task::JoinHandle<Result<SpanOut, AskFail>>> =
@@ -340,18 +397,33 @@ async fn fetch_peer(
     let mut fetched = 0_u64;
     let mut from_cache = 0_u64;
     loop {
+        if *stop.borrow() {
+            abort(&mut pending);
+            commit_rows(store, &job.job.name, cursor, &rows).await?;
+            return Ok(Walk::Stopped {
+                at: cursor,
+                reason: "stop".into(),
+            });
+        }
         while pending.len() < RECEIPT_PIPELINE {
             let Some((start, count)) = spans.get(next_span).copied() else {
                 break;
             };
             next_span += 1;
-            let socket = socket.to_path_buf();
+            let cached = match cached_prefix(store, start, count).await {
+                Ok(cached) => cached,
+                Err(fail) => {
+                    abort(&mut pending);
+                    commit_rows(store, &job.job.name, cursor, &rows).await?;
+                    return Ok(stop_ask(cursor, fail));
+                }
+            };
+            let peer = peer.clone();
             let filter = job.filter.clone();
-            let corpus = Arc::clone(corpus);
             pending.insert(
                 start,
                 tokio::spawn(
-                    async move { fetch_span(&socket, &corpus, start, count, &filter).await },
+                    async move { finish_span(&peer, start, count, cached, &filter).await },
                 ),
             );
         }
@@ -363,12 +435,12 @@ async fn fetch_peer(
             Ok(Ok(span)) => span,
             Ok(Err(fail)) => {
                 abort(&mut pending);
-                commit_rows(catalog, &job.job.name, cursor, &rows)?;
+                commit_rows(store, &job.job.name, cursor, &rows).await?;
                 return Ok(stop_ask(cursor, fail));
             }
             Err(err) => {
                 abort(&mut pending);
-                commit_rows(catalog, &job.job.name, cursor, &rows)?;
+                commit_rows(store, &job.job.name, cursor, &rows).await?;
                 return Ok(Walk::Stopped {
                     at: cursor,
                     reason: format!("receipt task: {err}"),
@@ -377,15 +449,15 @@ async fn fetch_peer(
         };
         if span.got == 0 {
             abort(&mut pending);
-            commit_rows(catalog, &job.job.name, cursor, &rows)?;
+            commit_rows(store, &job.job.name, cursor, &rows).await?;
             return Ok(Walk::Stopped {
                 at: cursor,
                 reason: format!("chunk {start} returned no receipts"),
             });
         }
-        if let Err(err) = corpus.put_blocks(&span.fresh) {
+        if let Err(err) = store.put_blocks(&span.fresh).await {
             abort(&mut pending);
-            commit_rows(catalog, &job.job.name, cursor, &rows)?;
+            commit_rows(store, &job.job.name, cursor, &rows).await?;
             return Err(err.wrap_err("cache receipts"));
         }
         from_cache += span.got.saturating_sub(span.fresh.len() as u64);
@@ -394,7 +466,7 @@ async fn fetch_peer(
         cursor = start + span.got;
         since_commit += 1;
         if span.got < span.asked || since_commit >= COMMIT_SPANS {
-            let wrote = commit_rows(catalog, &job.job.name, cursor, &rows)?;
+            let wrote = commit_rows(store, &job.job.name, cursor, &rows).await?;
             rows.clear();
             since_commit = 0;
             let secs = started.elapsed().as_secs_f32().max(0.001);
@@ -419,18 +491,18 @@ async fn fetch_peer(
             });
         }
     }
-    commit_rows(catalog, &job.job.name, end, &rows)?;
+    commit_rows(store, &job.job.name, end, &rows).await?;
     tracing::info!(job = %job.job.name, at = end, fetched, cached = from_cache, "history caught up");
     Ok(Walk::Done)
 }
 
-fn commit_rows(
-    catalog: &Catalog,
+async fn commit_rows<S: EntityStore>(
+    store: &S,
     name: &str,
     next: u64,
     rows: &[crate::VenueRow],
 ) -> eyre::Result<u64> {
-    catalog.commit_chunk(name, next, rows, Put::Merge)
+    store.commit_chunk(name, next, rows, Put::Merge).await
 }
 
 fn abort(pending: &mut BTreeMap<u64, tokio::task::JoinHandle<Result<SpanOut, AskFail>>>) {
@@ -454,26 +526,18 @@ struct SpanOut {
     fresh: Vec<BlockRecord>,
 }
 
-async fn fetch_span(
-    socket: &Path,
-    corpus: &Corpus,
+async fn finish_span<P: HistoryPeer>(
+    peer: &P,
     start: u64,
     count: u64,
+    cached: Vec<BlockRecord>,
     filter: &filter::LogFilter,
 ) -> Result<SpanOut, AskFail> {
-    let cached = cached_prefix(corpus, start, count)?;
     let mut fresh = Vec::new();
     if (cached.len() as u64) < count {
         let at = start + cached.len() as u64;
         let need = count - cached.len() as u64;
-        let body = request_body(
-            socket,
-            json!({"op": "chunk", "start": at, "count": need}),
-            "chunk",
-        )
-        .await?;
-        let decoded = decode_block_records(&body)
-            .map_err(|err| AskFail::Failed(format!("chunk {at}: {err}")))?;
+        let decoded = request_chunk(peer, at, need).await?;
         let got = record_prefix(&decoded, at);
         fresh.extend(decoded.into_iter().take(got));
     }
@@ -487,12 +551,17 @@ async fn fetch_span(
     })
 }
 
-fn cached_prefix(corpus: &Corpus, start: u64, count: u64) -> Result<Vec<BlockRecord>, AskFail> {
+async fn cached_prefix<S: EntityStore>(
+    store: &S,
+    start: u64,
+    count: u64,
+) -> Result<Vec<BlockRecord>, AskFail> {
     let mut found = Vec::new();
     for offset in 0..count {
         let number = start + offset;
-        let record = corpus
+        let record = store
             .read_block(number)
+            .await
             .map_err(|err| AskFail::Failed(format!("corpus block {number}: {err:#}")))?;
         match record {
             Some(record) if record.number == number && !record.receipts_zstd.is_empty() => {
@@ -521,11 +590,15 @@ fn rows_of(
     Ok(rows)
 }
 
-async fn request_body(socket: &Path, request: Value, what: &str) -> Result<Vec<u8>, AskFail> {
+async fn request_chunk<P: HistoryPeer>(
+    peer: &P,
+    start: u64,
+    count: u64,
+) -> Result<Vec<BlockRecord>, AskFail> {
     let mut last = String::new();
     for attempt in 0..12 {
-        match body_call(socket, &request, what).await {
-            Ok(body) => return Ok(body),
+        match peer.chunk(start, count).await {
+            Ok(records) => return Ok(records),
             Err(err) => {
                 let msg = err.to_string();
                 if msg.contains("no peer serves block") {
@@ -584,6 +657,91 @@ fn hit_spans(numbers: &[u64]) -> Vec<(u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::{b256, Address, B256};
+    use corpus::Corpus;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct Files {
+        corpus: Corpus,
+        catalog: crate::Catalog,
+    }
+
+    impl EntityStore for Files {
+        async fn header_cursor(&self) -> eyre::Result<u64> {
+            Err(eyre::eyre!("unused"))
+        }
+        async fn header_parent(&self, _: u64) -> eyre::Result<alloy_primitives::B256> {
+            Err(eyre::eyre!("unused"))
+        }
+        async fn append_headers(
+            &self,
+            _: &[model::HeaderRecord],
+        ) -> eyre::Result<model::HeaderRecord> {
+            Err(eyre::eyre!("unused"))
+        }
+        async fn for_each_header(
+            &self,
+            _: u64,
+            _: u64,
+            _: &mut dyn FnMut(&[model::HeaderRecord]) -> eyre::Result<()>,
+        ) -> eyre::Result<u64> {
+            Err(eyre::eyre!("unused"))
+        }
+        async fn read_block(&self, number: u64) -> eyre::Result<Option<BlockRecord>> {
+            self.corpus.read_block(number)
+        }
+        async fn put_blocks(&self, records: &[BlockRecord]) -> eyre::Result<u64> {
+            self.corpus.put_blocks(records)
+        }
+        async fn write_records(&self, _: &str, _: &[BlockRecord]) -> eyre::Result<u64> {
+            Err(eyre::eyre!("unused"))
+        }
+        async fn write_hole(&self, _: u64) -> eyre::Result<()> {
+            Err(eyre::eyre!("unused"))
+        }
+        async fn meta(&self, key: &str) -> eyre::Result<Option<u64>> {
+            self.corpus.meta(key)
+        }
+        async fn put_meta(&self, _: &str, _: u64) -> eyre::Result<()> {
+            Err(eyre::eyre!("unused"))
+        }
+        async fn for_each_block(
+            &self,
+            _: &mut dyn FnMut(u64, &[u8]) -> eyre::Result<()>,
+        ) -> eyre::Result<()> {
+            Err(eyre::eyre!("unused"))
+        }
+        async fn cursor(&self, job: &str) -> eyre::Result<Option<u64>> {
+            self.catalog.cursor(job)
+        }
+        async fn commit_chunk(
+            &self,
+            job: &str,
+            next: u64,
+            rows: &[crate::VenueRow],
+            put: Put,
+        ) -> eyre::Result<u64> {
+            self.catalog.commit_chunk(job, next, rows, put)
+        }
+        async fn hit_scan(&self, _: &str) -> eyre::Result<Option<u64>> {
+            Err(eyre::eyre!("unused"))
+        }
+        async fn hits_from(&self, _: &str, _: u64, _: u64) -> eyre::Result<Vec<u64>> {
+            Err(eyre::eyre!("unused"))
+        }
+        async fn commit_hits(&self, _: &str, _: u64, _: &[u64]) -> eyre::Result<()> {
+            Err(eyre::eyre!("unused"))
+        }
+        async fn read_bodies(&self, numbers: &[u64]) -> eyre::Result<Vec<Option<ReceiptBody>>> {
+            self.catalog.read_bodies(numbers)
+        }
+        async fn put_bodies(&self, bodies: &[(u64, ReceiptBody)]) -> eyre::Result<()> {
+            self.catalog.put_bodies(bodies)
+        }
+    }
 
     #[test]
     fn hit_spans_split_a_long_run_and_a_gap() {
@@ -594,5 +752,197 @@ mod tests {
         assert_eq!(hit_spans(&[1, 64, 65]), vec![(1, 64), (65, 1)]);
         assert_eq!(hit_spans(&[1, 65]), vec![(1, 1), (65, 1)]);
         assert!(hit_spans(&[]).is_empty());
+    }
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "ratatoskr-history-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn empty_root() -> B256 {
+        b256!("56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421")
+    }
+
+    fn zstd_block(number: u64) -> BlockRecord {
+        let raw = corpus::encode_receipt_bundle(&[]);
+        let receipts_zstd = zstd::stream::encode_all(raw.as_slice(), 0).unwrap();
+        BlockRecord {
+            number,
+            hash: B256::from([1_u8; 32]),
+            parent_hash: B256::from([2_u8; 32]),
+            timestamp: 1,
+            receipts_root: empty_root(),
+            transactions_root: B256::ZERO,
+            receipts_zstd,
+        }
+    }
+
+    fn pending(name: &str, at: u64) -> PendingJob {
+        let job = LogJob {
+            name: name.into(),
+            address: Address::ZERO,
+            topics: Vec::new(),
+            deploy_block: at,
+        };
+        PendingJob {
+            filter: job_filter(&job),
+            job,
+            at,
+            scan: at,
+            hits: vec![at],
+            fresh: Vec::new(),
+        }
+    }
+
+    #[derive(Clone)]
+    struct FakePeer {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl HistoryPeer for FakePeer {
+        async fn status(&self) -> eyre::Result<Vec<ipc::SessionInfo>> {
+            Ok(Vec::new())
+        }
+
+        async fn headers(
+            &self,
+            _start: u64,
+            _count: u64,
+        ) -> eyre::Result<Vec<model::HeaderRecord>> {
+            Ok(Vec::new())
+        }
+
+        async fn chunk(&self, start: u64, _count: u64) -> eyre::Result<Vec<BlockRecord>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(vec![zstd_block(start)])
+        }
+    }
+
+    struct FakeEra {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl EraFetch for FakeEra {
+        async fn fetch(
+            &mut self,
+            missing: &[u64],
+            _filter: &filter::LogFilter,
+        ) -> eyre::Result<Vec<era::EraBlock>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(missing
+                .iter()
+                .copied()
+                .map(|number| era::EraBlock {
+                    header: era::HeaderRow {
+                        number,
+                        hash: B256::from([1_u8; 32]),
+                        parent: B256::from([2_u8; 32]),
+                        timestamp: 1,
+                        receipts_root: empty_root(),
+                        logs_bloom: Bloom::default(),
+                    },
+                    receipts_snappy: Vec::new(),
+                    logs: Vec::new(),
+                })
+                .collect())
+        }
+    }
+
+    fn stop() -> tokio::sync::watch::Receiver<bool> {
+        tokio::sync::watch::channel(false).1
+    }
+
+    #[tokio::test]
+    async fn cached_payload_is_not_fetched_again_when_the_cursor_is_uncommitted() {
+        let dir = TempDir::new();
+        let store = Files {
+            corpus: Corpus::create(&dir.0.join("corpus.redb")).unwrap(),
+            catalog: crate::Catalog::open(&dir.0.join("venues.redb")).unwrap(),
+        };
+        let era_calls = Arc::new(AtomicUsize::new(0));
+        let peer_calls = Arc::new(AtomicUsize::new(0));
+        let mut era = FakeEra {
+            calls: Arc::clone(&era_calls),
+        };
+        let peer = FakePeer {
+            calls: Arc::clone(&peer_calls),
+        };
+        let cached_era = 10_u64;
+        store
+            .put_bodies(&[(
+                cached_era,
+                ReceiptBody {
+                    hash: B256::from([1_u8; 32]),
+                    parent_hash: B256::from([2_u8; 32]),
+                    timestamp: 1,
+                    receipts_root: empty_root(),
+                    payload: Vec::new(),
+                },
+            )])
+            .await
+            .unwrap();
+        let cached_block = MERGE_BLOCK;
+        store.put_blocks(&[zstd_block(cached_block)]).await.unwrap();
+        let era_job = pending("era-cached", cached_era);
+        let peer_job = pending("peer-cached", cached_block);
+        assert!(store.cursor(&era_job.job.name).await.unwrap().is_none());
+        assert!(store.cursor(&peer_job.job.name).await.unwrap().is_none());
+
+        fetch_era(&store, &mut era, &era_job, &[cached_era], &stop())
+            .await
+            .unwrap();
+        fetch_peer(
+            &store,
+            &peer,
+            &peer_job,
+            &[cached_block],
+            cached_block + 1,
+            &stop(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(era_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(peer_calls.load(Ordering::Relaxed), 0);
+
+        let missed = 11_u64;
+        fetch_era(
+            &store,
+            &mut era,
+            &pending("era-miss", missed),
+            &[missed],
+            &stop(),
+        )
+        .await
+        .unwrap();
+        fetch_peer(
+            &store,
+            &peer,
+            &pending("peer-miss", cached_block + 2),
+            &[cached_block + 2],
+            cached_block + 3,
+            &stop(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(era_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(peer_calls.load(Ordering::Relaxed), 1);
     }
 }

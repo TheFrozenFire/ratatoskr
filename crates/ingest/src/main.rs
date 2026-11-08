@@ -6,25 +6,14 @@
 //! saved cursor.
 
 use clap::Parser;
-use eyre::WrapErr;
 use corpus::Corpus;
-use ipc::{body_call, earliest_floor, max_head, serving, socket_path, status, Earliest};
-use model::{decode_block_records, BlockRecord};
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-    time::{Duration, Instant},
-};
-use tokio::{task::JoinSet, time::sleep};
-use tracing::{info, warn};
+use ipc::{socket_path, SocketPeer};
+use pipeline::{ReceiptSource, Source, StoreSink};
+use std::path::PathBuf;
+use store::{EntityStore, LocalStore};
+use tracing::info;
+
 const TARGET_BYTES: u64 = 10 * 1024 * 1024 * 1024;
-const CHUNK: u64 = 32;
-/// SHiNode's default cap. Each peer can take two overlapping batches.
-const PIPELINE: usize = 32;
-const CHUNKS_PER_PEER: usize = 2;
-/// Single-block misses with no data stored before a range is left for this run.
-const PRUNE_STREAK: u32 = 3;
-const GIB: u64 = 1024 * 1024 * 1024;
 
 #[derive(Debug, Parser)]
 #[command(name = "ratatoskr-ingest")]
@@ -37,28 +26,6 @@ struct Args {
     db: Option<PathBuf>,
 }
 
-struct Range {
-    name: &'static str,
-    start: u64,
-    end: u64,
-    /// Stop this range after adding this many bytes. The recent window uses the
-    /// global target instead.
-    byte_budget: Option<u64>,
-}
-
-enum PeerFloor {
-    /// Every live peer advertised an earliest block.
-    Known(u64),
-    /// At least one peer speaks eth/68 and did not advertise a window.
-    Unknown,
-}
-
-enum ChunkFate {
-    Advance,
-    Retry,
-    LeaveRange,
-}
-
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
     tracing_subscriber::fmt()
@@ -69,13 +36,12 @@ async fn main() -> eyre::Result<()> {
         .init();
 
     let args = Args::parse();
-    let db_path = args.db.unwrap_or_else(default_db_path);
+    let db_path = args.db.unwrap_or_else(Corpus::default_path);
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let socket = socket_path()?;
-    let corpus = Corpus::create(&db_path)?;
-    let mut stored = corpus.meta("bytes")?.unwrap_or(0);
+    let store = LocalStore::corpus(&db_path)?;
+    let stored = store.meta("bytes").await?.unwrap_or(0);
     info!(
         path = %db_path.display(),
         stored,
@@ -86,417 +52,15 @@ async fn main() -> eyre::Result<()> {
         info!("corpus already reached the target");
         return Ok(());
     }
-
-    let head = wait_for_head(&socket).await?;
-    info!(head, "peer head");
-    for range in ranges(head) {
-        if stored >= args.target_bytes {
-            break;
-        }
-        stored = ingest_range(&corpus, &socket, &range, stored, args.target_bytes).await?;
-    }
+    let socket = socket_path()?;
+    let peer = SocketPeer::new(socket);
+    let (_stop, stop) = tokio::sync::watch::channel(false);
+    let log_store = store.clone();
+    let mut sink = StoreSink::new(store.clone());
+    ReceiptSource::new(store, peer, args.target_bytes)
+        .run(&mut sink, stop)
+        .await?;
+    let stored = log_store.meta("bytes").await?.unwrap_or(0);
     info!(stored, path = %db_path.display(), "ingest stopped");
     Ok(())
-}
-
-fn ranges(head: u64) -> Vec<Range> {
-    let recent_end = head.saturating_sub(32);
-    // About 55 days. Ingest stops at the byte target, so the walk ends early
-    // once the corpus is large enough.
-    let recent_start = recent_end.saturating_sub(399_999);
-    vec![
-        // UniswapV3Factory deployment, block 12369621, plus ~50k blocks.
-        // Pre-merge. Kept only when a peer still advertises that height.
-        Range {
-            name: "univ3-launch",
-            start: 12_369_621,
-            end: 12_419_620,
-            byte_budget: Some(2 * GIB),
-        },
-        // Uniswap v4 PoolManager deployment, block 21688329, plus ~100k blocks.
-        Range {
-            name: "univ4-launch",
-            start: 21_688_329,
-            end: 21_788_328,
-            byte_budget: Some(3 * GIB),
-        },
-        Range {
-            name: "recent",
-            start: recent_start,
-            end: recent_end,
-            byte_budget: None,
-        },
-    ]
-}
-
-async fn ingest_range(
-    corpus: &Corpus,
-    socket: &Path,
-    range: &Range,
-    mut stored: u64,
-    target: u64,
-) -> eyre::Result<u64> {
-    let cursor_key = format!("cursor-{}", range.name);
-    let mut next = corpus.meta(&cursor_key)?.unwrap_or(range.start);
-    if next < range.start {
-        next = range.start;
-    }
-    if next > range.end {
-        info!(range = range.name, "range already stored");
-        return Ok(stored);
-    }
-    // The first peer is often a recent-only node. Wait for one that still
-    // serves this range before clipping or skipping it.
-    let deadline = Instant::now() + Duration::from_secs(900);
-    loop {
-        match peer_floor(socket).await {
-            Ok(PeerFloor::Unknown) => break,
-            Ok(PeerFloor::Known(earliest)) if earliest <= next => break,
-            Ok(PeerFloor::Known(earliest)) if Instant::now() >= deadline => {
-                if earliest > range.end {
-                    info!(
-                        range = range.name,
-                        earliest, "peers do not serve this range"
-                    );
-                    return Ok(stored);
-                }
-                info!(
-                    range = range.name,
-                    earliest, "range clipped to advertised earliest"
-                );
-                next = earliest;
-                break;
-            }
-            Ok(PeerFloor::Known(earliest)) => {
-                info!(
-                    range = range.name,
-                    earliest, "waiting for a peer that serves this range"
-                );
-                sleep(Duration::from_secs(2)).await;
-            }
-            Err(err) => {
-                warn!(range = range.name, %err, "peer history window unknown");
-                if Instant::now() >= deadline {
-                    break;
-                }
-                sleep(Duration::from_secs(2)).await;
-            }
-        }
-    }
-    if next > range.end {
-        info!(range = range.name, "range is past the advertised window");
-        return Ok(stored);
-    }
-    info!(range = range.name, next, end = range.end, "range start");
-    let mut single = false;
-    let mut missing = 0u32;
-    let mut soft = 0u32;
-    let mut added_in_range = 0u64;
-    while next <= range.end && stored < target {
-        if range
-            .byte_budget
-            .is_some_and(|budget| added_in_range >= budget)
-        {
-            info!(
-                range = range.name,
-                added_in_range, "range byte budget reached"
-            );
-            break;
-        }
-        let depth = if single {
-            1
-        } else {
-            serving_peers(socket, next)
-                .await
-                .saturating_mul(CHUNKS_PER_PEER)
-                .clamp(1, PIPELINE)
-        };
-        let mut plan = Vec::new();
-        let mut issue = next;
-        for _ in 0..depth {
-            if issue > range.end {
-                break;
-            }
-            let width = if single {
-                1
-            } else {
-                (range.end - issue + 1).min(CHUNK)
-            };
-            plan.push((issue, width));
-            issue = issue.saturating_add(width);
-            if single {
-                break;
-            }
-        }
-        if plan.is_empty() {
-            break;
-        }
-        let mut join = JoinSet::new();
-        for (start, width) in &plan {
-            let start = *start;
-            let width = *width;
-            let socket = socket.to_path_buf();
-            join.spawn(async move {
-                let started = Instant::now();
-                let result = ask_chunk(&socket, start, width)
-                    .await
-                    .map_err(|err| format!("{err:#}"));
-                (start, width, result, started)
-            });
-        }
-        let mut done = BTreeMap::new();
-        while let Some(joined) = join.join_next().await {
-            let (start, width, result, started) = joined.wrap_err("chunk task")?;
-            done.insert(start, (width, result, started));
-        }
-        let mut stop_batch = false;
-        for (start, _) in &plan {
-            if *start != next || stop_batch {
-                break;
-            }
-            let (width, result, started) = done
-                .remove(start)
-                .ok_or_else(|| eyre::eyre!("planned chunk {start} did not finish"))?;
-            let fate = apply_chunk(
-                corpus,
-                &cursor_key,
-                range,
-                &mut next,
-                &mut stored,
-                &mut added_in_range,
-                &mut single,
-                &mut missing,
-                &mut soft,
-                width,
-                result,
-                started.elapsed().as_secs_f32(),
-            )?;
-            match fate {
-                ChunkFate::Advance => {}
-                ChunkFate::Retry => {
-                    let pause = if soft > 4 { 10 } else { 2 };
-                    sleep(Duration::from_secs(pause)).await;
-                    stop_batch = true;
-                }
-                ChunkFate::LeaveRange => return Ok(stored),
-            }
-        }
-    }
-    corpus.put_meta(&cursor_key, next)?;
-    Ok(stored)
-}
-
-fn apply_chunk(
-    corpus: &Corpus,
-    cursor_key: &str,
-    range: &Range,
-    next: &mut u64,
-    stored: &mut u64,
-    added_in_range: &mut u64,
-    single: &mut bool,
-    missing: &mut u32,
-    soft: &mut u32,
-    width: u64,
-    result: Result<Vec<BlockRecord>, String>,
-    secs: f32,
-) -> eyre::Result<ChunkFate> {
-    match result {
-        Ok(records) if !records.is_empty() => {
-            let added = corpus.write_records(cursor_key, &records)?;
-            *stored = stored.saturating_add(added);
-            *added_in_range = added_in_range.saturating_add(added);
-            let last = records.last().map(|record| record.number).unwrap_or(*next);
-            info!(
-                range = range.name,
-                from = records[0].number,
-                to = last,
-                blocks = records.len(),
-                added,
-                stored = *stored,
-                secs,
-                "chunk stored"
-            );
-            *next = last.saturating_add(1);
-            *single = false;
-            *missing = 0;
-            *soft = 0;
-            Ok(ChunkFate::Advance)
-        }
-        Ok(_) => {
-            *missing = missing.saturating_add(1);
-            warn!(range = range.name, next = *next, missing, "empty chunk");
-            *single = true;
-            if *missing >= PRUNE_STREAK && *added_in_range == 0 {
-                warn!(range = range.name, next = *next, "range looks unavailable");
-                return Ok(ChunkFate::LeaveRange);
-            }
-            Ok(ChunkFate::Retry)
-        }
-        Err(err) if is_wait(&err) => {
-            warn!(range = range.name, next = *next, %err, "waiting for a peer");
-            Ok(ChunkFate::Retry)
-        }
-        Err(err) if err.contains("no peer serves") => {
-            warn!(range = range.name, next = *next, %err, "range looks unavailable");
-            Ok(ChunkFate::LeaveRange)
-        }
-        Err(err) if err.contains("no header") => {
-            *missing = missing.saturating_add(1);
-            warn!(
-                range = range.name,
-                next = *next,
-                width,
-                missing,
-                %err,
-                "chunk failed"
-            );
-            if width > 1 {
-                *single = true;
-                return Ok(ChunkFate::Retry);
-            }
-            if *added_in_range == 0 && *missing >= PRUNE_STREAK {
-                warn!(range = range.name, next = *next, "range looks unavailable");
-                return Ok(ChunkFate::LeaveRange);
-            }
-            if *missing >= 24 {
-                warn!(range = range.name, next = *next, "range looks unavailable");
-                corpus.put_meta(cursor_key, *next)?;
-                return Ok(ChunkFate::LeaveRange);
-            }
-            if *added_in_range > 0 {
-                corpus.write_hole(*next)?;
-                *next = next.saturating_add(1);
-            }
-            *single = true;
-            Ok(ChunkFate::Retry)
-        }
-        Err(err) if is_soft(&err) => {
-            *soft = soft.saturating_add(1);
-            warn!(
-                range = range.name,
-                next = *next,
-                width,
-                soft,
-                %err,
-                "chunk failed"
-            );
-            if *added_in_range == 0 && *soft >= 12 {
-                warn!(
-                    range = range.name,
-                    next = *next,
-                    "leaving range after repeated transport errors"
-                );
-                return Ok(ChunkFate::LeaveRange);
-            }
-            Ok(ChunkFate::Retry)
-        }
-        Err(err) => {
-            warn!(
-                range = range.name,
-                next = *next,
-                width,
-                %err,
-                "chunk failed"
-            );
-            if width > 1 {
-                *single = true;
-                return Ok(ChunkFate::Retry);
-            }
-            corpus.write_hole(*next)?;
-            *next = next.saturating_add(1);
-            *single = false;
-            Ok(ChunkFate::Retry)
-        }
-    }
-}
-
-fn is_wait(err: &str) -> bool {
-    err.contains("no peers") || err.contains("busy") || err.contains("peer process")
-}
-
-fn is_soft(err: &str) -> bool {
-    err.contains("timed out")
-        || err.contains("disconnected")
-        || err.contains("peer closed")
-        || err.contains("Connection reset")
-        || err.contains("broken pipe")
-        || err.contains("eth message")
-        || err.contains("dropped the request")
-        || err.contains("stream")
-}
-
-async fn peer_floor(socket: &Path) -> eyre::Result<PeerFloor> {
-    match earliest_floor(&status(socket).await?)? {
-        Earliest::Open => Ok(PeerFloor::Unknown),
-        Earliest::Known(block) => Ok(PeerFloor::Known(block)),
-    }
-}
-
-async fn serving_peers(socket: &Path, start: u64) -> usize {
-    match status(socket).await {
-        Ok(sessions) => serving(&sessions, start),
-        Err(_) => 1,
-    }
-}
-
-async fn wait_for_head(socket: &Path) -> eyre::Result<u64> {
-    let started = Instant::now();
-    loop {
-        match status(socket).await {
-            Ok(sessions) => {
-                if let Some(head) = max_head(&sessions) {
-                    return Ok(head);
-                }
-            }
-            Err(err) => {
-                if started.elapsed() > Duration::from_secs(15) {
-                    warn!(%err, "still waiting for the peer process");
-                }
-            }
-        }
-        if started.elapsed() > Duration::from_secs(300) {
-            return Err(eyre::eyre!("no peer head after 5 minutes"));
-        }
-        sleep(Duration::from_secs(2)).await;
-    }
-}
-
-async fn ask_chunk(socket: &Path, start: u64, count: u64) -> eyre::Result<Vec<BlockRecord>> {
-    let body = body_call(
-        socket,
-        &serde_json::json!({
-            "op": "chunk",
-            "start": start,
-            "count": count,
-        }),
-        "chunk",
-    )
-    .await?;
-    decode_block_records(&body)
-        .map_err(|err| eyre::eyre!(err))
-        .wrap_err("decode chunk")
-}
-
-fn default_db_path() -> PathBuf {
-    Corpus::default_path()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{is_soft, is_wait};
-
-    #[test]
-    fn wait_errors_are_not_block_failures() {
-        assert!(is_wait("no peers connected"));
-        assert!(is_wait("peers are busy"));
-        assert!(!is_wait("peer has no header for block 12369621"));
-        assert!(!is_wait("no peer serves block 12369621"));
-    }
-
-    #[test]
-    fn transport_errors_stay_retryable() {
-        assert!(is_soft("eth response timed out"));
-        assert!(is_soft("peer dropped the request"));
-        assert!(!is_soft("receipt root mismatch for block 10"));
-    }
 }
