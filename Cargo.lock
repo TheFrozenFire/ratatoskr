@@ -5020,7 +5020,6 @@ dependencies = [
  "corpus",
  "eyre",
  "model",
- "redb",
  "tokio",
  "venues",
 ]

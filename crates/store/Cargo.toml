@@ -11,6 +11,5 @@ chain.workspace = true
 corpus.workspace = true
 eyre.workspace = true
 model.workspace = true
-redb = "2"
 tokio.workspace = true
 venues.workspace = true

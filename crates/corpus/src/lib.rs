@@ -160,7 +160,11 @@ impl Corpus {
         mut visit: impl FnMut(u64, &[u8]) -> eyre::Result<()>,
     ) -> eyre::Result<()> {
         let read = self.db.begin_read()?;
-        let table = read.open_table(BLOCKS)?;
+        let table = match read.open_table(BLOCKS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(()),
+            Err(err) => return Err(err.into()),
+        };
         for row in table.iter()? {
             let (key, value) = row?;
             visit(key.value(), value.value())?;

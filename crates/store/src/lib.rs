@@ -9,7 +9,7 @@ use chain::HeaderChain;
 use corpus::Corpus;
 use model::{BlockRecord, HeaderRecord};
 use std::path::Path;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
 use venues::{Catalog, Put, ReceiptBody, VenueRow};
 
 const HEADER_BATCH: u64 = 8192;
@@ -107,11 +107,7 @@ impl EntityStore for LocalStore {
             let chain = Arc::clone(&self.chain);
             let batch = blocking(move || chain.read_range(at, end)).await?;
             let rows = batch.len() as u64;
-            let dense = batch
-                .iter()
-                .enumerate()
-                .all(|(index, record)| record.number == at + index as u64);
-            if !dense || rows != end - at {
+            if rows != end - at {
                 seen += rows;
                 return Err(short_header_range(seen, from, to));
             }
@@ -165,22 +161,19 @@ impl EntityStore for LocalStore {
         visit: &mut dyn FnMut(u64, &[u8]) -> eyre::Result<()>,
     ) -> eyre::Result<()> {
         let corpus = Arc::clone(&self.corpus);
-        // SAFETY: lifetime is erased so the pointer can move onto the blocking
-        // thread. `JoinWalk` keeps `visit` borrowed until the walk drops it.
-        let visit: *mut (dyn FnMut(u64, &[u8]) -> eyre::Result<()> + 'static) =
-            unsafe { std::mem::transmute(std::ptr::from_mut(visit)) };
-        let done = Arc::new((Mutex::new(false), Condvar::new()));
-        let walk = BlockWalk {
-            corpus,
-            visit,
-            done: Arc::clone(&done),
-        };
-        let handle = tokio::task::spawn_blocking(move || walk.run());
-        let _joined = JoinWalk(done);
-        match handle.await {
-            Ok(result) => result,
-            Err(err) => Err(eyre::eyre!("store task: {err}")),
+        let rows = blocking(move || {
+            let mut rows = Vec::new();
+            corpus.for_each_block(|number, bytes| {
+                rows.push((number, bytes.to_vec()));
+                Ok(())
+            })?;
+            Ok(rows)
+        })
+        .await?;
+        for (number, bytes) in &rows {
+            visit(*number, bytes)?;
         }
+        Ok(())
     }
 
     async fn cursor(&self, job: &str) -> eyre::Result<Option<u64>> {
@@ -199,15 +192,7 @@ impl EntityStore for LocalStore {
         let catalog = Arc::clone(&self.catalog);
         let job = job.to_string();
         let rows = rows.to_vec();
-        blocking(move || {
-            if let Some(stored) = catalog.cursor(&job)? {
-                if next < stored {
-                    return Err(eyre::eyre!("cursor {job} is {stored}; {next} is below it"));
-                }
-            }
-            catalog.commit_chunk(&job, next, &rows, put)
-        })
-        .await
+        blocking(move || catalog.commit_chunk(&job, next, &rows, put)).await
     }
 
     async fn hit_scan(&self, job: &str) -> eyre::Result<Option<u64>> {
@@ -255,49 +240,6 @@ where
     tokio::task::spawn_blocking(work)
         .await
         .map_err(|err| eyre::eyre!("store task: {err}"))?
-}
-
-struct BlockWalk {
-    corpus: Arc<Corpus>,
-    visit: *mut (dyn FnMut(u64, &[u8]) -> eyre::Result<()> + 'static),
-    done: Arc<(Mutex<bool>, Condvar)>,
-}
-
-// SAFETY: the pointer is used on the blocking thread only. `JoinWalk` waits
-// until that use finishes before the caller touches `visit` again.
-unsafe impl Send for BlockWalk {}
-
-impl BlockWalk {
-    fn run(self) -> eyre::Result<()> {
-        // SAFETY: `JoinWalk` waits until this value is dropped, and the caller
-        // keeps `visit` borrowed until that wait finishes.
-        unsafe {
-            let visit = &mut *self.visit;
-            self.corpus
-                .for_each_block(|number, bytes| visit(number, bytes))
-        }
-    }
-}
-
-impl Drop for BlockWalk {
-    fn drop(&mut self) {
-        let (lock, cv) = &*self.done;
-        let mut done = lock.lock().unwrap_or_else(|err| err.into_inner());
-        *done = true;
-        cv.notify_one();
-    }
-}
-
-struct JoinWalk(Arc<(Mutex<bool>, Condvar)>);
-
-impl Drop for JoinWalk {
-    fn drop(&mut self) {
-        let (lock, cv) = &*self.0;
-        let mut done = lock.lock().unwrap_or_else(|err| err.into_inner());
-        while !*done {
-            done = cv.wait(done).unwrap_or_else(|err| err.into_inner());
-        }
-    }
 }
 
 #[cfg(test)]
@@ -455,22 +397,6 @@ mod tests {
         assert_eq!(last.number, 1);
         assert_eq!(store.header_cursor().await.unwrap(), 2);
 
-        let side = dir.0.join("side.redb");
-        let mut numbers = Vec::new();
-        let seen = store
-            .for_each_header(0, 2, &mut |batch| {
-                numbers.extend(batch.iter().map(|header| header.number));
-                let db = redb::Database::create(&side)?;
-                let txn = db.begin_write()?;
-                txn.commit()?;
-                Ok(())
-            })
-            .await
-            .unwrap();
-        assert_eq!(seen, 2);
-        assert_eq!(numbers, vec![0, 1]);
-        assert!(side.is_file());
-
         let mut called = false;
         let err = store
             .for_each_header(0, 4, &mut |_| {
@@ -493,5 +419,47 @@ mod tests {
             .unwrap_err();
         assert!(!called);
         assert!(err.to_string().contains("backwards"));
+
+        let chain = std::sync::Arc::clone(&store.chain);
+        let grandchild = b256!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        let mut numbers = Vec::new();
+        let seen = store
+            .for_each_header(0, 2, &mut |batch| {
+                numbers.extend(batch.iter().map(|header| header.number));
+                let chain = std::sync::Arc::clone(&chain);
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let result = (|| -> eyre::Result<()> {
+                        let next = chain.cursor()?;
+                        let parent = chain.parent_hash(next)?;
+                        chain.append(&[header(next, grandchild, parent)], next, parent)?;
+                        Ok(())
+                    })();
+                    let _ = tx.send(result);
+                });
+                rx.recv_timeout(std::time::Duration::from_secs(5))
+                    .map_err(|_| eyre::eyre!("header write blocked; read snapshot still open"))??;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(seen, 2);
+        assert_eq!(numbers, vec![0, 1]);
+        assert_eq!(store.header_cursor().await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn for_each_block_on_a_fresh_store_is_empty() {
+        let dir = TempDir::new();
+        let store = open(&dir.0);
+        let mut seen = 0_u64;
+        store
+            .for_each_block(&mut |_number, _bytes| {
+                seen += 1;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(seen, 0);
     }
 }

@@ -143,6 +143,11 @@ impl Catalog {
         let written = {
             let mut venues = write.open_table(VENUES)?;
             let mut cursors = write.open_table(CURSORS)?;
+            if let Some(stored) = cursors.get(job)?.map(|value| value.value()) {
+                if next < stored {
+                    return Err(eyre::eyre!("cursor {job} is {stored}; {next} is below it"));
+                }
+            }
             let mut n = 0_u64;
             for row in rows {
                 let key = row.key();

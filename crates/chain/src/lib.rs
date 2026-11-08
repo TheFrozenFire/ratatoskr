@@ -7,7 +7,7 @@
 use alloy_primitives::B256;
 use eyre::WrapErr;
 use model::{decode_header_record, encode_header_record, HeaderRecord, MAINNET_GENESIS_HASH};
-use redb::{Database, Durability, TableDefinition};
+use redb::{Database, Durability, ReadableTable, TableDefinition};
 use std::path::{Path, PathBuf};
 
 const HEADERS: TableDefinition<u64, &[u8]> = TableDefinition::new("headers");
@@ -83,6 +83,13 @@ impl HeaderChain {
         {
             let mut headers = txn.open_table(HEADERS)?;
             let mut meta = txn.open_table(META)?;
+            let stored = meta.get("next")?.map(|value| value.value()).unwrap_or(0);
+            let first = records[0].number;
+            if stored != first {
+                return Err(eyre::eyre!(
+                    "header cursor is {stored}; batch starts at {first}"
+                ));
+            }
             for record in records {
                 let encoded = encode_header_record(record);
                 headers.insert(record.number, encoded.as_slice())?;
@@ -264,6 +271,15 @@ mod tests {
                 MAINNET_GENESIS_HASH,
             )
             .unwrap();
+        assert_eq!(chain.cursor().unwrap(), 2);
+        let err = chain
+            .append(
+                &[record(1, child, MAINNET_GENESIS_HASH)],
+                1,
+                MAINNET_GENESIS_HASH,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("header cursor"));
         assert_eq!(chain.cursor().unwrap(), 2);
         drop(chain);
         let _ = std::fs::remove_file(&path);
