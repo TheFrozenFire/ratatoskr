@@ -1,0 +1,25 @@
+[package]
+name = "ratatoskr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ratatoskr"
+path = "src/main.rs"
+
+[dependencies]
+chain.workspace = true
+clap.workspace = true
+corpus.workspace = true
+directory.workspace = true
+eth-p2p.workspace = true
+eyre.workspace = true
+peer.workspace = true
+pipeline.workspace = true
+store.workspace = true
+tokio = { workspace = true, features = ["signal"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+venues.workspace = true

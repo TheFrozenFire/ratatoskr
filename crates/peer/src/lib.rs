@@ -35,7 +35,7 @@ use std::{
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
-    sync::{mpsc, oneshot, Mutex},
+    sync::{mpsc, oneshot, watch, Mutex},
     task::{JoinHandle, JoinSet},
     time::{sleep, timeout},
 };
@@ -65,12 +65,56 @@ pub struct PeerConfig {
     pub egress: Option<Egress>,
 }
 
-/// Open `peers.redb`, bind the socket, and dial until the process stops.
-///
-/// The catalog is opened before the socket file is touched. `Database already
-/// open` leaves the existing peer process and its socket alone.
-pub async fn serve(config: PeerConfig) -> eyre::Result<()> {
-    let catalog = catalog::Catalog::open(&config.catalog)?;
+/// Catalog owner. Dropping it releases the flock. The socket is not touched.
+pub struct OpenedPeer {
+    catalog: catalog::Catalog,
+    local: LocalPeer,
+}
+
+impl OpenedPeer {
+    /// The slot table [`run`] dials. Empty until that loop starts.
+    pub fn local(&self) -> LocalPeer {
+        self.local.clone()
+    }
+}
+
+/// Open `peers.redb` and keep the flock. Does not unlink or bind a socket.
+pub fn open(path: &Path) -> eyre::Result<OpenedPeer> {
+    let catalog = catalog::Catalog::open(path)?;
+    Ok(OpenedPeer {
+        catalog,
+        local: LocalPeer {
+            slots: Arc::new(Mutex::new(Vec::new())),
+            wanted: Arc::new(AtomicU64::new(0)),
+        },
+    })
+}
+
+/// Remove a stale socket file and bind mode 0600. Does not dial.
+pub fn bind_socket(socket: &Path) -> eyre::Result<UnixListener> {
+    if socket.exists() {
+        fs::remove_file(socket).wrap_err("remove stale socket")?;
+    }
+    if let Some(parent) = socket.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let listener = UnixListener::bind(socket).wrap_err("bind socket")?;
+    fs::set_permissions(socket, fs::Permissions::from_mode(0o600))?;
+    Ok(listener)
+}
+
+/// Node key loaded and socket bound. [`run`] dials until the shutdown watch is set.
+pub struct PreparedPeer {
+    key: SecretKey,
+    peers: usize,
+    listener: UnixListener,
+    egress: Option<Egress>,
+    catalog_path: PathBuf,
+    opened: OpenedPeer,
+}
+
+/// Load the node key and bind. `open` has already taken the catalog flock.
+pub fn prepare(opened: OpenedPeer, config: &PeerConfig) -> eyre::Result<PreparedPeer> {
     let key = load_node_key()?;
     let id = pk2id(&key.public_key(SECP256K1));
     info!(
@@ -81,46 +125,97 @@ pub async fn serve(config: PeerConfig) -> eyre::Result<()> {
         egress = ?config.egress,
         "peer process starting"
     );
-
-    if config.socket.exists() {
-        fs::remove_file(&config.socket).wrap_err("remove stale socket")?;
-    }
-    if let Some(parent) = config.socket.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let listener = UnixListener::bind(&config.socket).wrap_err("bind socket")?;
-    fs::set_permissions(&config.socket, fs::Permissions::from_mode(0o600))?;
-
-    let slots = Arc::new(Mutex::new(Vec::<Slot>::new()));
-    let wanted = Arc::new(AtomicU64::new(0));
-    let (catalog_tx, catalog_rx) = mpsc::unbounded_channel();
-    let local = LocalPeer {
-        slots: Arc::clone(&slots),
-        wanted: Arc::clone(&wanted),
-    };
-    tokio::spawn(maintain(
+    let listener = bind_socket(&config.socket)?;
+    Ok(PreparedPeer {
         key,
-        config.peers,
-        Arc::clone(&local.slots),
-        Arc::clone(&local.wanted),
-        config.egress,
+        peers: config.peers,
+        listener,
+        egress: config.egress,
+        catalog_path: config.catalog.clone(),
+        opened,
+    })
+}
+
+/// Open `peers.redb`, bind the socket, and dial until the process stops.
+///
+/// The catalog is opened before the socket file is touched. `Database already
+/// open` leaves the existing peer process and its socket alone.
+pub async fn serve(config: PeerConfig) -> eyre::Result<()> {
+    let opened = open(&config.catalog)?;
+    let prepared = prepare(opened, &config)?;
+    let (_tx, stop) = watch::channel(false);
+    run(prepared, stop).await
+}
+
+/// Accept on the bound socket and dial until `stop` is set.
+///
+/// Session tasks end when their job channels drop. No devp2p disconnect
+/// reason is written.
+pub async fn run(prepared: PreparedPeer, mut stop: watch::Receiver<bool>) -> eyre::Result<()> {
+    let PreparedPeer {
+        key,
+        peers,
+        listener,
+        egress,
+        catalog_path,
+        opened,
+    } = prepared;
+    let OpenedPeer { catalog, local } = opened;
+    let (catalog_tx, catalog_rx) = mpsc::unbounded_channel();
+    let slots = Arc::clone(&local.slots);
+    let wanted = Arc::clone(&local.wanted);
+    let maintain_stop = stop.clone();
+    let maintain_task = tokio::spawn(maintain(
+        key,
+        peers,
+        Arc::clone(&slots),
+        Arc::clone(&wanted),
+        egress,
         catalog,
         catalog_rx,
+        maintain_stop,
     ));
-
-    let catalog_path = Arc::new(config.catalog);
-    loop {
-        let (conn, _) = listener.accept().await.wrap_err("accept")?;
-        let slots = Arc::clone(&local.slots);
-        let wanted = Arc::clone(&local.wanted);
-        let catalog_tx = catalog_tx.clone();
-        let catalog_path = Arc::clone(&catalog_path);
-        tokio::spawn(async move {
-            if let Err(err) = handle_conn(conn, slots, wanted, catalog_tx, catalog_path).await {
-                warn!(%err, "client request failed");
+    let catalog_path = Arc::new(catalog_path);
+    let accept_result = loop {
+        if *stop.borrow() {
+            break Ok(());
+        }
+        tokio::select! {
+            biased;
+            changed = stop.changed() => {
+                if changed.is_err() || *stop.borrow() {
+                    break Ok(());
+                }
             }
-        });
+            accepted = listener.accept() => {
+                match accepted {
+                    Ok((conn, _)) => {
+                        let slots = Arc::clone(&slots);
+                        let wanted = Arc::clone(&wanted);
+                        let catalog_tx = catalog_tx.clone();
+                        let catalog_path = Arc::clone(&catalog_path);
+                        tokio::spawn(async move {
+                            if let Err(err) =
+                                handle_conn(conn, slots, wanted, catalog_tx, catalog_path).await
+                            {
+                                warn!(%err, "client request failed");
+                            }
+                        });
+                    }
+                    Err(err) => break Err(err).wrap_err("accept"),
+                }
+            }
+        }
+    };
+    drop(listener);
+    drop(catalog_tx);
+    if accept_result.is_err() {
+        maintain_task.abort();
     }
+    let _ = maintain_task.await;
+    slots.lock().await.clear();
+    drop(local);
+    accept_result
 }
 
 /// In-process history reads. The slot table is the one [`serve`] dials.
@@ -336,6 +431,19 @@ fn note(tx: &mpsc::UnboundedSender<catalog::Sighting>, sighting: catalog::Sighti
     let _ = tx.send(sighting);
 }
 
+/// `true` when the shutdown watch is set.
+async fn pause(stop: &mut watch::Receiver<bool>, secs: u64) -> bool {
+    if *stop.borrow() {
+        return true;
+    }
+    tokio::select! {
+        biased;
+        changed = stop.changed() => changed.is_err() || *stop.borrow(),
+        _ = sleep(Duration::from_secs(secs)) => false,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn maintain(
     key: SecretKey,
     target: usize,
@@ -344,6 +452,7 @@ async fn maintain(
     egress: Option<Egress>,
     mut catalog: catalog::Catalog,
     mut catalog_rx: mpsc::UnboundedReceiver<CatalogCmd>,
+    mut stop: watch::Receiver<bool>,
 ) {
     let mut held: HashSet<IpAddr> = HashSet::new();
     let mut cooldown: HashMap<IpAddr, Instant> = HashMap::new();
@@ -371,6 +480,9 @@ async fn maintain(
         "peer catalog"
     );
     loop {
+        if *stop.borrow() {
+            return;
+        }
         while let Ok(ip) = dead_rx.try_recv() {
             held.remove(&ip);
             cooldown.insert(ip, Instant::now() + REDIAL_GAP);
@@ -388,7 +500,9 @@ async fn maintain(
             guard.len()
         };
         if live >= target && dials.is_empty() {
-            sleep(Duration::from_secs(5)).await;
+            if pause(&mut stop, 5).await {
+                return;
+            }
             continue;
         }
         if dns_task.is_none()
@@ -429,6 +543,9 @@ async fn maintain(
         let under_target = held.len() < target && live < target;
         let wanted_block = wanted.load(Ordering::Relaxed);
         while under_target && dials.len() < IN_FLIGHT && started_in_window < DIALS_PER_SEC {
+            if *stop.borrow() {
+                return;
+            }
             // One dial in four walks the directory in order so a peer we have
             // not measured yet is still tried. The rest prefer a peer whose
             // history already covers `wanted_block`.
@@ -466,10 +583,24 @@ async fn maintain(
             });
         }
         if dials.is_empty() {
-            sleep(Duration::from_secs(5)).await;
+            if pause(&mut stop, 5).await {
+                return;
+            }
             continue;
         }
-        let joined = dials.join_next().await;
+        if *stop.borrow() {
+            return;
+        }
+        let joined = tokio::select! {
+            biased;
+            changed = stop.changed() => {
+                if changed.is_err() || *stop.borrow() {
+                    return;
+                }
+                continue;
+            }
+            joined = dials.join_next() => joined,
+        };
         let Some(joined) = joined else { continue };
         let (dialed, result) = match joined {
             Ok(outcome) => outcome,
@@ -1335,6 +1466,7 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(20));
         }
+        fs::write(&socket, b"stale").unwrap();
         let started = Instant::now();
         let result = tokio::time::timeout(
             Duration::from_secs(2),
@@ -1358,8 +1490,24 @@ mod tests {
             Err(_) => panic!("serve did not fail within 2s"),
         }
         assert!(started.elapsed() < Duration::from_secs(2));
-        assert!(!socket.exists());
+        assert_eq!(fs::read(&socket).unwrap(), b"stale");
         drop(kill);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn stale_socket_is_replaced_after_the_catalog_opens() {
+        use std::os::unix::fs::FileTypeExt;
+        let dir = temp_dir("bind");
+        let path = dir.join("peers.redb");
+        let socket = dir.join("peer.sock");
+        fs::write(&socket, b"stale").unwrap();
+        let opened = open(&path).unwrap();
+        assert_eq!(fs::read(&socket).unwrap(), b"stale");
+        let listener = bind_socket(&socket).unwrap();
+        assert!(socket.metadata().unwrap().file_type().is_socket());
+        drop(listener);
+        drop(opened);
         let _ = fs::remove_dir_all(&dir);
     }
 }
