@@ -1,63 +1,51 @@
-//! Record the published mainnet DNS peer lists.
+//! Ask the peer process to record the published mainnet DNS peer lists.
 //!
-//! This does not dial. Block ranges are not in the ENR or the DNS tree. They
-//! show up only after an eth/69 Status handshake, and the header sync owns
-//! those sockets for now.
+//! This does not dial and does not open `peers.redb`. The peer process already
+//! holds that file. Block ranges are not in the ENR or the DNS tree.
 
 use clap::Parser;
-use directory::{default_path, Catalog, PublishedPeer};
-use eth_p2p::{census_mainnet_dns, DNS_ALL, DNS_SNAP};
-use std::path::PathBuf;
+use eyre::eyre;
+use serde_json::Value;
 
 #[derive(Debug, Parser)]
 #[command(name = "ratatoskr-peers")]
-struct Args {
-    /// Peer catalog. Created if missing.
-    #[arg(long)]
-    db: Option<PathBuf>,
-}
+struct Args {}
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "peers=info,eth_p2p=info".into()),
+                .unwrap_or_else(|_| "peers=info".into()),
         )
         .init();
-    let args = Args::parse();
-    let path = args.db.unwrap_or_else(default_path);
-    let peers = census_mainnet_dns().await?;
-    let all = peers.iter().filter(|peer| peer.source & DNS_ALL != 0).count();
-    let snap = peers.iter().filter(|peer| peer.source & DNS_SNAP != 0).count();
-    let both = peers
-        .iter()
-        .filter(|peer| peer.source & (DNS_ALL | DNS_SNAP) == DNS_ALL | DNS_SNAP)
-        .count();
-    let snap_only = peers
-        .iter()
-        .filter(|peer| peer.source & DNS_SNAP != 0 && peer.source & DNS_ALL == 0)
-        .count();
-    let published: Vec<PublishedPeer> = peers
-        .iter()
-        .map(|peer| PublishedPeer {
-            id: peer.record.id,
-            address: peer.record.address,
-            tcp_port: peer.record.tcp_port,
-            udp_port: peer.record.udp_port,
-            source: peer.source,
-        })
-        .collect();
-    let catalog = Catalog::open(&path)?;
-    catalog.write_published(&published)?;
+    let _args = Args::parse();
+    let value = ipc::json_call(&ipc::socket_path()?, &serde_json::json!({"op": "census"})).await?;
+    if value.get("ok").and_then(|ok| ok.as_bool()) != Some(true) {
+        let err = value
+            .get("error")
+            .and_then(|err| err.as_str())
+            .unwrap_or("request failed");
+        return Err(eyre!(err.to_string()));
+    }
     println!(
         "peers {} all-tree {} snap-tree {} in-both {} snap-only {} catalog {}",
-        peers.len(),
-        all,
-        snap,
-        both,
-        snap_only,
-        path.display()
+        count_field(&value, "peers")?,
+        count_field(&value, "all-tree")?,
+        count_field(&value, "snap-tree")?,
+        count_field(&value, "in-both")?,
+        count_field(&value, "snap-only")?,
+        value
+            .get("catalog")
+            .and_then(|path| path.as_str())
+            .ok_or_else(|| eyre!("census response missing catalog"))?
     );
     Ok(())
+}
+
+fn count_field(value: &Value, key: &str) -> eyre::Result<u64> {
+    value
+        .get(key)
+        .and_then(|count| count.as_u64())
+        .ok_or_else(|| eyre!("census response missing {key}"))
 }

@@ -184,8 +184,10 @@ pub async fn census_mainnet_dns() -> eyre::Result<Vec<DnsPeer>> {
 
 async fn walk_dns_tree(link: &str) -> eyre::Result<Vec<NodeRecord>> {
     let resolver = DnsResolver::from_system_conf().wrap_err("system DNS resolver")?;
-    let mut config = DnsDiscoveryConfig::default();
-    config.max_requests_per_sec = NonZeroUsize::new(30).unwrap();
+    let config = DnsDiscoveryConfig {
+        max_requests_per_sec: NonZeroUsize::new(30).unwrap(),
+        ..DnsDiscoveryConfig::default()
+    };
     let (mut service, _handle) = DnsDiscoveryService::new_pair(Arc::new(resolver), config);
     let mut updates = service.node_record_stream();
     service.sync_tree(link).wrap_err("dns discovery link")?;
@@ -246,8 +248,10 @@ async fn collect_dns(limit: usize, budget: Duration) -> eyre::Result<Vec<NodeRec
         .public_dns_network_protocol()
         .ok_or_else(|| eyre::eyre!("mainnet chainspec has no DNS discovery link"))?;
     let resolver = DnsResolver::from_system_conf().wrap_err("system DNS resolver")?;
-    let mut config = DnsDiscoveryConfig::default();
-    config.max_requests_per_sec = NonZeroUsize::new(20).unwrap();
+    let config = DnsDiscoveryConfig {
+        max_requests_per_sec: NonZeroUsize::new(20).unwrap(),
+        ..DnsDiscoveryConfig::default()
+    };
     let (mut service, _handle) = DnsDiscoveryService::new_pair(Arc::new(resolver), config);
     let mut updates = service.node_record_stream();
     service

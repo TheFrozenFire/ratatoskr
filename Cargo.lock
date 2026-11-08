@@ -3419,6 +3419,7 @@ dependencies = [
  "discover",
  "eth-p2p",
  "eyre",
+ "ipc",
  "model",
  "rand 0.8.8",
  "reth-network-peers",
@@ -3435,9 +3436,9 @@ name = "peers"
 version = "0.1.0"
 dependencies = [
  "clap",
- "directory",
- "eth-p2p",
  "eyre",
+ "ipc",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
