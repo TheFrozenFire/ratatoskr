@@ -618,8 +618,7 @@ fn paths_from(data_dir: Option<&Path>) -> eyre::Result<Paths> {
 }
 
 fn live_share() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home).join(".local/share/ratatoskr")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/ratatoskr")
 }
 
 fn refuse_live(dir: &Path) -> eyre::Result<()> {

@@ -188,8 +188,7 @@ fn meta_get(db: &Database, key: &str) -> eyre::Result<Option<u64>> {
 }
 
 fn data_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home).join(".local/share/ratatoskr")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/ratatoskr")
 }
 
 #[cfg(test)]

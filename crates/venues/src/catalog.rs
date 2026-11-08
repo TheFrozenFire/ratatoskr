@@ -139,8 +139,7 @@ impl Catalog {
     }
 
     pub fn default_path() -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        PathBuf::from(home).join(".local/share/ratatoskr/entities.redb")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/ratatoskr/entities.redb")
     }
 
     pub fn cursor(&self, job: &str) -> eyre::Result<Option<u64>> {
@@ -1008,8 +1007,7 @@ fn anchor_id() -> B256 {
 }
 
 fn live_share_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home).join(".local/share/ratatoskr")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/ratatoskr")
 }
 
 fn dirs_equal(left: &Path, right: &Path) -> eyre::Result<bool> {

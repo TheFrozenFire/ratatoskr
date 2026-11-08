@@ -4,9 +4,9 @@
 //! Tick liquidity is left for a later RPC read against the pool.
 
 use alloy_primitives::{address, Address, B256};
-use eyre::WrapErr;
 use corpus::{logs_in_block, Corpus};
 use discover::univ3_pool;
+use eyre::WrapErr;
 use model::decode_block_record;
 use redb::{Database, Durability, TableDefinition};
 use std::{
@@ -149,6 +149,5 @@ fn encode_row(row: &PoolRecord) -> Vec<u8> {
 }
 
 fn data_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    Path::new(&home).join(".local/share/ratatoskr")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/ratatoskr")
 }

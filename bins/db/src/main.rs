@@ -8,7 +8,7 @@ use store::{db_socket, serve, LocalStore};
 #[derive(Debug, Parser)]
 #[command(name = "ratatoskr-db")]
 struct Args {
-    /// Entity directory. Default is ~/.local/share/ratatoskr.
+    /// Entity directory. Default is `data/ratatoskr` in the repo.
     #[arg(long)]
     dir: Option<PathBuf>,
 }
@@ -33,6 +33,5 @@ async fn main() -> eyre::Result<()> {
 }
 
 fn data_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home).join(".local/share/ratatoskr")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/ratatoskr")
 }

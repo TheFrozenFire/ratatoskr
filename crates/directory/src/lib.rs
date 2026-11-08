@@ -108,7 +108,12 @@ impl Catalog {
         }
     }
 
-    fn persist(&mut self, sighting: &Sighting, summary: &Summary, append: bool) -> eyre::Result<()> {
+    fn persist(
+        &mut self,
+        sighting: &Sighting,
+        summary: &Summary,
+        append: bool,
+    ) -> eyre::Result<()> {
         let mut txn = self.db.begin_write()?;
         txn.set_durability(Durability::Eventual);
         {
@@ -172,7 +177,10 @@ pub fn dial_rank(summary: Option<&Summary>, wanted: u64) -> u8 {
     if summary.lowest_served.is_some_and(|block| block <= wanted) {
         return 0;
     }
-    if summary.last_earliest.is_some_and(|earliest| earliest <= wanted) {
+    if summary
+        .last_earliest
+        .is_some_and(|earliest| earliest <= wanted)
+    {
         return 1;
     }
     if summary.success == 0 && summary.fail > 0 && summary.last_earliest.is_none() {
@@ -185,9 +193,8 @@ pub fn dial_rank(summary: Option<&Summary>, wanted: u64) -> u8 {
 }
 
 pub fn default_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home)
-        .join(".local/share/ratatoskr")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../data/ratatoskr")
         .join("peers.redb")
 }
 
@@ -203,9 +210,7 @@ fn history_changes(previous: Option<&Summary>, sighting: &Sighting) -> bool {
         }
         SERVED => {
             let block = sighting.served.unwrap_or(u64::MAX);
-            previous
-                .lowest_served
-                .is_none_or(|lowest| block < lowest)
+            previous.lowest_served.is_none_or(|lowest| block < lowest)
                 || previous
                     .highest_served
                     .is_none_or(|highest| block > highest)
@@ -368,7 +373,9 @@ fn decode_summary(bytes: &[u8]) -> Option<Summary> {
 
 fn decode_addr(bytes: &[u8]) -> Option<IpAddr> {
     match *bytes.first()? {
-        4 => Some(IpAddr::V4(Ipv4Addr::new(bytes[1], bytes[2], bytes[3], bytes[4]))),
+        4 => Some(IpAddr::V4(Ipv4Addr::new(
+            bytes[1], bytes[2], bytes[3], bytes[4],
+        ))),
         6 => {
             let octets: [u8; 16] = bytes[1..17].try_into().ok()?;
             Some(IpAddr::V6(Ipv6Addr::from(octets)))
