@@ -6,7 +6,7 @@
 use crate::detail::TickWord;
 use crate::state::{
     CurveRecord, Dirty, ImmutablePut, ImmutableRow, MutableStored, MutableView, MutableWrite,
-    PoolState, TickPage, WatchHit, WorkFail, WorkJob,
+    PoolState, QuoteRecord, TickPage, WatchHit, WorkFail, WorkJob,
 };
 use crate::{decode_row, encode_row, VenueRow};
 use alloy_primitives::B256;
@@ -47,6 +47,9 @@ pub enum StateCall {
     },
     PutCurve {
         curve: CurveRecord,
+    },
+    PutQuote {
+        quote: QuoteRecord,
     },
     ReadState {
         kind: u8,
@@ -111,6 +114,7 @@ pub fn encode_state_call(call: &StateCall) -> eyre::Result<Vec<u8>> {
             "pages": pages.iter().map(page_value).collect::<Vec<_>>(),
         }),
         StateCall::PutCurve { curve } => json!({"call": "put_curve", "curve": curve_value(curve)}),
+        StateCall::PutQuote { quote } => json!({"call": "put_quote", "quote": quote_value(quote)}),
         StateCall::ReadState { kind, id } => json!({"call": "read_state", "kind": kind, "id": id}),
         StateCall::ApplyWatch { through, hits } => json!({
             "call": "apply_watch",
@@ -177,6 +181,9 @@ pub fn decode_state_call(bytes: &[u8]) -> eyre::Result<StateCall> {
         "put_curve" => StateCall::PutCurve {
             curve: curve_from(field(&value, "curve")?)?,
         },
+        "put_quote" => StateCall::PutQuote {
+            quote: quote_from(field(&value, "quote")?)?,
+        },
         "read_state" => StateCall::ReadState {
             kind: field_u8(&value, "kind")?,
             id: field_b256(&value, "id")?,
@@ -239,6 +246,10 @@ pub fn encode_state_reply(reply: &StateReply) -> eyre::Result<Vec<u8>> {
                 Some(curve) => curve_value(curve),
                 None => Value::Null,
             },
+            "quotes": match &state.quotes {
+                Some(quote) => quote_value(quote),
+                None => Value::Null,
+            },
             "dirty": match &state.dirty {
                 Some(dirty) => json!({"block": dirty.block, "class": dirty.class}),
                 None => Value::Null,
@@ -299,6 +310,10 @@ pub fn decode_state_reply(bytes: &[u8]) -> eyre::Result<StateReply> {
             curve: match value.get("curve") {
                 None | Some(Value::Null) => None,
                 Some(curve) => Some(curve_from(curve)?),
+            },
+            quotes: match value.get("quotes") {
+                None | Some(Value::Null) => None,
+                Some(quote) => Some(quote_from(quote)?),
             },
             dirty: match value.get("dirty") {
                 None | Some(Value::Null) => None,
@@ -513,6 +528,28 @@ fn curve_value(curve: &CurveRecord) -> Value {
         "generation": curve.generation,
         "version": curve.version,
         "payload": hex_bytes(&curve.payload),
+    })
+}
+
+fn quote_value(quote: &QuoteRecord) -> Value {
+    json!({
+        "kind": quote.kind,
+        "id": quote.id,
+        "generation": quote.generation,
+        "version": quote.version,
+        "block": quote.block,
+        "payload": hex_bytes(&quote.payload),
+    })
+}
+
+fn quote_from(value: &Value) -> eyre::Result<QuoteRecord> {
+    Ok(QuoteRecord {
+        kind: field_u8(value, "kind")?,
+        id: field_b256(value, "id")?,
+        generation: field_u64(value, "generation")?,
+        version: u32::try_from(field_u64(value, "version")?).map_err(|_| eyre!("version"))?,
+        block: field_u64(value, "block")?,
+        payload: parse_hex(&field_str(value, "payload")?)?,
     })
 }
 

@@ -1,10 +1,12 @@
 //! Pool state, durable work, and the watch.
 //!
-//! Immutable rows are written once. Mutable rows, tick pages, and curves live
-//! beside them in `entities.redb`. `work.redb` only remembers leases. A deleted
-//! work file is rebuilt by scanning entities. The watch cursor and the dirty
-//! flags commit together. A mutable snapshot clears its dirty flag in the same
-//! transaction, and only when no newer event arrived during the read.
+//! Immutable rows are written once. Mutable rows, tick pages, on-chain quote
+//! samples, and curves live beside them in `entities.redb`. `work.redb` only
+//! remembers leases. A deleted work file is rebuilt by scanning entities. The
+//! watch cursor and the dirty flags commit together. A mutable snapshot clears
+//! its dirty flag in the same transaction, and only when no newer event arrived
+//! during the read. A new snapshot drops quotes and the curve. Quotes are taken
+//! at the snapshot block before the curve is fit.
 
 use crate::catalog::{entity_key, AERO, BALANCER_V2, BALANCER_V3, CURVE, METRIC, UNI_V4, VENUES};
 use crate::detail::{
@@ -30,6 +32,7 @@ const IMMUTABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("immutable
 const MUTABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("mutable");
 const TICK_PAGES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("tick_pages");
 const CURVES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("curves");
+const QUOTES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("quotes");
 const DIRTY: TableDefinition<&[u8], &[u8]> = TableDefinition::new("dirty");
 const MISMATCH: TableDefinition<&[u8], &[u8]> = TableDefinition::new("immutable_mismatch");
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
@@ -38,11 +41,15 @@ const JOBS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("jobs");
 const WATCH_KEY: &str = "watch_through";
 /// Quote-math generation stored on a curve. A bump rebuilds every curve.
 pub const CURVE_VERSION: u32 = 1;
+/// Sampling scheme stored on a quote row. A bump re-reads every quoter.
+pub const QUOTE_VERSION: u32 = 1;
 pub const TICK_PAGE: u32 = 512;
 pub const STAGE_IMMUTABLE: u8 = 1;
 pub const STAGE_MUTABLE: u8 = 2;
 pub const STAGE_TICKS: u8 = 3;
 pub const STAGE_CURVE: u8 = 4;
+/// On-chain quote samples. Runs after the snapshot is complete and before the curve.
+pub const STAGE_QUOTE: u8 = 5;
 pub const CLASS_NONE: u8 = 0;
 pub const CLASS_HEAD: u8 = 1;
 pub const CLASS_TICKS: u8 = 2;
@@ -139,6 +146,18 @@ pub struct CurveRecord {
     pub payload: Vec<u8>,
 }
 
+/// Chain quote samples for one snapshot. `payload` is the direction grid.
+/// Local quote outputs are not stored; they are recomputed from the snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuoteRecord {
+    pub kind: u8,
+    pub id: B256,
+    pub generation: u64,
+    pub version: u32,
+    pub block: u64,
+    pub payload: Vec<u8>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dirty {
     pub block: u64,
@@ -183,6 +202,7 @@ pub struct StateSummary {
     pub immutable: u64,
     pub mutable: u64,
     pub curves: u64,
+    pub quotes: u64,
     pub tick_pages: u64,
     pub mismatches: u64,
     pub jobs: u64,
@@ -197,6 +217,7 @@ pub struct PoolState {
     pub mutable: Option<MutableView>,
     pub ticks: Vec<TickWord>,
     pub curve: Option<CurveRecord>,
+    pub quotes: Option<QuoteRecord>,
     pub dirty: Option<Dirty>,
 }
 
@@ -208,9 +229,10 @@ pub struct Plan {
 
 /// What to enqueue after a mutable snapshot commits.
 ///
-/// A head refresh with the same bitmap keeps tick pages and only refits the
-/// curve. A mint or a changed bitmap has to read ticks again. A truncated
-/// bitmap stays on the mutable stage.
+/// A head refresh with the same bitmap keeps tick pages. The next read is the
+/// on-chain quote grid, and the curve is fit after those samples are stored.
+/// A mint or a changed bitmap has to read ticks again. A truncated bitmap
+/// stays on the mutable stage.
 pub fn plan_follow_up(
     class: u8,
     bitmap_changed: bool,
@@ -233,7 +255,26 @@ pub fn plan_follow_up(
     }
     Plan {
         retry_mutable: false,
-        stage: Some(STAGE_CURVE),
+        stage: Some(STAGE_QUOTE),
+    }
+}
+
+/// Stored chain samples match this snapshot and the current sampling scheme.
+pub fn quote_is_current(quote: Option<&QuoteRecord>, mutable: &MutableView) -> bool {
+    match quote {
+        Some(quote) => {
+            quote.generation == mutable.generation
+                && quote.version == QUOTE_VERSION
+                && quote.block == mutable.block
+        }
+        None => false,
+    }
+}
+
+pub(crate) fn curve_is_current(curve: Option<&CurveRecord>, generation: u64) -> bool {
+    match curve {
+        Some(curve) => curve.generation == generation && curve.version == CURVE_VERSION,
+        None => false,
     }
 }
 
@@ -537,6 +578,7 @@ impl Catalog {
             immutable: count_bytes(&self.entities, IMMUTABLE)?,
             mutable: count_bytes(&self.entities, MUTABLE)?,
             curves: count_bytes(&self.entities, CURVES)?,
+            quotes: count_bytes(&self.entities, QUOTES)?,
             tick_pages: count_bytes(&self.entities, TICK_PAGES)?,
             mismatches: count_bytes(&self.entities, MISMATCH)?,
             ..StateSummary::default()
@@ -700,6 +742,7 @@ impl Catalog {
             let mut mutable_table = write.open_table(MUTABLE)?;
             let mut ticks = write.open_table(TICK_PAGES)?;
             let mut curves = write.open_table(CURVES)?;
+            let mut quotes = write.open_table(QUOTES)?;
             let mut dirty_table = write.open_table(DIRTY)?;
             let key = entity_key(row.kind, &row.id);
             let previous = match mutable_table.get(key.as_slice())? {
@@ -721,6 +764,7 @@ impl Catalog {
                 delete_prefix(&mut ticks, &key)?;
             }
             let _ = curves.remove(key.as_slice())?;
+            let _ = quotes.remove(key.as_slice())?;
             let bytes = encode_mutable(row, generation);
             mutable_table.insert(key.as_slice(), bytes.as_slice())?;
             let seen = match dirty_table.get(key.as_slice())? {
@@ -795,6 +839,27 @@ impl Catalog {
         Ok(())
     }
 
+    pub fn put_quote(&self, quote: &QuoteRecord) -> eyre::Result<()> {
+        let mut write = self.entities.begin_write()?;
+        write.set_durability(Durability::Immediate);
+        {
+            let mutable_table = write.open_table(MUTABLE)?;
+            let mut quotes = write.open_table(QUOTES)?;
+            let key = entity_key(quote.kind, &quote.id);
+            let Some(stored) = mutable_table.get(key.as_slice())? else {
+                return Err(eyre::eyre!("quote has no mutable row"));
+            };
+            let view = decode_mutable(stored.value())?;
+            if view.generation != quote.generation || view.block != quote.block {
+                return Err(eyre::eyre!("quote generation"));
+            }
+            let bytes = encode_quote(quote);
+            quotes.insert(key.as_slice(), bytes.as_slice())?;
+        }
+        write.commit()?;
+        Ok(())
+    }
+
     pub fn read_state(&self, kind: u8, id: B256) -> eyre::Result<PoolState> {
         let venue = self.read_venue(kind, id)?;
         let read = self.entities.begin_read()?;
@@ -806,6 +871,10 @@ impl Catalog {
         };
         let curve = match read_optional(&read, CURVES, &key)? {
             Some(bytes) => Some(decode_curve_record(kind, id, &bytes)?),
+            None => None,
+        };
+        let quotes = match read_optional(&read, QUOTES, &key)? {
+            Some(bytes) => Some(decode_quote_record(kind, id, &bytes)?),
             None => None,
         };
         let dirty = match read_optional(&read, DIRTY, &key)? {
@@ -822,6 +891,7 @@ impl Catalog {
             mutable,
             ticks,
             curve,
+            quotes,
             dirty,
         })
     }
@@ -972,13 +1042,13 @@ impl Catalog {
                     continue;
                 }
             }
-            let stale = match &state.curve {
-                Some(curve) => {
-                    curve.generation != mutable.generation || curve.version != CURVE_VERSION
-                }
-                None => true,
-            };
-            if stale {
+            if !quote_is_current(state.quotes.as_ref(), &mutable) {
+                let mut job = blank_job(STAGE_QUOTE, row.kind, row.id);
+                job.generation = mutable.generation;
+                jobs.push(job);
+                continue;
+            }
+            if !curve_is_current(state.curve.as_ref(), mutable.generation) {
                 let mut job = blank_job(STAGE_CURVE, row.kind, row.id);
                 job.generation = mutable.generation;
                 jobs.push(job);
@@ -1100,10 +1170,19 @@ async fn drive_one<S: EntityStore>(
     give_up_after: u32,
     notes: &mut Vec<String>,
 ) -> eyre::Result<bool> {
-    for stage in [STAGE_IMMUTABLE, STAGE_MUTABLE, STAGE_TICKS, STAGE_CURVE] {
-        let jobs = store
-            .claim_work(stage, DETAIL_BATCH, now, LEASE_SECS)
-            .await?;
+    for stage in [
+        STAGE_IMMUTABLE,
+        STAGE_MUTABLE,
+        STAGE_TICKS,
+        STAGE_QUOTE,
+        STAGE_CURVE,
+    ] {
+        let lease = if stage == STAGE_QUOTE {
+            600
+        } else {
+            LEASE_SECS
+        };
+        let jobs = store.claim_work(stage, DETAIL_BATCH, now, lease).await?;
         if jobs.is_empty() {
             continue;
         }
@@ -1113,6 +1192,9 @@ async fn drive_one<S: EntityStore>(
                 drive_details(store, rpc, block, stage, &jobs, give_up_after, notes).await?
             }
             STAGE_TICKS => drive_ticks(store, rpc, &jobs, now, give_up_after, notes).await?,
+            STAGE_QUOTE => {
+                crate::fit::drive_quotes(store, rpc, &jobs, give_up_after, notes).await?
+            }
             STAGE_CURVE => drive_curves(store, &jobs, give_up_after, notes).await?,
             _ => {}
         }
@@ -1286,7 +1368,7 @@ async fn drive_ticks<S: EntityStore>(
             }
         };
         let PoolDetail::Concentrated(pool) = detail else {
-            follow.push(curve_job(job.kind, job.id, mutable.generation));
+            follow.push(quote_job(job.kind, job.id, mutable.generation));
             done.push((job.stage, job.kind, job.id));
             continue;
         };
@@ -1294,7 +1376,7 @@ async fn drive_ticks<S: EntityStore>(
         let page = u32::try_from(job.tick_cursor.max(0)).unwrap_or(0);
         let start = page.saturating_mul(TICK_PAGE) as usize;
         if start >= ticks.len() {
-            follow.push(curve_job(job.kind, job.id, mutable.generation));
+            follow.push(quote_job(job.kind, job.id, mutable.generation));
             done.push((job.stage, job.kind, job.id));
             continue;
         }
@@ -1394,7 +1476,7 @@ async fn drive_ticks<S: EntityStore>(
             again.generation = generation;
             follow.push(again);
         } else {
-            follow.push(curve_job(job.kind, job.id, generation));
+            follow.push(quote_job(job.kind, job.id, generation));
         }
         done.push((job.stage, job.kind, job.id));
     }
@@ -1411,6 +1493,7 @@ async fn drive_curves<S: EntityStore>(
 ) -> eyre::Result<()> {
     let mut done = Vec::new();
     let mut failed = Vec::new();
+    let mut follow = Vec::new();
     for job in jobs {
         let state = store.read_state(job.kind, job.id).await?;
         let (Some(immutable), Some(mutable)) = (state.immutable, state.mutable) else {
@@ -1418,6 +1501,11 @@ async fn drive_curves<S: EntityStore>(
             continue;
         };
         if job.generation != 0 && job.generation != mutable.generation {
+            done.push((job.stage, job.kind, job.id));
+            continue;
+        }
+        if !quote_is_current(state.quotes.as_ref(), &mutable) {
+            follow.push(quote_job(job.kind, job.id, mutable.generation));
             done.push((job.stage, job.kind, job.id));
             continue;
         }
@@ -1449,6 +1537,7 @@ async fn drive_curves<S: EntityStore>(
         done.push((job.stage, job.kind, job.id));
     }
     store.finish_work(&done, &failed).await?;
+    store.enqueue_work(&follow, unix_now()).await?;
     Ok(())
 }
 
@@ -1628,13 +1717,19 @@ fn blank_job(stage: u8, kind: u8, id: B256) -> WorkJob {
     }
 }
 
-fn curve_job(kind: u8, id: B256, generation: u64) -> WorkJob {
+pub(crate) fn curve_job(kind: u8, id: B256, generation: u64) -> WorkJob {
     let mut job = blank_job(STAGE_CURVE, kind, id);
     job.generation = generation;
     job
 }
 
-fn keep_or_drop(
+pub(crate) fn quote_job(kind: u8, id: B256, generation: u64) -> WorkJob {
+    let mut job = blank_job(STAGE_QUOTE, kind, id);
+    job.generation = generation;
+    job
+}
+
+pub(crate) fn keep_or_drop(
     job: &WorkJob,
     error: String,
     give_up_after: u32,
@@ -1708,7 +1803,7 @@ fn count_jobs(db: &redb::Database) -> eyre::Result<u64> {
     Ok(n)
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
@@ -2496,6 +2591,35 @@ fn encode_curve(curve: &CurveRecord) -> Vec<u8> {
     out
 }
 
+fn encode_quote(quote: &QuoteRecord) -> Vec<u8> {
+    let mut out = vec![1];
+    push_u32(&mut out, quote.version);
+    push_u64(&mut out, quote.generation);
+    push_u64(&mut out, quote.block);
+    push_bytes(&mut out, &quote.payload);
+    out
+}
+
+fn decode_quote_record(kind: u8, id: B256, bytes: &[u8]) -> eyre::Result<QuoteRecord> {
+    let mut reader = Reader::new(bytes);
+    if reader.u8().map_err(|err| eyre::eyre!(err))? != 1 {
+        return Err(eyre::eyre!("quote"));
+    }
+    let version = reader.u32().map_err(|err| eyre::eyre!(err))?;
+    let generation = reader.u64().map_err(|err| eyre::eyre!(err))?;
+    let block = reader.u64().map_err(|err| eyre::eyre!(err))?;
+    let payload = reader.bytes().map_err(|err| eyre::eyre!(err))?;
+    reader.finish().map_err(|err| eyre::eyre!(err))?;
+    Ok(QuoteRecord {
+        kind,
+        id,
+        generation,
+        version,
+        block,
+        payload,
+    })
+}
+
 fn decode_curve_record(kind: u8, id: B256, bytes: &[u8]) -> eyre::Result<CurveRecord> {
     let mut reader = Reader::new(bytes);
     if reader.u8().map_err(|err| eyre::eyre!(err))? != 1 {
@@ -2967,6 +3091,16 @@ mod tests {
         assert!(catalog.put_curve(&curve).is_err());
         curve.generation = stored.generation;
         catalog.put_curve(&curve).unwrap();
+        catalog
+            .put_quote(&QuoteRecord {
+                kind: sample.kind,
+                id: sample.id,
+                generation: stored.generation,
+                version: QUOTE_VERSION,
+                block: mutable.block,
+                payload: b"{}".to_vec(),
+            })
+            .unwrap();
         let quote = estimate(
             &curve,
             stored.generation,
@@ -2987,9 +3121,40 @@ mod tests {
         mutable.block = 9;
         mutable.class = CLASS_HEAD;
         catalog.put_mutable(&mutable).unwrap();
-        assert_eq!(catalog.claim_work(STAGE_CURVE, 4, 1, 10).unwrap().len(), 0);
+        assert!(catalog
+            .read_state(sample.kind, sample.id)
+            .unwrap()
+            .quotes
+            .is_none());
+        assert_eq!(catalog.claim_work(STAGE_QUOTE, 4, 1, 10).unwrap().len(), 0);
         assert!(catalog.reconcile(1).unwrap() >= 1);
-        assert_eq!(catalog.claim_work(STAGE_CURVE, 4, 1, 10).unwrap().len(), 1);
+        let quoted = catalog.claim_work(STAGE_QUOTE, 4, 1, 10).unwrap();
+        assert_eq!(quoted.len(), 1);
+        assert!(catalog
+            .claim_work(STAGE_CURVE, 4, 1, 10)
+            .unwrap()
+            .is_empty());
+        let generation = catalog
+            .read_state(sample.kind, sample.id)
+            .unwrap()
+            .mutable
+            .unwrap()
+            .generation;
+        catalog
+            .put_quote(&QuoteRecord {
+                kind: sample.kind,
+                id: sample.id,
+                generation,
+                version: QUOTE_VERSION,
+                block: 9,
+                payload: b"{}".to_vec(),
+            })
+            .unwrap();
+        catalog
+            .finish_work(&[(STAGE_QUOTE, sample.kind, sample.id)], &[])
+            .unwrap();
+        assert!(catalog.reconcile(2).unwrap() >= 1);
+        assert_eq!(catalog.claim_work(STAGE_CURVE, 4, 2, 10).unwrap().len(), 1);
     }
 
     #[test]
@@ -3042,7 +3207,7 @@ mod tests {
             .claim_work(STAGE_TICKS, 4, 2, 10)
             .unwrap()
             .is_empty());
-        assert_eq!(catalog.claim_work(STAGE_CURVE, 4, 2, 10).unwrap().len(), 1);
+        assert_eq!(catalog.claim_work(STAGE_QUOTE, 4, 2, 10).unwrap().len(), 1);
     }
 
     #[test]
@@ -3099,7 +3264,7 @@ mod tests {
     #[test]
     fn plan_isolates_head_from_ticks() {
         let head = plan_follow_up(CLASS_HEAD, false, false, 10, true);
-        assert_eq!(head.stage, Some(STAGE_CURVE));
+        assert_eq!(head.stage, Some(STAGE_QUOTE));
         let changed = plan_follow_up(CLASS_HEAD, true, false, 10, true);
         assert_eq!(changed.stage, Some(STAGE_TICKS));
         let mint = plan_follow_up(CLASS_TICKS, false, false, 10, true);

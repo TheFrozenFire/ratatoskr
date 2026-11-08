@@ -34,13 +34,13 @@ pub use catalog::{
 };
 pub use detail::{load_details, DetailQuery, PoolDetail, Quote};
 pub use entity::EntityStore;
-pub use fit::{export_curve_fit, FitReport};
+pub use fit::{export_curve_fit, import_curve_fit, FitReport};
 pub use history::BloomScan;
 pub use logs::Walk;
 pub use rpc::Rpc;
 pub use state::{
     estimate, CurveRecord, ImmutablePut, ImmutableRow, MutableStored, MutableWrite, PoolState,
-    StateSummary, TickPage, WatchHit, WorkFail, WorkJob,
+    QuoteRecord, StateSummary, TickPage, WatchHit, WorkFail, WorkJob,
 };
 
 use ipc::HistoryPeer;

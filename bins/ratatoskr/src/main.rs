@@ -49,10 +49,12 @@ struct Args {
     /// Print stored state counts for `--data-dir` and exit.
     #[arg(long)]
     summarize: bool,
-    /// Write a curve-fit JSONL extract for `--data-dir` and exit.
-    /// Each pool is quoted at its stored snapshot block.
+    /// Copy stored quote samples for `--data-dir` into a JSONL file and exit.
     #[arg(long)]
     export_fit: Option<PathBuf>,
+    /// Load chain quote samples from a JSONL extract into `--data-dir` and exit.
+    #[arg(long)]
+    import_fit: Option<PathBuf>,
     /// JSON-RPC URL for venue lists. Repeat to rotate.
     #[arg(long)]
     rpc: Vec<String>,
@@ -120,17 +122,35 @@ async fn supervise(args: Args) -> eyre::Result<()> {
     if args.export_fit.is_some() && args.data_dir.is_none() {
         return Err(eyre::eyre!("--export-fit needs --data-dir"));
     }
+    if args.import_fit.is_some() && args.data_dir.is_none() {
+        return Err(eyre::eyre!("--import-fit needs --data-dir"));
+    }
     if let Some(dir) = &args.data_dir {
         refuse_live(dir)?;
     }
     let paths = paths_from(args.data_dir.as_deref())?;
-    if let Some(out) = args.export_fit.clone() {
-        let rpcs = resolve_rpcs(&args.rpc, true)?;
+    if let Some(path) = args.import_fit.clone() {
         let venues_path = paths.venues.clone();
         let report = tokio::task::spawn_blocking(move || {
-            let rpc = venues::Rpc::new(rpcs)?;
             let catalog = venues::Catalog::open(&venues_path)?;
-            venues::export_curve_fit(&catalog, &rpc, &out)
+            venues::import_curve_fit(&catalog, &path)
+        })
+        .await
+        .wrap_err("fit import task")??;
+        println!("pools {}", report.pools);
+        println!("resumed {}", report.resumed);
+        println!("chain_ok {}", report.chain_ok);
+        println!("chain_fail {}", report.chain_fail);
+        println!("chain_absent {}", report.chain_absent);
+        if args.export_fit.is_none() {
+            return Ok(());
+        }
+    }
+    if let Some(out) = args.export_fit.clone() {
+        let venues_path = paths.venues.clone();
+        let report = tokio::task::spawn_blocking(move || {
+            let catalog = venues::Catalog::open(&venues_path)?;
+            venues::export_curve_fit(&catalog, &out)
         })
         .await
         .wrap_err("fit export task")??;
@@ -174,6 +194,7 @@ async fn supervise(args: Args) -> eyre::Result<()> {
         println!("immutable {}", summary.immutable);
         println!("mutable {}", summary.mutable);
         println!("curves {}", summary.curves);
+        println!("quotes {}", summary.quotes);
         println!("tick_pages {}", summary.tick_pages);
         println!("mismatches {}", summary.mismatches);
         println!("jobs {}", summary.jobs);

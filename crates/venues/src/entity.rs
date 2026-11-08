@@ -7,8 +7,8 @@ use alloy_primitives::B256;
 use model::{BlockRecord, HeaderRecord};
 
 use crate::state::{
-    CurveRecord, ImmutablePut, ImmutableRow, MutableStored, MutableWrite, PoolState, TickPage,
-    WatchHit, WorkFail, WorkJob,
+    CurveRecord, ImmutablePut, ImmutableRow, MutableStored, MutableWrite, PoolState, QuoteRecord,
+    TickPage, WatchHit, WorkFail, WorkJob,
 };
 use crate::{Put, ReceiptBody, VenueRow};
 
@@ -64,6 +64,7 @@ pub trait EntityStore: Send + Sync {
     async fn put_mutable(&self, row: &MutableWrite) -> eyre::Result<MutableStored>;
     async fn put_tick_pages(&self, pages: &[TickPage]) -> eyre::Result<()>;
     async fn put_curve(&self, curve: &CurveRecord) -> eyre::Result<()>;
+    async fn put_quote(&self, quote: &QuoteRecord) -> eyre::Result<()>;
     async fn read_state(&self, kind: u8, id: B256) -> eyre::Result<PoolState>;
     async fn apply_watch(&self, through: u64, hits: &[WatchHit]) -> eyre::Result<()>;
     async fn watch_through(&self) -> eyre::Result<Option<u64>>;

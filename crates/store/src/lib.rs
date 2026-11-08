@@ -381,6 +381,12 @@ impl EntityStore for LocalStore {
         blocking(move || catalog.put_curve(&curve)).await
     }
 
+    async fn put_quote(&self, quote: &venues::QuoteRecord) -> eyre::Result<()> {
+        let catalog = self.catalog_db()?;
+        let quote = quote.clone();
+        blocking(move || catalog.put_quote(&quote)).await
+    }
+
     async fn read_state(&self, kind: u8, id: B256) -> eyre::Result<venues::PoolState> {
         let catalog = self.catalog_db()?;
         blocking(move || catalog.read_state(kind, id)).await

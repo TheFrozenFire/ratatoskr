@@ -1,4 +1,9 @@
-//! Curve-fit extract: snapshot state plus on-chain quotes at that block.
+//! On-chain quote samples and the curve-fit extract.
+//!
+//! The state pipeline calls the protocol quoter and stores the samples next to
+//! the snapshot. The curve stage runs after that. This module also copies the
+//! stored samples into a JSONL file and can load a file written by an older
+//! export back into the catalog.
 //!
 //! The fit domain is a fraction of the largest input that still has a price.
 //! Constant-product pools have no hard maximum, so the top of the domain is
@@ -9,20 +14,25 @@
 //! and tick crosses pile up there.
 //!
 //! Chain amounts come from the protocol quoter via Multicall3 at the mutable
-//! snapshot block. `local` is this crate's quote of the same snapshot.
+//! snapshot block. `local` is this crate's quote of the same snapshot and is
+//! recomputed when the file is written. It is not stored.
 
 use crate::catalog::{
     kind_name, AERO, BALANCER_V2, BALANCER_V3, METRIC, PANCAKE_V2, PANCAKE_V3, SUSHI_V2, SUSHI_V3,
     UNI_V2, UNI_V3, UNI_V4, V2_FORK, V3_FORK,
 };
 use crate::detail::{product_fee_pips, PoolDetail, Quote};
-use crate::state::{is_canonical, join_detail, CurveRecord, PoolState};
+use crate::state::{
+    curve_is_current, curve_job, is_canonical, join_detail, keep_or_drop, quote_is_current,
+    unix_now, CurveRecord, PoolState, QuoteRecord, WorkJob, QUOTE_VERSION,
+};
 use crate::Catalog;
+use crate::EntityStore;
 use crate::Rpc;
 use alloy_primitives::{address, Address, B256, U256};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashSet};
-use std::fs::{File, OpenOptions};
+use std::collections::BTreeMap;
+use std::fs::File;
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::Instant;
@@ -202,25 +212,21 @@ struct Bound {
     steps: u8,
 }
 
-/// Read `catalog` and append one JSON object per pool to `out`.
+/// Copy stored quote samples and a fresh local quote into `out`.
 ///
-/// An existing file is resumed. Pools already in it are left as they are.
-/// A trailing partial line is dropped. The snapshot block on each mutable row
-/// is the `eth_call` block, so a quote lines up with the stored reserves.
-pub fn export_curve_fit(catalog: &Catalog, rpc: &Rpc, out: &Path) -> eyre::Result<FitReport> {
+/// The file is rewritten. Chain amounts are the samples the state pipeline
+/// stored at the snapshot block. Pools with no quote row are still written,
+/// with `error` set, so the extract lists the whole catalog.
+pub fn export_curve_fit(catalog: &Catalog, out: &Path) -> eyre::Result<FitReport> {
     if let Some(parent) = out.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
         }
     }
-    let (mut file, seen) = open_output(out)?;
-    let mut report = FitReport {
-        resumed: u64::try_from(seen.len()).unwrap_or(u64::MAX),
-        ..FitReport::default()
-    };
-    let mut quoters = Quoters {
-        code: BTreeMap::new(),
-    };
+    let tmp = out.with_extension("jsonl.partial");
+    let mut file = File::create(&tmp)?;
+    writeln!(file, "{}", serde_json::to_string(&header_value())?).map_err(io::Error::other)?;
+    let mut report = FitReport::default();
     for kind in 1..=METRIC {
         let mut after = None;
         loop {
@@ -230,96 +236,193 @@ pub fn export_curve_fit(catalog: &Catalog, rpc: &Rpc, out: &Path) -> eyre::Resul
             }
             let full = page.len() == PAGE;
             after = page.last().map(|row| row.id);
-            let fresh: Vec<_> = page
-                .into_iter()
-                .filter(|row| !seen.contains(&(row.kind, row.id)))
-                .collect();
-            if !fresh.is_empty() {
-                let started = Instant::now();
-                let mut plans = Vec::with_capacity(fresh.len());
-                for row in &fresh {
-                    let state = catalog.read_state(row.kind, row.id)?;
-                    plans.push(plan_of(row.kind, row.id, state));
+            let started = Instant::now();
+            for row in &page {
+                let state = catalog.read_state(row.kind, row.id)?;
+                let stored = state.quotes.clone();
+                let mut plan = plan_of(row.kind, row.id, state);
+                match stored {
+                    Some(quote) => {
+                        if let Err(err) = apply_stored(&mut plan, &quote) {
+                            plan.missing = Some(err);
+                        }
+                    }
+                    None if plan.missing.is_none() => {
+                        plan.missing = Some("quotes not ingested".into());
+                    }
+                    None => {}
                 }
-                quote_page(rpc, &mut quoters, &mut plans)?;
-                for plan in &plans {
-                    write_pool(&mut file, plan, &mut report)?;
-                }
-                file.flush()?;
-                file.sync_all()?;
-                tracing::info!(
-                    kind = kind_name(kind),
-                    wrote = fresh.len(),
-                    ms = started.elapsed().as_millis() as u64,
-                    pools = report.pools,
-                    chain_ok = report.chain_ok,
-                    chain_fail = report.chain_fail,
-                    "fit export"
-                );
+                write_pool(&mut file, &plan, &mut report)?;
             }
+            file.flush()?;
+            file.sync_all()?;
+            tracing::info!(
+                kind = kind_name(kind),
+                wrote = page.len(),
+                ms = started.elapsed().as_millis() as u64,
+                pools = report.pools,
+                chain_ok = report.chain_ok,
+                chain_fail = report.chain_fail,
+                "fit export"
+            );
             if !full {
                 break;
             }
         }
     }
+    std::fs::rename(&tmp, out)?;
     Ok(report)
 }
 
-fn open_output(path: &Path) -> eyre::Result<(File, HashSet<(u8, B256)>)> {
-    let existing = if path.exists() {
-        std::fs::read_to_string(path)?
-    } else {
-        String::new()
-    };
-    let repaired = repair_tail(&existing);
-    let seen = seen_pools(&repaired);
-    let mut file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(path)?;
-    if repaired.is_empty() {
-        writeln!(file, "{}", serde_json::to_string(&header_value())?)?;
-    } else {
-        file.write_all(repaired.as_bytes())?;
-    }
-    Ok((file, seen))
-}
-
-fn repair_tail(text: &str) -> String {
-    if text.is_empty() || text.ends_with('\n') {
-        return text.to_string();
-    }
-    match text.rfind('\n') {
-        Some(pos) => text[..=pos].to_string(),
-        None => String::new(),
-    }
-}
-
-fn seen_pools(text: &str) -> HashSet<(u8, B256)> {
-    let mut seen = HashSet::new();
+/// Store quote rows from a JSONL extract. Lines already match a stored row
+/// are counted in `resumed` and left in place. A partial last line is skipped.
+pub fn import_curve_fit(catalog: &Catalog, path: &Path) -> eyre::Result<FitReport> {
+    let text = std::fs::read_to_string(path)?;
+    let mut report = FitReport::default();
     for line in text.lines() {
+        if line.is_empty() {
+            continue;
+        }
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
         };
         if value.get("record").and_then(Value::as_str) != Some("pool") {
             continue;
         }
-        let Some(kind) = value.get("kind_id").and_then(Value::as_u64) else {
+        let Some(record) = record_from_line(&value) else {
+            report.chain_fail += 1;
             continue;
         };
-        let Some(id) = value.get("id").and_then(Value::as_str) else {
-            continue;
-        };
-        let Ok(id) = id.parse::<B256>() else {
-            continue;
-        };
-        let Ok(kind) = u8::try_from(kind) else {
-            continue;
-        };
-        seen.insert((kind, id));
+        if let Some(stored) = catalog
+            .read_state(record.kind, record.id)
+            .ok()
+            .and_then(|state| state.quotes)
+        {
+            if stored.generation == record.generation
+                && stored.version == record.version
+                && stored.block == record.block
+                && stored.payload == record.payload
+            {
+                report.resumed += 1;
+                continue;
+            }
+        }
+        match catalog.put_quote(&record) {
+            Ok(()) => {
+                report.pools += 1;
+                count_line(&value, &mut report);
+            }
+            Err(_) => report.chain_absent += 1,
+        }
     }
-    seen
+    Ok(report)
+}
+
+pub(crate) async fn drive_quotes<S: EntityStore>(
+    store: &S,
+    rpc: &Rpc,
+    jobs: &[WorkJob],
+    give_up_after: u32,
+    notes: &mut Vec<String>,
+) -> eyre::Result<()> {
+    let mut done = Vec::new();
+    let mut failed = Vec::new();
+    let mut follow = Vec::new();
+    let mut plans = Vec::new();
+    let mut picked = Vec::new();
+    for (index, job) in jobs.iter().enumerate() {
+        let state = store.read_state(job.kind, job.id).await?;
+        let Some(mutable) = state.mutable.clone() else {
+            done.push((job.stage, job.kind, job.id));
+            continue;
+        };
+        if job.generation != 0 && job.generation != mutable.generation {
+            done.push((job.stage, job.kind, job.id));
+            continue;
+        }
+        if quote_is_current(state.quotes.as_ref(), &mutable) {
+            if !curve_is_current(state.curve.as_ref(), mutable.generation) {
+                follow.push(curve_job(job.kind, job.id, mutable.generation));
+            }
+            done.push((job.stage, job.kind, job.id));
+            continue;
+        }
+        let curve = state.curve.clone();
+        let generation = mutable.generation;
+        plans.push(plan_of(job.kind, job.id, state));
+        picked.push((index, generation, curve));
+    }
+    if !plans.is_empty() {
+        let rpc = rpc.clone();
+        match tokio::task::spawn_blocking(move || {
+            let mut quoters = Quoters {
+                code: BTreeMap::new(),
+            };
+            quote_page(&rpc, &mut quoters, &mut plans)?;
+            Ok::<_, eyre::Report>(plans)
+        })
+        .await
+        {
+            Ok(Ok(quoted)) => plans = quoted,
+            Ok(Err(err)) => {
+                let error = crate::rpc::redact_secret(&format!("{err:#}"));
+                for (index, _, _) in &picked {
+                    keep_or_drop(
+                        &jobs[*index],
+                        error.clone(),
+                        give_up_after,
+                        &mut done,
+                        &mut failed,
+                        notes,
+                    );
+                }
+                store.finish_work(&done, &failed).await?;
+                store.enqueue_work(&follow, unix_now()).await?;
+                return Ok(());
+            }
+            Err(err) => return Err(eyre::eyre!("quote task: {err}")),
+        }
+    }
+    for (plan, (index, generation, curve)) in plans.into_iter().zip(picked) {
+        let job = &jobs[index];
+        if plan.missing.is_some() {
+            keep_or_drop(
+                job,
+                plan.missing.unwrap_or_else(|| "missing snapshot".into()),
+                give_up_after,
+                &mut done,
+                &mut failed,
+                notes,
+            );
+            continue;
+        }
+        let record = QuoteRecord {
+            kind: plan.kind,
+            id: plan.id,
+            generation,
+            version: QUOTE_VERSION,
+            block: plan.block,
+            payload: payload_of(&plan),
+        };
+        if let Err(err) = store.put_quote(&record).await {
+            keep_or_drop(
+                job,
+                err.to_string(),
+                give_up_after,
+                &mut done,
+                &mut failed,
+                notes,
+            );
+            continue;
+        }
+        if !curve_is_current(curve.as_ref(), generation) {
+            follow.push(curve_job(job.kind, job.id, generation));
+        }
+        done.push((job.stage, job.kind, job.id));
+    }
+    store.finish_work(&done, &failed).await?;
+    store.enqueue_work(&follow, unix_now()).await?;
+    Ok(())
 }
 
 fn header_value() -> Value {
@@ -327,12 +430,12 @@ fn header_value() -> Value {
         "record": "header",
         "schema": 1,
         "units": "Raw token amounts. Decimals are not stored. Do not assume 18.",
-        "ground_truth": "chain_out is the protocol quoter at block. local_out is this repository's quote of the stored snapshot and is not ground truth.",
+        "ground_truth": "chain_out is the protocol quoter at block, stored by the state pipeline before the curve is fit. local_out is recomputed from the stored snapshot when this file is written and is not ground truth.",
         "domain": "max_in is the top of the fit domain. cp_99 buys 99% of the output reserve. ladder is the last step of the concentrated book. balance_search bisects the local quote toward 99% of the output balance, capped at 1000x the input balance. balance is the input balance when that search cannot run. uninitialized and empty_book and none have no samples.",
         "grid": "Fractions of max_in: 0.0001, 0.001, 0.01, 0.05, 0.1, 0.25, 0.5, 0.8, 0.95, 1. A fraction that rounds to 0 is omitted. Two fractions that land on the same amount keep the larger fraction.",
         "chain_max": "If the fraction-1 quote reverts, an 8-step bisection records the largest accepted input. larger_input_reverted is then true. If fraction 1 is accepted, chain_max_in equals that input and larger_input_reverted is false: the domain top worked, and a constant-product pool still has no hard maximum.",
         "pairs": "Every ordered pair when the pool has at most 4 tokens. A larger pool keeps the first 4 and sets pairs_capped.",
-        "resume": "A pool id can be repeated only if a line was cut off. Keep the last line for an id.",
+        "resume": "The state pipeline is the source of the chain samples. This file is rewritten from the catalog. A repeated pool id is a torn line; keep the last copy.",
         "gaps": {
             "v2_fork": "No shared router. The Uniswap router hardcodes a 0.3% fee.",
             "v3_fork": "No confirmed quoter.",
@@ -1350,6 +1453,220 @@ fn clip(text: &str) -> String {
         text
     };
     text.chars().take(160).collect()
+}
+
+fn payload_of(plan: &PoolPlan) -> Vec<u8> {
+    let body = json!({
+        "pairs_capped": plan.pairs_capped,
+        "directions": plan.directions.iter().map(stored_direction).collect::<Vec<_>>(),
+    });
+    serde_json::to_vec(&body).unwrap_or_else(|_| b"{}".to_vec())
+}
+
+fn stored_direction(dir: &Direction) -> Value {
+    json!({
+        "token_in": addr(dir.token_in),
+        "token_out": addr(dir.token_out),
+        "max_in": dir.max_in.to_string(),
+        "max_source": dir.max_source,
+        "chain_max_in": dir.chain_max_in.map(|value| value.to_string()),
+        "larger_input_reverted": dir.larger_input_reverted,
+        "samples": dir.samples.iter().map(stored_sample).collect::<Vec<_>>(),
+    })
+}
+
+fn stored_sample(sample: &Sample) -> Value {
+    json!({
+        "role": sample.role,
+        "fraction": sample.fraction,
+        "amount_in": sample.amount_in.to_string(),
+        "chain_out": sample.chain_out.map(|value| value.to_string()),
+        "chain_error": sample.chain_error,
+        "quoter": sample.quoter.map(addr),
+        "method": sample.method,
+    })
+}
+
+fn apply_stored(plan: &mut PoolPlan, quote: &QuoteRecord) -> Result<(), String> {
+    if quote.block != plan.block
+        || quote.generation != plan.generation
+        || quote.version != QUOTE_VERSION
+    {
+        return Err("stored quotes do not match the snapshot".into());
+    }
+    let value: Value = serde_json::from_slice(&quote.payload).map_err(|err| err.to_string())?;
+    let Some(detail) = plan.detail.clone() else {
+        return Err("missing snapshot".into());
+    };
+    let directions = value
+        .get("directions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for stored in directions {
+        let token_in = parse_address(stored.get("token_in"))?;
+        let token_out = parse_address(stored.get("token_out"))?;
+        let Some(dir_index) = plan
+            .directions
+            .iter()
+            .position(|dir| dir.token_in == token_in && dir.token_out == token_out)
+        else {
+            continue;
+        };
+        plan.directions[dir_index].larger_input_reverted = stored
+            .get("larger_input_reverted")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        plan.directions[dir_index].chain_max_in = optional_u256(stored.get("chain_max_in"))?;
+        let samples = stored
+            .get("samples")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for sample in samples {
+            let amount = required_u256(sample.get("amount_in"))?;
+            let role = sample.get("role").and_then(Value::as_str).unwrap_or("grid");
+            if let Some(slot) = plan.directions[dir_index]
+                .samples
+                .iter_mut()
+                .find(|slot| slot.amount_in == amount)
+            {
+                fill_chain(slot, &sample);
+                continue;
+            }
+            if role != "chain_max" {
+                continue;
+            }
+            let mut extra = sample_at(&detail, token_in, token_out, "chain_max", None, amount);
+            fill_chain(&mut extra, &sample);
+            plan.directions[dir_index].samples.push(extra);
+        }
+    }
+    Ok(())
+}
+
+fn fill_chain(slot: &mut Sample, sample: &Value) {
+    slot.chain_out = optional_u256(sample.get("chain_out")).ok().flatten();
+    slot.chain_error = sample
+        .get("chain_error")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    slot.quoter = sample
+        .get("quoter")
+        .and_then(Value::as_str)
+        .and_then(|text| text.parse().ok());
+    slot.method = method_static(sample.get("method").and_then(Value::as_str));
+    slot.attempted = slot.chain_out.is_none() && slot.quoter.is_some();
+}
+
+fn method_static(name: Option<&str>) -> Option<&'static str> {
+    match name {
+        Some("getAmountsOut") => Some("getAmountsOut"),
+        Some("quoteExactInputSingle") => Some("quoteExactInputSingle"),
+        Some("get_dy_int128") => Some("get_dy_int128"),
+        Some("get_dy_uint256") => Some("get_dy_uint256"),
+        Some("queryBatchSwap") => Some("queryBatchSwap"),
+        Some("querySwapSingleTokenExactIn") => Some("querySwapSingleTokenExactIn"),
+        _ => None,
+    }
+}
+
+fn record_from_line(value: &Value) -> Option<QuoteRecord> {
+    let kind = u8::try_from(value.get("kind_id").and_then(Value::as_u64)?).ok()?;
+    let id = value.get("id").and_then(Value::as_str)?.parse().ok()?;
+    let block = value.get("block").and_then(Value::as_u64)?;
+    let generation = value.get("generation").and_then(Value::as_u64)?;
+    let pairs_capped = value
+        .get("pairs_capped")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let directions = value.get("directions")?.as_array()?.clone();
+    let stripped: Vec<_> = directions.iter().map(strip_direction).collect();
+    let payload = serde_json::to_vec(&json!({
+        "pairs_capped": pairs_capped,
+        "directions": stripped,
+    }))
+    .ok()?;
+    Some(QuoteRecord {
+        kind,
+        id,
+        generation,
+        version: QUOTE_VERSION,
+        block,
+        payload,
+    })
+}
+
+fn strip_direction(value: &Value) -> Value {
+    let samples = value
+        .get("samples")
+        .and_then(Value::as_array)
+        .map(|samples| samples.iter().map(strip_sample).collect::<Vec<_>>())
+        .unwrap_or_default();
+    json!({
+        "token_in": value.get("token_in").and_then(Value::as_str).unwrap_or(""),
+        "token_out": value.get("token_out").and_then(Value::as_str).unwrap_or(""),
+        "max_in": value.get("max_in").and_then(Value::as_str).unwrap_or("0"),
+        "max_source": value.get("max_source").and_then(Value::as_str).unwrap_or("none"),
+        "chain_max_in": value.get("chain_max_in").and_then(Value::as_str),
+        "larger_input_reverted": value.get("larger_input_reverted").and_then(Value::as_bool).unwrap_or(false),
+        "samples": samples,
+    })
+}
+
+fn strip_sample(value: &Value) -> Value {
+    json!({
+        "role": value.get("role").and_then(Value::as_str).unwrap_or("grid"),
+        "fraction": value.get("fraction"),
+        "amount_in": value.get("amount_in").and_then(Value::as_str).unwrap_or("0"),
+        "chain_out": value.get("chain_out").and_then(Value::as_str),
+        "chain_error": value.get("chain_error").and_then(Value::as_str),
+        "quoter": value.get("quoter").and_then(Value::as_str),
+        "method": value.get("method").and_then(Value::as_str),
+    })
+}
+
+fn count_line(value: &Value, report: &mut FitReport) {
+    let Some(directions) = value.get("directions").and_then(Value::as_array) else {
+        return;
+    };
+    for dir in directions {
+        let Some(samples) = dir.get("samples").and_then(Value::as_array) else {
+            continue;
+        };
+        for sample in samples {
+            if sample.get("chain_out").and_then(Value::as_str).is_some() {
+                report.chain_ok += 1;
+            } else if sample.get("quoter").and_then(Value::as_str).is_some() {
+                report.chain_fail += 1;
+            } else if sample.get("chain_error").and_then(Value::as_str).is_some() {
+                report.chain_absent += 1;
+            }
+        }
+    }
+}
+
+fn parse_address(value: Option<&Value>) -> Result<Address, String> {
+    value
+        .and_then(Value::as_str)
+        .ok_or_else(|| "address".to_string())?
+        .parse()
+        .map_err(|_| "address".to_string())
+}
+
+fn required_u256(value: Option<&Value>) -> Result<U256, String> {
+    value
+        .and_then(Value::as_str)
+        .ok_or_else(|| "amount".to_string())?
+        .parse()
+        .map_err(|_| "amount".to_string())
+}
+
+fn optional_u256(value: Option<&Value>) -> Result<Option<U256>, String> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => Ok(Some(required_u256(Some(value))?)),
+    }
 }
 
 fn write_pool(file: &mut File, plan: &PoolPlan, report: &mut FitReport) -> io::Result<()> {

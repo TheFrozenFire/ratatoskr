@@ -8,8 +8,8 @@ use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
 use venues::{
     decode_state_reply, encode_state_call, CurveRecord, ImmutablePut, ImmutableRow, MutableStored,
-    MutableWrite, PoolState, Put, ReceiptBody, StateCall, StateReply, TickPage, VenueRow, WatchHit,
-    WorkFail, WorkJob,
+    MutableWrite, PoolState, Put, QuoteRecord, ReceiptBody, StateCall, StateReply, TickPage,
+    VenueRow, WatchHit, WorkFail, WorkJob,
 };
 
 use crate::{short_header_range, EntityStore};
@@ -452,6 +452,15 @@ impl EntityStore for RemoteStore {
         empty_state(
             self.state(StateCall::PutCurve {
                 curve: curve.clone(),
+            })
+            .await?,
+        )
+    }
+
+    async fn put_quote(&self, quote: &QuoteRecord) -> eyre::Result<()> {
+        empty_state(
+            self.state(StateCall::PutQuote {
+                quote: quote.clone(),
             })
             .await?,
         )

@@ -205,6 +205,10 @@ async fn state_call(
             store.put_curve(&curve).await?;
             StateReply::Empty
         }
+        StateCall::PutQuote { quote } => {
+            store.put_quote(&quote).await?;
+            StateReply::Empty
+        }
         StateCall::ReadState { kind, id } => {
             StateReply::State(Box::new(store.read_state(kind, id).await?))
         }

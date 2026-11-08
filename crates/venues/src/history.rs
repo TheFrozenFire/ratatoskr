@@ -828,6 +828,9 @@ mod tests {
         async fn put_curve(&self, _: &crate::CurveRecord) -> eyre::Result<()> {
             Err(eyre::eyre!("unused"))
         }
+        async fn put_quote(&self, _: &crate::QuoteRecord) -> eyre::Result<()> {
+            Err(eyre::eyre!("unused"))
+        }
         async fn read_state(&self, _: u8, _: B256) -> eyre::Result<crate::PoolState> {
             Err(eyre::eyre!("unused"))
         }
