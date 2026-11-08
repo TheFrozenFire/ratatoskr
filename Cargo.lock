@@ -500,6 +500,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "api"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "eyre",
+ "model",
+ "serde",
+ "serde_json",
+ "venues",
+]
+
+[[package]]
 name = "ar_archive_writer"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1483,6 +1495,18 @@ name = "data-encoding"
 version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
+
+[[package]]
+name = "db-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "eyre",
+ "store",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "defmt"
@@ -5016,11 +5040,14 @@ name = "store"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "api",
  "chain",
  "corpus",
  "eyre",
  "model",
+ "serde_json",
  "tokio",
+ "tracing",
  "venues",
 ]
 

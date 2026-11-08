@@ -297,7 +297,7 @@ pub struct ReceiptBody {
 const BODY_VERSION: u8 = 1;
 const BODY_FIXED: usize = 1 + 32 + 32 + 8 + 32;
 
-fn encode_body(body: &ReceiptBody) -> Vec<u8> {
+pub fn encode_body(body: &ReceiptBody) -> Vec<u8> {
     let mut out = Vec::with_capacity(BODY_FIXED + body.payload.len());
     out.push(BODY_VERSION);
     out.extend_from_slice(body.hash.as_slice());
@@ -308,7 +308,7 @@ fn encode_body(body: &ReceiptBody) -> Vec<u8> {
     out
 }
 
-fn decode_body(bytes: &[u8]) -> eyre::Result<ReceiptBody> {
+pub fn decode_body(bytes: &[u8]) -> eyre::Result<ReceiptBody> {
     if bytes.len() < BODY_FIXED || bytes[0] != BODY_VERSION {
         return Err(eyre::eyre!("receipt body header"));
     }
