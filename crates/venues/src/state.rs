@@ -892,6 +892,111 @@ impl Catalog {
         Ok(())
     }
 
+    /// Delete identities whose stored snapshot cannot price any positive input.
+    ///
+    /// Pools with no snapshot yet stay, so a fill can be ingested afterwards.
+    /// A one-wei reserve stays. Zero reserves and an empty book do not.
+    pub fn drop_empty_pools(&self) -> eyre::Result<u64> {
+        let mut drop = Vec::new();
+        for kind in 1..=METRIC {
+            let mut after = None;
+            loop {
+                let page = self.page_venues(kind, after, 64)?;
+                if page.is_empty() {
+                    break;
+                }
+                after = Some(page.last().expect("page").id);
+                for row in &page {
+                    let state = self.read_state(row.kind, row.id)?;
+                    if !crate::fit::has_trade_size(row.kind, row.id, state) {
+                        drop.push((row.kind, row.id));
+                    }
+                }
+                if page.len() < 64 {
+                    break;
+                }
+            }
+        }
+        self.delete_pools(&drop)
+    }
+
+    /// Delete a stride of `listed` identities until `target` rows remain.
+    ///
+    /// Identities that are not in `listed` stay. The returned list is `listed`
+    /// without the rows that were removed.
+    pub fn trim_listed(
+        &self,
+        target: u64,
+        listed: &[(u8, B256)],
+    ) -> eyre::Result<(u64, Vec<(u8, B256)>)> {
+        let have = self.state_summary()?.identities;
+        if have <= target {
+            return Ok((0, listed.to_vec()));
+        }
+        let excess = (have - target) as usize;
+        let mut present = Vec::new();
+        for (kind, id) in listed {
+            if self.read_venue(*kind, *id)?.is_some() {
+                present.push((*kind, *id));
+            }
+        }
+        let remove = stride_pick(&present, excess.min(present.len()));
+        let removed = self.delete_pools(&remove)?;
+        let gone: std::collections::HashSet<(u8, B256)> = remove.into_iter().collect();
+        let left = listed
+            .iter()
+            .copied()
+            .filter(|id| !gone.contains(id))
+            .collect();
+        Ok((removed, left))
+    }
+
+    /// Remove identities and every state row that hangs off them.
+    pub fn delete_pools(&self, ids: &[(u8, B256)]) -> eyre::Result<u64> {
+        let mut removed = 0_u64;
+        for chunk in ids.chunks(128) {
+            let mut write = self.entities.begin_write()?;
+            write.set_durability(Durability::Immediate);
+            {
+                let mut venues = write.open_table(VENUES)?;
+                let mut immutable = write.open_table(IMMUTABLE)?;
+                let mut mutable = write.open_table(MUTABLE)?;
+                let mut ticks = write.open_table(TICK_PAGES)?;
+                let mut curves = write.open_table(CURVES)?;
+                let mut quotes = write.open_table(QUOTES)?;
+                let mut dirty = write.open_table(DIRTY)?;
+                let mut mismatch = write.open_table(MISMATCH)?;
+                for (kind, id) in chunk {
+                    let key = entity_key(*kind, id);
+                    if venues.remove(key.as_slice())?.is_some() {
+                        removed += 1;
+                    }
+                    immutable.remove(key.as_slice())?;
+                    mutable.remove(key.as_slice())?;
+                    curves.remove(key.as_slice())?;
+                    quotes.remove(key.as_slice())?;
+                    dirty.remove(key.as_slice())?;
+                    mismatch.remove(key.as_slice())?;
+                    delete_prefix(&mut ticks, &key)?;
+                }
+            }
+            write.commit()?;
+            let mut work = self.work.begin_write()?;
+            work.set_durability(Durability::Immediate);
+            {
+                let mut jobs = work.open_table(JOBS)?;
+                for (kind, id) in chunk {
+                    for stage in STAGE_IMMUTABLE..=STAGE_QUOTE {
+                        let key = job_key(stage, *kind, id);
+                        jobs.remove(key.as_slice())?;
+                    }
+                }
+            }
+            work.commit()?;
+        }
+        Ok(removed)
+    }
+
     /// Remove one quote row. The snapshot and the curve stay.
     pub fn delete_quote(&self, kind: u8, id: B256) -> eyre::Result<bool> {
         let mut write = self.entities.begin_write()?;
@@ -2824,6 +2929,25 @@ fn restamp_ticks(
     Ok(())
 }
 
+fn stride_pick(ids: &[(u8, B256)], remove: usize) -> Vec<(u8, B256)> {
+    if remove == 0 || ids.is_empty() {
+        return Vec::new();
+    }
+    if remove >= ids.len() {
+        return ids.to_vec();
+    }
+    let mut out = Vec::with_capacity(remove);
+    let mut acc = 0_usize;
+    for id in ids {
+        acc += remove;
+        if acc >= ids.len() {
+            acc -= ids.len();
+            out.push(*id);
+        }
+    }
+    out
+}
+
 fn delete_prefix(table: &mut redb::Table<'_, &[u8], &[u8]>, prefix: &[u8; 33]) -> eyre::Result<()> {
     let mut start = [0u8; 37];
     start[..33].copy_from_slice(prefix);
@@ -2914,6 +3038,50 @@ mod tests {
             timestamp: 4,
             flags: 0,
         })
+    }
+
+    #[test]
+    fn drop_empty_removes_a_zero_reserve_and_keeps_a_one_wei_pool() {
+        let (_dir, catalog) = open();
+        let mut dead = product();
+        let PoolDetail::ConstantProduct(ref mut pool) = dead else {
+            unreachable!();
+        };
+        pool.id = row(1).id;
+        pool.reserve0 = U256::ZERO;
+        pool.reserve1 = U256::ZERO;
+        let mut small = product();
+        let PoolDetail::ConstantProduct(ref mut pool) = small else {
+            unreachable!();
+        };
+        pool.id = row(2).id;
+        pool.reserve0 = U256::from(1u64);
+        pool.reserve1 = U256::from(1u64);
+        store_detail(&catalog, &row(1), &dead);
+        store_detail(&catalog, &row(2), &small);
+        catalog
+            .commit_chunk("list", 1, &[row(3)], Put::Merge)
+            .unwrap();
+        assert_eq!(catalog.drop_empty_pools().unwrap(), 1);
+        assert!(catalog.read_venue(UNI_V2, row(1).id).unwrap().is_none());
+        assert!(catalog.read_venue(UNI_V2, row(2).id).unwrap().is_some());
+        assert!(catalog.read_venue(UNI_V2, row(3).id).unwrap().is_some());
+    }
+
+    fn store_detail(catalog: &Catalog, venue: &VenueRow, detail: &PoolDetail) {
+        catalog
+            .commit_chunk("list", 1, std::slice::from_ref(venue), Put::Merge)
+            .unwrap();
+        let (body, mut write) = split_detail(detail).unwrap();
+        write.block = 10;
+        catalog
+            .put_immutable(&[ImmutableRow {
+                kind: venue.kind,
+                id: venue.id,
+                body,
+            }])
+            .unwrap();
+        catalog.put_mutable(&write).unwrap();
     }
 
     #[test]

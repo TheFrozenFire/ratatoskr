@@ -40,6 +40,18 @@ struct Args {
     /// Identities to copy with `--copy-from`. Default is 10000.
     #[arg(long, default_value_t = 10_000)]
     sample_size: u64,
+    /// Delete pools whose snapshot cannot price a positive input, then exit.
+    /// A pool with no snapshot yet is kept. Combine with `--fill`.
+    #[arg(long)]
+    drop_empty: bool,
+    /// Copy this many identities that are not already in `--data-dir`.
+    /// Requires `--copy-from`. Kinds that are already fully copied are skipped.
+    #[arg(long)]
+    fill: Option<u64>,
+    /// After `--drop-empty`, delete a stride of ids listed in `fill-added.txt`
+    /// until the catalog has this many identities.
+    #[arg(long)]
+    trim_to: Option<u64>,
     /// Block tag for state reads. Default is the header cursor, or the RPC head.
     #[arg(long)]
     pin_block: Option<u64>,
@@ -176,6 +188,59 @@ async fn supervise(args: Args) -> eyre::Result<()> {
         println!("chain_ok {}", report.chain_ok);
         println!("chain_fail {}", report.chain_fail);
         println!("chain_absent {}", report.chain_absent);
+        return Ok(());
+    }
+    if args.drop_empty && args.data_dir.is_none() {
+        return Err(eyre::eyre!("--drop-empty needs --data-dir"));
+    }
+    if args.fill.is_some() && args.copy_from.is_none() {
+        return Err(eyre::eyre!("--fill needs --copy-from"));
+    }
+    if args.trim_to.is_some() && args.data_dir.is_none() {
+        return Err(eyre::eyre!("--trim-to needs --data-dir"));
+    }
+    if args.drop_empty || args.fill.is_some() || args.trim_to.is_some() {
+        let sample_dir = paths
+            .venues
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        if args.drop_empty {
+            let venues_path = paths.venues.clone();
+            let dropped = tokio::task::spawn_blocking(move || {
+                let catalog = venues::Catalog::open(&venues_path)?;
+                catalog.drop_empty_pools()
+            })
+            .await
+            .wrap_err("drop empty")??;
+            println!("dropped_empty {dropped}");
+        }
+        if let Some(add) = args.fill {
+            let src = args.copy_from.clone().expect("checked");
+            let venues_path = paths.venues.clone();
+            let report = tokio::task::spawn_blocking(move || {
+                venues::fill_identities(&src, &venues_path, add)
+            })
+            .await
+            .wrap_err("fill identities")??;
+            venues::append_fill_ids(&sample_dir, &report.ids)?;
+            println!("filled {}", report.copied);
+            for (kind, count) in &report.by_kind {
+                println!("filled {} {count}", venues::kind_name(*kind));
+            }
+        }
+        if let Some(target) = args.trim_to {
+            let venues_path = paths.venues.clone();
+            let listed = venues::read_fill_ids(&sample_dir)?;
+            let (removed, left) = tokio::task::spawn_blocking(move || {
+                let catalog = venues::Catalog::open(&venues_path)?;
+                catalog.trim_listed(target, &listed)
+            })
+            .await
+            .wrap_err("trim sample")??;
+            venues::write_fill_ids(&sample_dir, &left)?;
+            println!("trimmed {removed}");
+        }
         return Ok(());
     }
     check_combination(&services, &pipelines)?;

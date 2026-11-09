@@ -14,7 +14,7 @@
 use alloy_primitives::{Address, B256};
 use eyre::WrapErr;
 use redb::{Database, Durability, ReadableTable, TableDefinition};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -923,6 +923,115 @@ pub fn sample_identities(src: &Path, dest: &Path, target: u64) -> eyre::Result<S
     })
 }
 
+/// Identities `fill_identities` added.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FillReport {
+    pub copied: u64,
+    pub by_kind: BTreeMap<u8, u64>,
+    pub ids: Vec<(u8, B256)>,
+}
+
+/// Copy `add` identities that are not already in `dest`.
+///
+/// `src` is opened as a plain redb file. This does not migrate it. Kinds that
+/// are already fully copied contribute nothing. The live `venues.redb` is refused.
+pub fn fill_identities(src: &Path, dest: &Path, add: u64) -> eyre::Result<FillReport> {
+    if add == 0 {
+        return Err(eyre::eyre!("fill target is 0"));
+    }
+    refuse_live_file(src)?;
+    let dest_dir = catalog_dir(dest);
+    std::fs::create_dir_all(&dest_dir)?;
+    let src_dir = src.parent().unwrap_or_else(|| Path::new("."));
+    if dirs_equal(src_dir, &dest_dir)? {
+        return Err(eyre::eyre!(
+            "sample source and destination are the same directory"
+        ));
+    }
+    refuse_live_dir(&dest_dir)?;
+    let source = Database::open(src).wrap_err("open identity source")?;
+    let source_counts = count_identities(&source)?;
+    let catalog = Catalog::open(&dest_dir)?;
+    let present = identity_keys(&catalog)?;
+    drop(catalog);
+    let mut remaining = BTreeMap::new();
+    for (kind, count) in &source_counts {
+        let have = present.iter().filter(|key| key[0] == *kind).count() as u64;
+        let left = count.saturating_sub(have);
+        if left > 0 {
+            remaining.insert(*kind, left);
+        }
+    }
+    let plan = allocate_sample(&remaining, add);
+    let catalog = Catalog::open(&dest_dir)?;
+    let read = source.begin_read()?;
+    let table = read.open_table(VENUES).wrap_err("identity table")?;
+    let mut copied = 0_u64;
+    let mut by_kind = BTreeMap::new();
+    let mut ids = Vec::new();
+    for (kind, want) in plan {
+        if want == 0 {
+            continue;
+        }
+        let count = remaining.get(&kind).copied().unwrap_or(0);
+        let step = (count / want).max(1);
+        tracing::info!(kind = kind_name(kind), count, want, step, "filling kind");
+        let start_key = key(kind, &B256::ZERO);
+        let mut end_key = [0u8; 33];
+        let end = if kind == u8::MAX {
+            Bound::Unbounded
+        } else {
+            end_key[0] = kind + 1;
+            Bound::Excluded(end_key.as_slice())
+        };
+        let mut seen = 0_u64;
+        let mut picked = 0_u64;
+        let mut wrote = 0_u64;
+        let mut chunk = Vec::new();
+        for item in table.range::<&[u8]>((Bound::Included(start_key.as_slice()), end))? {
+            let (key_bytes, value) = item?;
+            let key_bytes = key_bytes.value();
+            if key_bytes.len() != 33 || key_bytes[0] != kind {
+                return Err(eyre::eyre!("venue key"));
+            }
+            let mut owned = [0u8; 33];
+            owned.copy_from_slice(key_bytes);
+            if present.contains(&owned) {
+                continue;
+            }
+            let take = picked < want && seen.is_multiple_of(step);
+            seen += 1;
+            if !take {
+                continue;
+            }
+            let id = B256::from_slice(&key_bytes[1..]);
+            let row = decode_row(kind, id, value.value())?;
+            picked += 1;
+            chunk.push(row);
+            ids.push((kind, id));
+            if chunk.len() == 512 {
+                wrote += write_identities(&catalog.entities, &chunk, Put::IfAbsent)?;
+                chunk.clear();
+            }
+            if picked >= want {
+                break;
+            }
+        }
+        if !chunk.is_empty() {
+            wrote += write_identities(&catalog.entities, &chunk, Put::IfAbsent)?;
+        }
+        if wrote > 0 {
+            by_kind.insert(kind, wrote);
+            copied += wrote;
+        }
+    }
+    Ok(FillReport {
+        copied,
+        by_kind,
+        ids,
+    })
+}
+
 /// Take small kinds whole, then split whatever remains across the large ones.
 fn allocate_sample(counts: &BTreeMap<u8, u64>, target: u64) -> BTreeMap<u8, u64> {
     if target == 0 || counts.is_empty() {
@@ -976,6 +1085,79 @@ fn allocate_sample(counts: &BTreeMap<u8, u64>, target: u64) -> BTreeMap<u8, u64>
         }
     }
     take
+}
+
+pub fn append_fill_ids(dir: &Path, ids: &[(u8, B256)]) -> eyre::Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("fill-added.txt"))
+        .wrap_err("append fill ids")?;
+    for (kind, id) in ids {
+        use std::io::Write;
+        writeln!(file, "{kind} {id}").wrap_err("write fill id")?;
+    }
+    Ok(())
+}
+
+pub fn read_fill_ids(dir: &Path) -> eyre::Result<Vec<(u8, B256)>> {
+    let path = dir.join("fill-added.txt");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err).wrap_err("read fill ids"),
+    };
+    let mut ids = Vec::new();
+    for line in text.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let kind = parts
+            .next()
+            .ok_or_else(|| eyre::eyre!("fill id"))?
+            .parse::<u8>()
+            .map_err(|err| eyre::eyre!("fill kind: {err}"))?;
+        let id = parts
+            .next()
+            .ok_or_else(|| eyre::eyre!("fill id"))?
+            .parse::<B256>()
+            .map_err(|err| eyre::eyre!("fill id: {err}"))?;
+        ids.push((kind, id));
+    }
+    Ok(ids)
+}
+
+pub fn write_fill_ids(dir: &Path, ids: &[(u8, B256)]) -> eyre::Result<()> {
+    let mut text = String::new();
+    for (kind, id) in ids {
+        text.push_str(&format!("{kind} {id}\n"));
+    }
+    std::fs::write(dir.join("fill-added.txt"), text).wrap_err("rewrite fill ids")
+}
+
+fn identity_keys(catalog: &Catalog) -> eyre::Result<HashSet<[u8; 33]>> {
+    let read = catalog.entities.begin_read()?;
+    let table = match read.open_table(VENUES) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(HashSet::new()),
+        Err(err) => return Err(err.into()),
+    };
+    let mut keys = HashSet::new();
+    for item in table.iter()? {
+        let (key, _) = item?;
+        let key = key.value();
+        if key.len() != 33 {
+            return Err(eyre::eyre!("venue key"));
+        }
+        let mut owned = [0u8; 33];
+        owned.copy_from_slice(key);
+        keys.insert(owned);
+    }
+    Ok(keys)
 }
 
 fn count_identities(db: &Database) -> eyre::Result<BTreeMap<u8, u64>> {
@@ -1321,6 +1503,47 @@ mod tests {
         assert!(dest.0.join("entities.redb").exists());
         let catalog = Catalog::open(&dest.0).unwrap();
         assert_eq!(catalog.page_venues(V3_FORK, None, 10).unwrap().len(), 5);
+    }
+
+    #[test]
+    fn fill_adds_identities_the_sample_did_not_copy() {
+        let src_dir = TempDir::new();
+        let src = src_dir.0.join("venues.redb");
+        let db = Database::create(&src).unwrap();
+        {
+            let write = db.begin_write().unwrap();
+            {
+                let mut venues = write.open_table(VENUES).unwrap();
+                for index in 0..30_u8 {
+                    let mut row = sample();
+                    row.kind = UNI_V2;
+                    row.id[31] = index;
+                    let bytes = encode_row(&row).unwrap();
+                    venues
+                        .insert(row.key().as_slice(), bytes.as_slice())
+                        .unwrap();
+                }
+            }
+            write.commit().unwrap();
+        }
+        drop(db);
+        let dest = TempDir::new();
+        let first = sample_identities(&src, &dest.0, 10).unwrap();
+        assert_eq!(first.copied, 10);
+        let filled = fill_identities(&src, &dest.0, 5).unwrap();
+        assert_eq!(filled.copied, 5);
+        assert_eq!(filled.ids.len(), 5);
+        let catalog = Catalog::open(&dest.0).unwrap();
+        assert_eq!(catalog.page_venues(UNI_V2, None, 30).unwrap().len(), 15);
+        drop(catalog);
+        let again = fill_identities(&src, &dest.0, 5).unwrap();
+        assert_eq!(again.copied, 5);
+        let catalog = Catalog::open(&dest.0).unwrap();
+        assert_eq!(catalog.page_venues(UNI_V2, None, 30).unwrap().len(), 20);
+        let mut seen = std::collections::HashSet::new();
+        for row in catalog.page_venues(UNI_V2, None, 30).unwrap() {
+            assert!(seen.insert(row.id));
+        }
     }
 
     #[test]

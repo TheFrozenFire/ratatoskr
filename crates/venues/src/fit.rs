@@ -533,6 +533,24 @@ fn header_value() -> Value {
     })
 }
 
+/// A snapshot can price a positive input.
+///
+/// A missing snapshot is kept. Zero reserves, an empty concentrated book, and
+/// an uninitialized price are not. A one-wei pool is.
+pub(crate) fn has_trade_size(kind: u8, id: B256, state: PoolState) -> bool {
+    if state.immutable.is_none() || state.mutable.is_none() {
+        return true;
+    }
+    let plan = plan_of(kind, id, state);
+    if plan.missing.is_some() {
+        return true;
+    }
+    if matches!(plan.detail, Some(PoolDetail::Failed(_))) {
+        return true;
+    }
+    plan.directions.iter().any(|dir| !dir.max_in.is_zero())
+}
+
 fn plan_of(kind: u8, id: B256, state: PoolState) -> PoolPlan {
     let (block, generation, truncated, tick_count, bitmap) = match &state.mutable {
         Some(row) => (

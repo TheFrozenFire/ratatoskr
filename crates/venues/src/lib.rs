@@ -29,8 +29,9 @@ pub use wire::{
 };
 
 pub use catalog::{
-    decode_body, decode_row, encode_body, encode_row, kind_name, sample_identities, Catalog, Put,
-    ReceiptBody, SampleReport, VenueRow, PANCAKE_V3, SUSHI_V3, UNI_V3, V3_FORK,
+    append_fill_ids, decode_body, decode_row, encode_body, encode_row, fill_identities, kind_name,
+    read_fill_ids, sample_identities, write_fill_ids, Catalog, FillReport, Put, ReceiptBody,
+    SampleReport, VenueRow, PANCAKE_V3, SUSHI_V3, UNI_V3, V3_FORK,
 };
 pub use detail::{load_details, DetailQuery, PoolDetail, Quote};
 pub use entity::EntityStore;
