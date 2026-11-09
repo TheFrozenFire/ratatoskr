@@ -21,6 +21,7 @@ mod import;
 mod lens;
 mod lists;
 mod logs;
+mod metrics;
 mod rpc;
 mod state;
 mod tick;
@@ -42,6 +43,7 @@ pub use fit::{drop_partial_quotes, export_curve_fit, import_curve_fit, refit_cur
 pub use fit_select::{logistic_outs, poke_choose, poke_formula, select_fit};
 pub use history::BloomScan;
 pub use logs::Walk;
+pub use metrics::{prometheus_text, publish_summary, status_json};
 pub use rpc::Rpc;
 pub use state::{
     estimate, CurveRecord, ImmutablePut, ImmutableRow, MutableStored, MutableWrite, PoolState,

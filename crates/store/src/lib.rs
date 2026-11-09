@@ -108,6 +108,10 @@ impl LocalStore {
             .ok_or_else(|| eyre::eyre!("venues are not open"))
     }
 
+    pub fn state_summary(&self) -> eyre::Result<venues::StateSummary> {
+        self.catalog_db()?.state_summary()
+    }
+
     pub(crate) async fn page_blocks(
         &self,
         after: Option<u64>,

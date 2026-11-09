@@ -13,6 +13,9 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 use venues::{RunOpts, RunPhase};
 
+mod export;
+mod status;
+
 const DEFAULT_TARGET_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 const DEFAULT_LOG: &str =
     "ratatoskr=info,store=info,pipeline=info,peer=info,eth_p2p=info,venues=info,headers=info";
@@ -61,6 +64,15 @@ struct Args {
     /// Print stored state counts for `--data-dir` and exit.
     #[arg(long)]
     summarize: bool,
+    /// Listen address for the status exporter.
+    #[arg(long, default_value = "127.0.0.1:9737")]
+    metrics: String,
+    /// Draw the status TUI from the exporter and exit when it closes.
+    #[arg(long)]
+    status: bool,
+    /// Exporter base URL for `--status`.
+    #[arg(long, default_value = "http://127.0.0.1:9737")]
+    status_url: String,
     /// Rewrite every stored curve from the current fitter, then exit.
     /// Combine with `--export-fit` to write the extract after the rewrite.
     #[arg(long)]
@@ -135,6 +147,13 @@ async fn main() -> eyre::Result<()> {
 }
 
 async fn supervise(args: Args) -> eyre::Result<()> {
+    if args.status {
+        let url = args.status_url.clone();
+        return tokio::task::spawn_blocking(move || status::run(&url))
+            .await
+            .wrap_err("status task")?;
+    }
+    export::serve(&args.metrics)?;
     let services = parse_services(&args.services)?;
     let pipelines = parse_pipelines(&args.pipeline)?;
     let egress = egress_from(args.bind4, args.bind6)?;
@@ -367,6 +386,11 @@ async fn supervise(args: Args) -> eyre::Result<()> {
         pin_block: args.pin_block,
         until_idle: args.until_idle,
     };
+    if pipelines.state {
+        if let Some(store) = store.clone() {
+            spawn_sampler(store);
+        }
+    }
     let pipelines_started =
         pipelines.headers || pipelines.venues || pipelines.receipts || pipelines.state;
     let mut peer_task = peer_task;
@@ -421,6 +445,27 @@ async fn supervise(args: Args) -> eyre::Result<()> {
         Some(err) => Err(err),
         None => Ok(()),
     }
+}
+
+fn spawn_sampler(store: LocalStore) {
+    let busy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+        loop {
+            tick.tick().await;
+            if busy.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                continue;
+            }
+            let store = store.clone();
+            let busy = std::sync::Arc::clone(&busy);
+            tokio::task::spawn_blocking(move || {
+                if let Ok(summary) = store.state_summary() {
+                    venues::publish_summary(&summary);
+                }
+                busy.store(false, std::sync::atomic::Ordering::Release);
+            });
+        }
+    });
 }
 
 fn spawn_pipelines(

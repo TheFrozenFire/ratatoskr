@@ -1282,6 +1282,7 @@ where
             }
         },
     };
+    crate::metrics::set_block(block);
     tracing::info!(block, "state block");
     let give_up_after = if opts.until_idle { 4 } else { 0 };
     let mut quiet = 0_u32;
@@ -1372,23 +1373,20 @@ async fn drive_one<S: EntityStore>(
             continue;
         }
         let started = std::time::Instant::now();
-        match stage {
+        crate::metrics::begin_batch(stage, jobs.len() as u64);
+        let result = match stage {
             STAGE_IMMUTABLE | STAGE_MUTABLE => {
-                drive_details(store, rpc, block, stage, &jobs, give_up_after, notes).await?
+                drive_details(store, rpc, block, stage, &jobs, give_up_after, notes).await
             }
-            STAGE_TICKS => drive_ticks(store, rpc, &jobs, now, give_up_after, notes).await?,
-            STAGE_QUOTE => {
-                crate::fit::drive_quotes(store, rpc, &jobs, give_up_after, notes).await?
-            }
-            STAGE_CURVE => drive_curves(store, &jobs, give_up_after, notes).await?,
-            _ => {}
-        }
-        tracing::info!(
-            stage,
-            jobs = jobs.len(),
-            ms = started.elapsed().as_millis() as u64,
-            "state batch"
-        );
+            STAGE_TICKS => drive_ticks(store, rpc, &jobs, now, give_up_after, notes).await,
+            STAGE_QUOTE => crate::fit::drive_quotes(store, rpc, &jobs, give_up_after, notes).await,
+            STAGE_CURVE => drive_curves(store, &jobs, give_up_after, notes).await,
+            _ => Ok(()),
+        };
+        let ms = started.elapsed().as_millis() as u64;
+        crate::metrics::record_batch(stage, jobs.len() as u64, ms);
+        result?;
+        tracing::info!(stage, jobs = jobs.len(), ms, "state batch");
         return Ok(true);
     }
     Ok(false)

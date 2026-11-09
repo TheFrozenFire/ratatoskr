@@ -12,12 +12,15 @@ path = "src/main.rs"
 [dependencies]
 chain.workspace = true
 clap.workspace = true
+crossterm = "0.28"
 corpus.workspace = true
 directory.workspace = true
 eth-p2p.workspace = true
 eyre.workspace = true
 peer.workspace = true
 pipeline.workspace = true
+ratatui = "0.29"
+serde_json.workspace = true
 store.workspace = true
 tokio = { workspace = true, features = ["signal"] }
 tracing.workspace = true
