@@ -24,7 +24,7 @@ use crate::catalog::{
     UNI_V2, UNI_V3, UNI_V4, V2_FORK, V3_FORK,
 };
 use crate::detail::{product_fee_pips, PoolDetail, Quote};
-use crate::fit_formula::{encode_fit, StoredFit};
+use crate::fit_formula::{decode_fit, encode_fit, Formula, StoredFit};
 use crate::fit_select::{choose, labels_of};
 use crate::state::{
     curve_is_current, curve_job, derive_curve, is_canonical, join_detail, keep_or_drop,
@@ -35,6 +35,8 @@ use crate::Catalog;
 use crate::EntityStore;
 use crate::Rpc;
 use alloy_primitives::{address, Address, B256, U256};
+use num_bigint::{BigInt, Sign};
+use num_rational::BigRational;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
@@ -195,9 +197,9 @@ struct PoolPlan {
     identity_spacing: Option<i32>,
     created_block: Option<u64>,
     canonical: Option<bool>,
-    curve_tag: Option<u8>,
     curve_version: Option<u32>,
     skip_reason: Option<u8>,
+    fits: Vec<Value>,
     pairs_capped: bool,
     missing: Option<String>,
     detail: Option<PoolDetail>,
@@ -520,7 +522,9 @@ pub(crate) async fn drive_quotes<S: EntityStore>(
 fn header_value() -> Value {
     json!({
         "record": "header",
-        "schema": 1,
+        "schema": 2,
+        "curve_version": CURVE_VERSION,
+        "fits": "Each pool carries fits: the closed form stored for that direction. score is the all-label worst basis points. formula.kind is the stored formula. A direction with no fit is absent. Skip reasons are not formulas.",
         "units": "Raw token amounts. Decimals are not stored. Do not assume 18.",
         "ground_truth": "chain_out is the protocol quoter at block, stored by the state pipeline before the curve is fit. local_out is recomputed from the stored snapshot when this file is written and is not ground truth.",
         "domain": "max_in is the top of the fit domain. cp_99 buys 99% of the output reserve. ladder is the last step of the concentrated book. balance_search bisects the local quote toward 99% of the output balance, capped at 1000x the input balance. balance is the input balance when that search cannot run. uninitialized and empty_book and none have no samples.",
@@ -582,7 +586,7 @@ fn plan_of(kind: u8, id: B256, state: PoolState) -> PoolPlan {
         ),
         None => (0, 0, false, 0, B256::ZERO),
     };
-    let (curve_tag, curve_version, skip_reason) = curve_meta(state.curve.as_ref());
+    let (curve_version, skip_reason, fits) = curve_meta(state.curve.as_ref());
     let venue = state.venue.clone();
     let mut plan = PoolPlan {
         kind,
@@ -597,9 +601,9 @@ fn plan_of(kind: u8, id: B256, state: PoolState) -> PoolPlan {
         identity_spacing: venue.as_ref().and_then(|row| row.tick_spacing),
         created_block: venue.as_ref().and_then(|row| row.block_number),
         canonical: None,
-        curve_tag,
         curve_version,
         skip_reason,
+        fits,
         pairs_capped: false,
         missing: None,
         detail: None,
@@ -630,17 +634,80 @@ fn plan_of(kind: u8, id: B256, state: PoolState) -> PoolPlan {
     plan
 }
 
-fn curve_meta(curve: Option<&CurveRecord>) -> (Option<u8>, Option<u32>, Option<u8>) {
+fn curve_meta(curve: Option<&CurveRecord>) -> (Option<u32>, Option<u8>, Vec<Value>) {
     let Some(curve) = curve else {
-        return (None, None, None);
+        return (None, None, Vec::new());
     };
-    let tag = curve.payload.first().copied();
-    let skip = if tag == Some(0) {
-        Some(curve.payload.get(1).copied().unwrap_or(0))
+    let skip = if curve.payload.first() == Some(&1)
+        && curve.payload.get(1).is_some_and(|reason| *reason != 0)
+    {
+        curve.payload.get(1).copied()
     } else {
         None
     };
-    (tag, Some(curve.version), skip)
+    let fits = decode_fit(&curve.payload)
+        .map(|fit| fit.directions.iter().map(fit_json).collect())
+        .unwrap_or_default();
+    (Some(curve.version), skip, fits)
+}
+
+pub(crate) fn curve_payload(detail: &PoolDetail) -> Vec<u8> {
+    if let PoolDetail::Concentrated(pool) = detail {
+        if pool.sqrt_price_x96.is_zero() {
+            return encode_fit(5, &[]);
+        }
+    }
+    if !is_canonical(detail) {
+        return encode_fit(crate::state::skip_reason(detail), &[]);
+    }
+    encode_fit(0, &structural_fits(detail))
+}
+
+fn structural_fits(detail: &PoolDetail) -> Vec<StoredFit> {
+    let PoolDetail::ConstantProduct(pool) = detail else {
+        return Vec::new();
+    };
+    let fee = BigInt::from(product_fee_pips(pool.kind, pool.fee_pips));
+    let denom = BigInt::from(1_000_000u32);
+    let reserve0 = bigint_from_u256(pool.reserve0);
+    let reserve1 = bigint_from_u256(pool.reserve1);
+    vec![
+        product_fit(
+            pool.token0,
+            pool.token1,
+            reserve0.clone(),
+            reserve1.clone(),
+            fee.clone(),
+            denom.clone(),
+        ),
+        product_fit(pool.token1, pool.token0, reserve1, reserve0, fee, denom),
+    ]
+}
+
+fn product_fit(
+    token_in: Address,
+    token_out: Address,
+    reserve_in: BigInt,
+    reserve_out: BigInt,
+    fee: BigInt,
+    denom: BigInt,
+) -> StoredFit {
+    StoredFit {
+        token_in,
+        token_out,
+        score: 0,
+        name: "product".to_string(),
+        formula: Formula::Product {
+            reserve_in,
+            reserve_out,
+            fee,
+            denom,
+        },
+    }
+}
+
+fn bigint_from_u256(value: U256) -> BigInt {
+    BigInt::from_bytes_be(Sign::Plus, &value.to_be_bytes::<32>())
 }
 
 fn pairs_of(detail: &PoolDetail) -> (bool, Vec<(Address, Address)>) {
@@ -1989,10 +2056,292 @@ fn write_pool(file: &mut File, plan: &PoolPlan, report: &mut FitReport) -> io::R
     Ok(())
 }
 
+fn fit_json(fit: &StoredFit) -> Value {
+    json!({
+        "token_in": addr(fit.token_in),
+        "token_out": addr(fit.token_out),
+        "score": fit.score,
+        "name": fit.name,
+        "formula": formula_json(&fit.formula),
+    })
+}
+
+fn bi_json(value: &BigInt) -> String {
+    value.to_string()
+}
+
+fn bis_json(values: &[BigInt]) -> Vec<String> {
+    values.iter().map(bi_json).collect()
+}
+
+fn pairs_json(values: &[(BigInt, BigInt)]) -> Vec<Value> {
+    values
+        .iter()
+        .map(|(left, right)| json!([bi_json(left), bi_json(right)]))
+        .collect()
+}
+
+fn rat_json(value: &BigRational) -> Value {
+    json!({
+        "n": value.numer().to_string(),
+        "d": value.denom().to_string(),
+    })
+}
+
+fn formula_json(formula: &Formula) -> Value {
+    match formula {
+        Formula::Hyperbola { x1, y1, x2, y2 } => json!({
+            "kind": "hyperbola",
+            "x1": bi_json(x1), "y1": bi_json(y1), "x2": bi_json(x2), "y2": bi_json(y2),
+        }),
+        Formula::Stable {
+            xp,
+            amp,
+            i,
+            j,
+            fee,
+            denom,
+            offpeg,
+            rate_i,
+            rate_j,
+            prec_i,
+            prec_j,
+        } => json!({
+            "kind": "stable",
+            "xp": bis_json(xp), "amp": bi_json(amp), "i": i, "j": j,
+            "fee": bi_json(fee), "denom": bi_json(denom), "offpeg": bi_json(offpeg),
+            "rate_i": bi_json(rate_i), "rate_j": bi_json(rate_j),
+            "prec_i": bi_json(prec_i), "prec_j": bi_json(prec_j),
+        }),
+        Formula::Crypto2 {
+            balances,
+            precs,
+            scale,
+            ann,
+            gamma,
+            d,
+            i,
+            j,
+            mid,
+            out_fee,
+            fee_gamma,
+        } => json!({
+            "kind": "crypto2",
+            "balances": bis_json(balances), "precs": bis_json(precs), "scale": bi_json(scale),
+            "ann": bi_json(ann), "gamma": bi_json(gamma), "d": bi_json(d), "i": i, "j": j,
+            "mid": bi_json(mid), "out_fee": bi_json(out_fee), "fee_gamma": bi_json(fee_gamma),
+        }),
+        Formula::FlatPair {
+            balances,
+            precs,
+            scale,
+            amp,
+            d,
+            i,
+            j,
+            mid,
+            out_fee,
+            fee_gamma,
+            flat_fee,
+        } => json!({
+            "kind": "flat_pair",
+            "balances": bis_json(balances), "precs": bis_json(precs), "scale": bi_json(scale),
+            "amp": bi_json(amp), "d": bi_json(d), "i": i, "j": j,
+            "mid": bi_json(mid), "out_fee": bi_json(out_fee), "fee_gamma": bi_json(fee_gamma),
+            "flat_fee": flat_fee,
+        }),
+        Formula::Crypto3 {
+            balances,
+            precs,
+            scales,
+            ann,
+            gamma,
+            d,
+            i,
+            j,
+            mid,
+            out_fee,
+            fee_gamma,
+        } => json!({
+            "kind": "crypto3",
+            "balances": bis_json(balances), "precs": bis_json(precs), "scales": bis_json(scales),
+            "ann": bi_json(ann), "gamma": bi_json(gamma), "d": bi_json(d), "i": i, "j": j,
+            "mid": bi_json(mid), "out_fee": bi_json(out_fee), "fee_gamma": bi_json(fee_gamma),
+        }),
+        Formula::StableScale {
+            xp,
+            amp,
+            i,
+            j,
+            fee,
+            rates,
+            which,
+            ppm,
+            denom,
+            fee_on_input,
+        } => json!({
+            "kind": "stable_scale",
+            "xp": bis_json(xp), "amp": bi_json(amp), "i": i, "j": j, "fee": bi_json(fee),
+            "rates": bis_json(rates), "which": which, "ppm": bi_json(ppm),
+            "denom": bi_json(denom), "fee_on_input": fee_on_input,
+        }),
+        Formula::StableOutput {
+            xp,
+            amp,
+            i,
+            j,
+            fee,
+            rates,
+            ppm,
+        } => json!({
+            "kind": "stable_output",
+            "xp": bis_json(xp), "amp": bi_json(amp), "i": i, "j": j,
+            "fee": bi_json(fee), "rates": bis_json(rates), "ppm": bi_json(ppm),
+        }),
+        Formula::StablePpms {
+            xp,
+            amp,
+            i,
+            j,
+            fee,
+            rates,
+            ppms,
+        } => json!({
+            "kind": "stable_ppms",
+            "xp": bis_json(xp), "amp": bi_json(amp), "i": i, "j": j,
+            "fee": bi_json(fee), "rates": bis_json(rates), "ppms": bis_json(ppms),
+        }),
+        Formula::StableRefine {
+            xp,
+            amp,
+            i,
+            j,
+            fee,
+            offpeg,
+            rate_i,
+            prec_i,
+            ppm_i,
+            ppm_j,
+            rate_j,
+            prec_j,
+            out_ppm,
+        } => json!({
+            "kind": "stable_refine",
+            "xp": bis_json(xp), "amp": bi_json(amp), "i": i, "j": j,
+            "fee": bi_json(fee), "offpeg": bi_json(offpeg),
+            "rate_i": bi_json(rate_i), "prec_i": bi_json(prec_i),
+            "ppm_i": bi_json(ppm_i), "ppm_j": bi_json(ppm_j),
+            "rate_j": bi_json(rate_j), "prec_j": bi_json(prec_j), "out_ppm": bi_json(out_ppm),
+        }),
+        Formula::Product {
+            reserve_in,
+            reserve_out,
+            fee,
+            denom,
+        } => json!({
+            "kind": "product",
+            "reserve_in": bi_json(reserve_in), "reserve_out": bi_json(reserve_out),
+            "fee": bi_json(fee), "denom": bi_json(denom),
+        }),
+        Formula::Weighted {
+            balance_in,
+            balance_out,
+            weight_in,
+            weight_out,
+            fee,
+        } => json!({
+            "kind": "weighted",
+            "balance_in": bi_json(balance_in), "balance_out": bi_json(balance_out),
+            "weight_in": bi_json(weight_in), "weight_out": bi_json(weight_out), "fee": bi_json(fee),
+        }),
+        Formula::BalancerStable {
+            xp,
+            amp,
+            i,
+            j,
+            fee,
+            prec_i,
+            prec_j,
+        } => json!({
+            "kind": "balancer_stable",
+            "xp": bis_json(xp), "amp": bi_json(amp), "i": i, "j": j,
+            "fee": bi_json(fee), "prec_i": bi_json(prec_i), "prec_j": bi_json(prec_j),
+        }),
+        Formula::Ladder {
+            sqrt_price,
+            liquidity,
+            tick,
+            fee,
+            ticks,
+            zero_for_one,
+        } => json!({
+            "kind": "ladder",
+            "sqrt_price": bi_json(sqrt_price), "liquidity": bi_json(liquidity), "tick": bi_json(tick),
+            "fee": bi_json(fee), "ticks": pairs_json(ticks), "zero_for_one": zero_for_one,
+        }),
+        Formula::Bins {
+            reference,
+            distance,
+            length,
+            position,
+            selling0,
+            scaled_out,
+            scale_out,
+        } => json!({
+            "kind": "bins",
+            "reference": bi_json(reference), "distance": bi_json(distance), "length": bi_json(length),
+            "position": bi_json(position), "selling0": selling0,
+            "scaled_out": bi_json(scaled_out), "scale_out": bi_json(scale_out),
+        }),
+        Formula::Chord { knots } => json!({"kind": "chord", "knots": pairs_json(knots)}),
+        Formula::Cubic { knots } => json!({"kind": "cubic", "knots": pairs_json(knots)}),
+        Formula::HyperResidual { knots } => {
+            json!({"kind": "hyper_residual", "knots": pairs_json(knots)})
+        }
+        Formula::Added { base, knots, alpha } => json!({
+            "kind": "added",
+            "base": formula_json(base),
+            "knots": pairs_json(knots),
+            "alpha": rat_json(alpha),
+        }),
+        Formula::ScaledResidual { knots, ppm } => json!({
+            "kind": "scaled_residual",
+            "knots": pairs_json(knots),
+            "ppm": bi_json(ppm),
+        }),
+        Formula::Fillet { slope, cap, xa, xb } => json!({
+            "kind": "fillet",
+            "slope": rat_json(slope), "cap": rat_json(cap), "xa": rat_json(xa), "xb": rat_json(xb),
+        }),
+        Formula::Logistic { slope, rate, knee } => json!({
+            "kind": "logistic",
+            "slope": rat_json(slope), "rate": rat_json(rate), "knee": rat_json(knee),
+        }),
+        Formula::Scaled { base, ppm } => json!({
+            "kind": "scaled",
+            "base": formula_json(base),
+            "ppm": ppm,
+        }),
+        Formula::Wave {
+            base,
+            cap,
+            x_last,
+            a_ppm,
+            b_ppm,
+        } => json!({
+            "kind": "wave",
+            "base": formula_json(base),
+            "cap": bi_json(cap), "x_last": bi_json(x_last), "a_ppm": a_ppm, "b_ppm": b_ppm,
+        }),
+        Formula::Identity => json!({"kind": "identity"}),
+        Formula::Lookup { pairs } => json!({"kind": "lookup", "pairs": pairs_json(pairs)}),
+    }
+}
+
 fn pool_json(plan: &PoolPlan) -> Value {
     json!({
         "record": "pool",
-        "schema": 1,
+        "schema": 2,
         "kind": kind_name(plan.kind),
         "kind_id": plan.kind,
         "id": format!("{}", plan.id),
@@ -2003,9 +2352,9 @@ fn pool_json(plan: &PoolPlan) -> Value {
         "identity_tick_spacing": plan.identity_spacing,
         "created_block": plan.created_block,
         "canonical": plan.canonical,
-        "curve_tag": plan.curve_tag,
         "curve_version": plan.curve_version,
         "skip_reason": plan.skip_reason,
+        "fits": plan.fits,
         "ticks_truncated": plan.truncated,
         "tick_count": plan.tick_count,
         "bitmap_fingerprint": format!("{}", plan.bitmap),
@@ -2044,7 +2393,10 @@ fn sample_json(sample: &Sample) -> Value {
     })
 }
 
-/// Fit each labeled direction. No accepted formula keeps the canonical curve.
+/// Fit each labeled direction. The stored curve is those formulas.
+///
+/// A payload with no `directions` array is not a quote grid. A grid whose
+/// directions do not choose a formula stores an empty fit.
 pub(crate) fn fitted_curve(
     detail: &PoolDetail,
     quote_payload: &[u8],
@@ -2074,17 +2426,61 @@ pub(crate) fn fitted_curve(
             formula: chosen.formula,
         });
     }
-    if fits.is_empty() {
-        return Ok(None);
+    let mut curve = derive_curve(detail, generation)?;
+    curve.payload = encode_fit(0, &fits);
+    Ok(Some(curve))
+}
+
+/// Replace every stored curve with the current fitter.
+pub fn refit_curves(catalog: &Catalog) -> eyre::Result<u64> {
+    let mut wrote = 0_u64;
+    for kind in 1..=METRIC {
+        let mut after = None;
+        loop {
+            let page = catalog.page_venues(kind, after, PAGE)?;
+            if page.is_empty() {
+                break;
+            }
+            let full = page.len() == PAGE;
+            after = page.last().map(|row| row.id);
+            let started = std::time::Instant::now();
+            let mut curves = Vec::new();
+            for row in &page {
+                let state = catalog.read_state(row.kind, row.id)?;
+                let (Some(immutable), Some(mutable)) =
+                    (state.immutable.as_ref(), state.mutable.as_ref())
+                else {
+                    continue;
+                };
+                let detail =
+                    match join_detail(immutable, &mutable.body, &state.ticks, row.kind, row.id) {
+                        Ok(detail) => detail,
+                        Err(_) => continue,
+                    };
+                let curve = crate::state::curve_for_snapshot(
+                    &detail,
+                    state.quotes.as_ref(),
+                    mutable.generation,
+                )
+                .map_err(|err| eyre::eyre!(err))?;
+                curves.push(curve);
+            }
+            let n = curves.len() as u64;
+            catalog.put_curves(&curves)?;
+            wrote += n;
+            tracing::info!(
+                kind = kind_name(kind),
+                wrote = n,
+                ms = started.elapsed().as_millis() as u64,
+                curves = wrote,
+                "refit"
+            );
+            if !full {
+                break;
+            }
+        }
     }
-    let fallback = derive_curve(detail, generation)?;
-    Ok(Some(CurveRecord {
-        kind: fallback.kind,
-        id: fallback.id,
-        generation: fallback.generation,
-        version: CURVE_VERSION,
-        payload: encode_fit(&fallback.payload, &fits),
-    }))
+    Ok(wrote)
 }
 
 fn state_json(detail: &PoolDetail) -> Value {
@@ -2423,7 +2819,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fitted_product_quotes_off_the_grid_and_falls_back() {
+    fn a_fitted_product_quotes_off_the_grid() {
         let token0 = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         let token1 = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
         let detail = PoolDetail::ConstantProduct(ConstantProduct {
@@ -2465,21 +2861,18 @@ mod tests {
         let curve = fitted_curve(&detail, &bytes, 7).unwrap().expect("fit");
         assert_eq!(curve.version, CURVE_VERSION);
         assert_eq!(curve.generation, 7);
-        assert_eq!(curve.payload[0], 3);
+        assert_eq!(curve.payload[0], 1);
+        assert_eq!(curve.payload[1], 0);
         let off = U256::from(2_500u64);
         let fitted = crate::state::estimate(&curve, 7, token0, token1, off).unwrap();
         let direct = detail.quote(token0, token1, off).unwrap();
         assert_eq!(fitted.amount_out, direct.amount_out);
-        assert_eq!(fitted.fee_paid, U256::ZERO);
+        assert_eq!(fitted.fee_paid, direct.fee_paid);
         assert!(!fitted.exhausted);
         let zero = crate::state::estimate(&curve, 7, token0, token1, U256::ZERO).unwrap();
         assert_eq!(zero.amount_out, U256::ZERO);
         assert_eq!(zero.fee_paid, U256::ZERO);
-        let back_in = U256::from(2_500u64);
-        let back = crate::state::estimate(&curve, 7, token1, token0, back_in).unwrap();
-        let direct_back = detail.quote(token1, token0, back_in).unwrap();
-        assert_eq!(back, direct_back);
-        assert!(direct_back.fee_paid > U256::ZERO);
+        assert!(crate::state::estimate(&curve, 7, token1, token0, off).is_err());
     }
 
     #[test]

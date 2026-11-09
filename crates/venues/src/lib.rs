@@ -38,7 +38,7 @@ pub use catalog::{
 };
 pub use detail::{load_details, DetailQuery, PoolDetail, Quote};
 pub use entity::EntityStore;
-pub use fit::{drop_partial_quotes, export_curve_fit, import_curve_fit, FitReport};
+pub use fit::{drop_partial_quotes, export_curve_fit, import_curve_fit, refit_curves, FitReport};
 pub use fit_select::{logistic_outs, poke_choose, poke_formula, select_fit};
 pub use history::BloomScan;
 pub use logs::Walk;

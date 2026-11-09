@@ -10,7 +10,7 @@
 
 use crate::catalog::{entity_key, AERO, BALANCER_V2, BALANCER_V3, CURVE, METRIC, UNI_V4, VENUES};
 use crate::detail::{
-    concentrated_ladder, quote_ladder, tick_request, BitmapWord, Concentrated, CurveCoin,
+    tick_request, BitmapWord, Concentrated, CurveCoin,
     CurvePool, MetricBin, MetricPool, PoolDetail, Quote, TickWord, FLAG_CRYPTO, FLAG_FAILED,
     FLAG_STABLE, FLAG_TRUNCATED,
 };
@@ -22,6 +22,7 @@ use crate::{
 };
 use alloy_primitives::{keccak256, Address, B256, U256};
 use num_bigint::{BigInt, Sign};
+use num_traits::Zero;
 use eyre::WrapErr;
 use ipc::HistoryPeer;
 use model::{BlockRecord, NormalizedLog};
@@ -40,8 +41,8 @@ const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 const JOBS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("jobs");
 
 const WATCH_KEY: &str = "watch_through";
-/// Quote-math generation stored on a curve. A bump rebuilds every curve.
-pub const CURVE_VERSION: u32 = 1;
+/// Fit-document generation stored on a curve. A bump rebuilds every curve.
+pub const CURVE_VERSION: u32 = 2;
 /// Sampling scheme stored on a quote row. A bump re-reads every quoter.
 pub const QUOTE_VERSION: u32 = 1;
 pub const TICK_PAGE: u32 = 512;
@@ -410,44 +411,12 @@ pub fn is_canonical(detail: &PoolDetail) -> bool {
 
 pub fn derive_curve(detail: &PoolDetail, generation: u64) -> Result<CurveRecord, String> {
     let (kind, id) = detail_id(detail)?;
-    if let PoolDetail::Concentrated(pool) = detail {
-        if pool.sqrt_price_x96.is_zero() {
-            // Tag 0, reason 5: the pool was created and never initialized.
-            return Ok(CurveRecord {
-                kind,
-                id,
-                generation,
-                version: CURVE_VERSION,
-                payload: vec![0, 5],
-            });
-        }
-    }
-    let payload = if !is_canonical(detail) {
-        let mut payload = vec![0];
-        payload.push(skip_reason(detail));
-        payload
-    } else if let PoolDetail::Concentrated(pool) = detail {
-        let ladder = concentrated_ladder(pool)?;
-        let (immutable, mutable) = split_detail(detail)?;
-        let mut payload = vec![2];
-        push_bytes(&mut payload, &immutable);
-        push_bytes(&mut payload, &mutable.body);
-        push_ladder(&mut payload, &ladder.zero_for_one);
-        push_ladder(&mut payload, &ladder.one_for_zero);
-        payload
-    } else {
-        let (immutable, mutable) = split_detail(detail)?;
-        let mut payload = vec![1];
-        push_bytes(&mut payload, &immutable);
-        push_bytes(&mut payload, &mutable.body);
-        payload
-    };
     Ok(CurveRecord {
         kind,
         id,
         generation,
         version: CURVE_VERSION,
-        payload,
+        payload: crate::fit::curve_payload(detail),
     })
 }
 
@@ -473,74 +442,51 @@ pub fn estimate(
 
 fn estimate_payload(
     payload: &[u8],
-    kind: u8,
-    id: B256,
+    _kind: u8,
+    _id: B256,
     token_in: Address,
     token_out: Address,
     amount_in: U256,
 ) -> Result<Quote, String> {
-    if payload.is_empty() {
-        return Err("curve".into());
+    let fit = crate::fit_formula::decode_fit(payload)?;
+    if fit.reason != 0 {
+        return Err("not canonical".into());
     }
-    match payload[0] {
-        0 => Err("not canonical".into()),
-        1 => {
-            let mut reader = Reader::new(&payload[1..]);
-            let immutable = reader.bytes()?;
-            let body = reader.bytes()?;
-            reader.finish()?;
-            join_detail(&immutable, &body, &[], kind, id)?.quote(token_in, token_out, amount_in)
+    let Some(direction) = fit
+        .directions
+        .iter()
+        .find(|item| item.token_in == token_in && item.token_out == token_out)
+    else {
+        return Err("no quote".into());
+    };
+    if amount_in.is_zero() {
+        return Ok(Quote {
+            amount_in,
+            amount_out: U256::ZERO,
+            fee_paid: U256::ZERO,
+            exhausted: false,
+        });
+    }
+    let input = bigint_from_u256(amount_in);
+    let output = crate::fit_select::eval_formula(&direction.formula, &input)
+        .ok_or_else(|| "no quote".to_string())?;
+    Ok(Quote {
+        amount_in,
+        amount_out: u256_from_bigint(&output)?,
+        fee_paid: u256_from_bigint(&fee_paid_of(&direction.formula, &input))?,
+        exhausted: false,
+    })
+}
+
+/// The fee a product quote withholds from the input.
+fn fee_paid_of(formula: &crate::fit_formula::Formula, amount: &BigInt) -> BigInt {
+    match formula {
+        crate::fit_formula::Formula::Product { fee, denom, .. }
+            if !denom.is_zero() && fee <= denom =>
+        {
+            amount - (amount * (denom - fee)) / denom
         }
-        2 => {
-            let mut reader = Reader::new(&payload[1..]);
-            let immutable = reader.bytes()?;
-            let body = reader.bytes()?;
-            let zero_for_one = reader.ladder()?;
-            let one_for_zero = reader.ladder()?;
-            reader.finish()?;
-            let PoolDetail::Concentrated(pool) = join_detail(&immutable, &body, &[], kind, id)?
-            else {
-                return Err("ladder pool".into());
-            };
-            quote_ladder(
-                &pool,
-                &crate::detail::ConcentratedLadder {
-                    zero_for_one,
-                    one_for_zero,
-                },
-                token_in,
-                token_out,
-                amount_in,
-            )
-        }
-        3 => {
-            let fit = crate::fit_formula::decode_fit(payload)?;
-            if let Some(direction) = fit
-                .directions
-                .iter()
-                .find(|item| item.token_in == token_in && item.token_out == token_out)
-            {
-                if amount_in.is_zero() {
-                    return Ok(Quote {
-                        amount_in,
-                        amount_out: U256::ZERO,
-                        fee_paid: U256::ZERO,
-                        exhausted: false,
-                    });
-                }
-                let input = bigint_from_u256(amount_in);
-                let output = crate::fit_select::eval_formula(&direction.formula, &input)
-                    .ok_or_else(|| "no quote".to_string())?;
-                return Ok(Quote {
-                    amount_in,
-                    amount_out: u256_from_bigint(&output)?,
-                    fee_paid: U256::ZERO,
-                    exhausted: false,
-                });
-            }
-            estimate_payload(&fit.fallback, kind, id, token_in, token_out, amount_in)
-        }
-        _ => Err("curve tag".into()),
+        _ => BigInt::from(0),
     }
 }
 
@@ -891,6 +837,33 @@ impl Catalog {
             }
             let bytes = encode_curve(curve);
             curves.insert(key.as_slice(), bytes.as_slice())?;
+        }
+        write.commit()?;
+        Ok(())
+    }
+
+    /// Store a page of curves in one commit. A generation mismatch stores none of them.
+    pub fn put_curves(&self, curves: &[CurveRecord]) -> eyre::Result<()> {
+        if curves.is_empty() {
+            return Ok(());
+        }
+        let mut write = self.entities.begin_write()?;
+        write.set_durability(Durability::Immediate);
+        {
+            let mutable_table = write.open_table(MUTABLE)?;
+            let mut table = write.open_table(CURVES)?;
+            for curve in curves {
+                let key = entity_key(curve.kind, &curve.id);
+                let Some(stored) = mutable_table.get(key.as_slice())? else {
+                    return Err(eyre::eyre!("curve has no mutable row"));
+                };
+                let view = decode_mutable(stored.value())?;
+                if view.generation != curve.generation {
+                    return Err(eyre::eyre!("curve generation"));
+                }
+                let bytes = encode_curve(curve);
+                table.insert(key.as_slice(), bytes.as_slice())?;
+            }
         }
         write.commit()?;
         Ok(())
@@ -1698,7 +1671,7 @@ async fn drive_ticks<S: EntityStore>(
     Ok(())
 }
 
-fn curve_for_snapshot(
+pub(crate) fn curve_for_snapshot(
     detail: &PoolDetail,
     quotes: Option<&QuoteRecord>,
     generation: u64,
@@ -2125,7 +2098,7 @@ fn detail_id(detail: &PoolDetail) -> Result<(u8, B256), String> {
     })
 }
 
-fn skip_reason(detail: &PoolDetail) -> u8 {
+pub(crate) fn skip_reason(detail: &PoolDetail) -> u8 {
     match detail {
         PoolDetail::Metric(_) => 1,
         PoolDetail::Curve(_) => 2,
@@ -2202,23 +2175,6 @@ impl<'a> Reader<'a> {
         Ok(self.take(len)?.to_vec())
     }
 
-    fn ladder(&mut self) -> Result<Vec<crate::detail::LadderStep>, String> {
-        let n = self.u32()? as usize;
-        let mut steps = Vec::with_capacity(n);
-        for _ in 0..n {
-            steps.push(crate::detail::LadderStep {
-                liquidity: self.u128()?,
-                sqrt_start: self.word()?,
-                sqrt_end: self.word()?,
-                tick_end: self.i32()?,
-                input: self.word()?,
-                output: self.word()?,
-                fee: self.word()?,
-            });
-        }
-        Ok(steps)
-    }
-
     fn finish(&self) -> Result<(), String> {
         if self.at == self.bytes.len() {
             Ok(())
@@ -2278,19 +2234,6 @@ fn push_option_word(out: &mut Vec<u8>, value: Option<U256>) {
             push_word(out, value);
         }
         None => push_u8(out, 0),
-    }
-}
-
-fn push_ladder(out: &mut Vec<u8>, steps: &[crate::detail::LadderStep]) {
-    push_u32(out, steps.len() as u32);
-    for step in steps {
-        push_u128(out, step.liquidity);
-        push_word(out, step.sqrt_start);
-        push_word(out, step.sqrt_end);
-        push_i32(out, step.tick_end);
-        push_word(out, step.input);
-        push_word(out, step.output);
-        push_word(out, step.fee);
     }
 }
 
@@ -3619,6 +3562,6 @@ mod tests {
         let curve = derive_curve(&detail, 3).unwrap();
         assert_eq!(curve.kind, UNI_V3);
         assert_eq!(curve.id, row(1).id);
-        assert_eq!(curve.payload, vec![0, 5]);
+        assert_eq!(curve.payload, vec![1, 5, 0, 0, 0, 0]);
     }
 }

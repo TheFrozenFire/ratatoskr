@@ -1,8 +1,8 @@
 //! Closed form stored on a fitted curve.
 //!
 //! A search returns one of these instead of a closure. Evaluation rebuilds the
-//! same quote the search scored, including off the sample grid. The bytes are
-//! the tag-3 payload's direction entry.
+//! same quote the search scored, including off the sample grid. A curve payload
+//! is this document: a reason, then one stored formula per direction.
 
 use alloy_primitives::Address;
 use num_bigint::BigInt;
@@ -210,9 +210,14 @@ pub(crate) struct StoredFit {
 }
 
 pub(crate) struct FitPayload {
-    pub fallback: Vec<u8>,
+    /// Zero when `directions` is the fit. Any other value is a skip reason and
+    /// the direction list is empty.
+    pub reason: u8,
     pub directions: Vec<StoredFit>,
 }
+
+/// The only curve-payload tag. Older tags are not read.
+pub(crate) const FIT_TAG: u8 = 1;
 
 struct Cursor<'a> {
     bytes: &'a [u8],
@@ -855,12 +860,17 @@ impl Formula {
     }
 }
 
-pub(crate) fn encode_fit(fallback: &[u8], directions: &[StoredFit]) -> Vec<u8> {
-    let mut out = vec![3];
-    push_u32(&mut out, u32::try_from(fallback.len()).unwrap_or(u32::MAX));
-    out.extend_from_slice(fallback);
-    let count = u32::try_from(directions.len()).unwrap_or(u32::MAX);
+pub(crate) fn encode_fit(reason: u8, directions: &[StoredFit]) -> Vec<u8> {
+    let mut out = vec![FIT_TAG, reason];
+    let count = if reason == 0 {
+        u32::try_from(directions.len()).unwrap_or(u32::MAX)
+    } else {
+        0
+    };
     push_u32(&mut out, count);
+    if reason != 0 {
+        return out;
+    }
     for direction in directions.iter().take(count as usize) {
         out.extend_from_slice(direction.token_in.as_slice());
         out.extend_from_slice(direction.token_out.as_slice());
@@ -875,13 +885,15 @@ pub(crate) fn encode_fit(fallback: &[u8], directions: &[StoredFit]) -> Vec<u8> {
 }
 
 pub(crate) fn decode_fit(payload: &[u8]) -> Result<FitPayload, String> {
-    if payload.first() != Some(&3) {
+    if payload.first() != Some(&FIT_TAG) {
         return Err("fit".to_string());
     }
     let mut cursor = Cursor::new(&payload[1..]);
-    let fallback_len = cursor.u32()? as usize;
-    let fallback = cursor.take(fallback_len)?.to_vec();
+    let reason = cursor.u8()?;
     let count = cursor.list_len(49)?;
+    if reason != 0 && count != 0 {
+        return Err("fit".to_string());
+    }
     let mut directions = Vec::with_capacity(count);
     for _ in 0..count {
         let token_in = Address::from_slice(cursor.take(20)?);
@@ -900,5 +912,5 @@ pub(crate) fn decode_fit(payload: &[u8]) -> Result<FitPayload, String> {
         });
     }
     cursor.done()?;
-    Ok(FitPayload { fallback, directions })
+    Ok(FitPayload { reason, directions })
 }

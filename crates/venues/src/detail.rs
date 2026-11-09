@@ -1874,6 +1874,9 @@ pub(crate) fn concentrated_ladder(pool: &Concentrated) -> Result<ConcentratedLad
     })
 }
 
+// The stored curve no longer embeds the ladder. The concentrated quote test
+// still prices spans through this helper.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn quote_ladder(
     pool: &Concentrated,
     ladder: &ConcentratedLadder,

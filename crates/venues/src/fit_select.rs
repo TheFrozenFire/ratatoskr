@@ -3895,7 +3895,7 @@ pub fn logistic_outs(
     amounts.iter().map(|amount| predict(amount.clone())).collect()
 }
 
-/// Decode a formula or a tag-3 payload and quote `amount`. Panics are bugs.
+/// Decode a formula or a fit payload and quote `amount`. Panics are bugs.
 pub fn poke_formula(bytes: &[u8], amount: &BigInt) {
     if let Ok(formula) = Formula::decode(bytes) {
         let _ = eval_formula(&formula, amount);
@@ -3912,7 +3912,7 @@ pub fn poke_formula(bytes: &[u8], amount: &BigInt) {
         for direction in &fit.directions {
             let _ = eval_formula(&direction.formula, amount);
         }
-        let encoded = crate::fit_formula::encode_fit(&fit.fallback, &fit.directions);
+        let encoded = crate::fit_formula::encode_fit(fit.reason, &fit.directions);
         let again = crate::fit_formula::decode_fit(&encoded).expect("encoded fit");
         if again.directions.len() != fit.directions.len() {
             panic!("fit direction count changed");
@@ -4165,7 +4165,7 @@ mod tests {
             name: "cap".to_string(),
             formula: formula.clone(),
         };
-        let bytes = crate::fit_formula::encode_fit(&[], &[stored]);
+        let bytes = crate::fit_formula::encode_fit(0, &[stored]);
         let decoded = crate::fit_formula::decode_fit(&bytes).unwrap();
         assert!(decoded.directions[0].formula == formula);
         assert_eq!(eval_formula(&decoded.directions[0].formula, &bi(50)).unwrap(), bi(67));

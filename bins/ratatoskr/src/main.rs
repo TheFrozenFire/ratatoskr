@@ -61,6 +61,10 @@ struct Args {
     /// Print stored state counts for `--data-dir` and exit.
     #[arg(long)]
     summarize: bool,
+    /// Rewrite every stored curve from the current fitter, then exit.
+    /// Combine with `--export-fit` to write the extract after the rewrite.
+    #[arg(long)]
+    refit: bool,
     /// Copy stored quote samples for `--data-dir` into a JSONL file and exit.
     #[arg(long)]
     export_fit: Option<PathBuf>,
@@ -134,6 +138,9 @@ async fn supervise(args: Args) -> eyre::Result<()> {
     let services = parse_services(&args.services)?;
     let pipelines = parse_pipelines(&args.pipeline)?;
     let egress = egress_from(args.bind4, args.bind6)?;
+    if args.refit && args.data_dir.is_none() {
+        return Err(eyre::eyre!("--refit needs --data-dir"));
+    }
     if args.export_fit.is_some() && args.data_dir.is_none() {
         return Err(eyre::eyre!("--export-fit needs --data-dir"));
     }
@@ -171,6 +178,19 @@ async fn supervise(args: Args) -> eyre::Result<()> {
         println!("chain_ok {}", report.chain_ok);
         println!("chain_fail {}", report.chain_fail);
         println!("chain_absent {}", report.chain_absent);
+        if args.export_fit.is_none() {
+            return Ok(());
+        }
+    }
+    if args.refit {
+        let venues_path = paths.venues.clone();
+        let wrote = tokio::task::spawn_blocking(move || {
+            let catalog = venues::Catalog::open(&venues_path)?;
+            venues::refit_curves(&catalog)
+        })
+        .await
+        .wrap_err("refit task")??;
+        println!("curves {wrote}");
         if args.export_fit.is_none() {
             return Ok(());
         }
