@@ -3821,6 +3821,27 @@ mod tests {
     }
 
     #[test]
+    fn logistic_formula_round_trips_off_the_grid() {
+        let formula = Formula::Logistic {
+            slope: rat_i(2),
+            rate: BigRational::new(bi(1), bi(100)),
+            knee: rat_i(100),
+        };
+        let stored = crate::fit_formula::StoredFit {
+            token_in: alloy_primitives::Address::ZERO,
+            token_out: alloy_primitives::Address::ZERO,
+            score: 0,
+            name: "cap".to_string(),
+            formula: formula.clone(),
+        };
+        let bytes = crate::fit_formula::encode_fit(&[], &[stored]);
+        let decoded = crate::fit_formula::decode_fit(&bytes).unwrap();
+        assert!(decoded.directions[0].formula == formula);
+        assert_eq!(eval_formula(&decoded.directions[0].formula, &bi(50)).unwrap(), bi(67));
+        assert_eq!(eval_formula(&decoded.directions[0].formula, &bi(200)).unwrap(), bi(199));
+    }
+
+    #[test]
     fn logistic_matches_decimal_context() {
         let predict = logistic_quote(&rat_i(2), &BigRational::new(bi(1), bi(100)), &rat_i(100));
         assert_eq!(predict(bi(50)).unwrap(), bi(67));

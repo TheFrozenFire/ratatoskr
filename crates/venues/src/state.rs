@@ -21,6 +21,7 @@ use crate::{
     V3_FORK,
 };
 use alloy_primitives::{keccak256, Address, B256, U256};
+use num_bigint::{BigInt, Sign};
 use eyre::WrapErr;
 use ipc::HistoryPeer;
 use model::{BlockRecord, NormalizedLog};
@@ -460,7 +461,24 @@ pub fn estimate(
     if curve.version != CURVE_VERSION || curve.generation != generation {
         return Err("curve generation".into());
     }
-    let payload = curve.payload.as_slice();
+    estimate_payload(
+        &curve.payload,
+        curve.kind,
+        curve.id,
+        token_in,
+        token_out,
+        amount_in,
+    )
+}
+
+fn estimate_payload(
+    payload: &[u8],
+    kind: u8,
+    id: B256,
+    token_in: Address,
+    token_out: Address,
+    amount_in: U256,
+) -> Result<Quote, String> {
     if payload.is_empty() {
         return Err("curve".into());
     }
@@ -471,8 +489,7 @@ pub fn estimate(
             let immutable = reader.bytes()?;
             let body = reader.bytes()?;
             reader.finish()?;
-            join_detail(&immutable, &body, &[], curve.kind, curve.id)?
-                .quote(token_in, token_out, amount_in)
+            join_detail(&immutable, &body, &[], kind, id)?.quote(token_in, token_out, amount_in)
         }
         2 => {
             let mut reader = Reader::new(&payload[1..]);
@@ -481,8 +498,7 @@ pub fn estimate(
             let zero_for_one = reader.ladder()?;
             let one_for_zero = reader.ladder()?;
             reader.finish()?;
-            let PoolDetail::Concentrated(pool) =
-                join_detail(&immutable, &body, &[], curve.kind, curve.id)?
+            let PoolDetail::Concentrated(pool) = join_detail(&immutable, &body, &[], kind, id)?
             else {
                 return Err("ladder pool".into());
             };
@@ -497,8 +513,47 @@ pub fn estimate(
                 amount_in,
             )
         }
+        3 => {
+            let fit = crate::fit_formula::decode_fit(payload)?;
+            if let Some(direction) = fit
+                .directions
+                .iter()
+                .find(|item| item.token_in == token_in && item.token_out == token_out)
+            {
+                if amount_in.is_zero() {
+                    return Ok(Quote {
+                        amount_in,
+                        amount_out: U256::ZERO,
+                        fee_paid: U256::ZERO,
+                        exhausted: false,
+                    });
+                }
+                let input = bigint_from_u256(amount_in);
+                let output = crate::fit_select::eval_formula(&direction.formula, &input)
+                    .ok_or_else(|| "no quote".to_string())?;
+                return Ok(Quote {
+                    amount_in,
+                    amount_out: u256_from_bigint(&output)?,
+                    fee_paid: U256::ZERO,
+                    exhausted: false,
+                });
+            }
+            estimate_payload(&fit.fallback, kind, id, token_in, token_out, amount_in)
+        }
         _ => Err("curve tag".into()),
     }
+}
+
+fn bigint_from_u256(value: U256) -> BigInt {
+    BigInt::from_bytes_be(Sign::Plus, &value.to_be_bytes::<32>())
+}
+
+fn u256_from_bigint(value: &BigInt) -> Result<U256, String> {
+    let (sign, bytes) = value.to_bytes_be();
+    if sign == Sign::Minus || bytes.len() > 32 {
+        return Err("quote".into());
+    }
+    Ok(U256::from_be_slice(&bytes))
 }
 
 /// Classify one log into a dirty hint. Factory creation logs are ignored.
@@ -1643,6 +1698,19 @@ async fn drive_ticks<S: EntityStore>(
     Ok(())
 }
 
+fn curve_for_snapshot(
+    detail: &PoolDetail,
+    quotes: Option<&QuoteRecord>,
+    generation: u64,
+) -> Result<CurveRecord, String> {
+    if let Some(quotes) = quotes {
+        if let Some(curve) = crate::fit::fitted_curve(detail, &quotes.payload, generation)? {
+            return Ok(curve);
+        }
+    }
+    derive_curve(detail, generation)
+}
+
 async fn drive_curves<S: EntityStore>(
     store: &S,
     jobs: &[WorkJob],
@@ -1674,7 +1742,7 @@ async fn drive_curves<S: EntityStore>(
                 continue;
             }
         };
-        let curve = match derive_curve(&detail, mutable.generation) {
+        let curve = match curve_for_snapshot(&detail, state.quotes.as_ref(), mutable.generation) {
             Ok(curve) => curve,
             Err(err) => {
                 keep_or_drop(job, err, give_up_after, &mut done, &mut failed, notes);

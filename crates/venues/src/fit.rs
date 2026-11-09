@@ -24,9 +24,12 @@ use crate::catalog::{
     UNI_V2, UNI_V3, UNI_V4, V2_FORK, V3_FORK,
 };
 use crate::detail::{product_fee_pips, PoolDetail, Quote};
+use crate::fit_formula::{encode_fit, StoredFit};
+use crate::fit_select::{choose, labels_of};
 use crate::state::{
-    curve_is_current, curve_job, is_canonical, join_detail, keep_or_drop, quote_is_current,
-    unix_now, CurveRecord, PoolState, QuoteRecord, WorkJob, QUOTE_VERSION,
+    curve_is_current, curve_job, derive_curve, is_canonical, join_detail, keep_or_drop,
+    quote_is_current, unix_now, CurveRecord, PoolState, QuoteRecord, WorkJob, CURVE_VERSION,
+    QUOTE_VERSION,
 };
 use crate::Catalog;
 use crate::EntityStore;
@@ -2041,6 +2044,49 @@ fn sample_json(sample: &Sample) -> Value {
     })
 }
 
+/// Fit each labeled direction. No accepted formula keeps the canonical curve.
+pub(crate) fn fitted_curve(
+    detail: &PoolDetail,
+    quote_payload: &[u8],
+    generation: u64,
+) -> Result<Option<CurveRecord>, String> {
+    let Ok(value) = serde_json::from_slice::<Value>(quote_payload) else {
+        return Err("quote payload".into());
+    };
+    let Some(directions) = value.get("directions").and_then(Value::as_array) else {
+        return Ok(None);
+    };
+    let state = state_json(detail);
+    let mut fits = Vec::new();
+    for direction in directions {
+        let rows = labels_of(direction)?;
+        if rows.is_empty() {
+            continue;
+        }
+        let Some(chosen) = choose(&state, direction, &rows)? else {
+            continue;
+        };
+        fits.push(StoredFit {
+            token_in: parse_address(direction.get("token_in"))?,
+            token_out: parse_address(direction.get("token_out"))?,
+            score: chosen.score,
+            name: chosen.name.to_string(),
+            formula: chosen.formula,
+        });
+    }
+    if fits.is_empty() {
+        return Ok(None);
+    }
+    let fallback = derive_curve(detail, generation)?;
+    Ok(Some(CurveRecord {
+        kind: fallback.kind,
+        id: fallback.id,
+        generation: fallback.generation,
+        version: CURVE_VERSION,
+        payload: encode_fit(&fallback.payload, &fits),
+    }))
+}
+
 fn state_json(detail: &PoolDetail) -> Value {
     match detail {
         PoolDetail::ConstantProduct(pool) => json!({
@@ -2374,6 +2420,66 @@ mod tests {
             .quote(pool.token0, pool.token1, max_in)
             .unwrap();
         assert_eq!(quote.amount_out, U256::from(990u64));
+    }
+
+    #[test]
+    fn a_fitted_product_quotes_off_the_grid_and_falls_back() {
+        let token0 = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let token1 = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        let detail = PoolDetail::ConstantProduct(ConstantProduct {
+            kind: UNI_V2,
+            id: B256::ZERO,
+            pair: address!("1111111111111111111111111111111111111111"),
+            token0,
+            token1,
+            reserve0: U256::from(1_000_000u64),
+            reserve1: U256::from(2_000_000u64),
+            fee_pips: Some(3000),
+            timestamp: 1,
+            flags: 0,
+        });
+        let left = U256::from(1_000u64);
+        let right = U256::from(4_000u64);
+        let left_quote = detail.quote(token0, token1, left).unwrap();
+        let right_quote = detail.quote(token0, token1, right).unwrap();
+        let payload = json!({
+            "directions": [{
+                "token_in": format!("{token0}"),
+                "token_out": format!("{token1}"),
+                "samples": [
+                    {
+                        "amount_in": left.to_string(),
+                        "chain_out": left_quote.amount_out.to_string(),
+                        "fraction": "0.1",
+                    },
+                    {
+                        "amount_in": right.to_string(),
+                        "chain_out": right_quote.amount_out.to_string(),
+                        "fraction": "0.5",
+                    },
+                ],
+            }],
+        });
+        let bytes = serde_json::to_vec(&payload).unwrap();
+        assert!(fitted_curve(&detail, b"{}", 7).unwrap().is_none());
+        let curve = fitted_curve(&detail, &bytes, 7).unwrap().expect("fit");
+        assert_eq!(curve.version, CURVE_VERSION);
+        assert_eq!(curve.generation, 7);
+        assert_eq!(curve.payload[0], 3);
+        let off = U256::from(2_500u64);
+        let fitted = crate::state::estimate(&curve, 7, token0, token1, off).unwrap();
+        let direct = detail.quote(token0, token1, off).unwrap();
+        assert_eq!(fitted.amount_out, direct.amount_out);
+        assert_eq!(fitted.fee_paid, U256::ZERO);
+        assert!(!fitted.exhausted);
+        let zero = crate::state::estimate(&curve, 7, token0, token1, U256::ZERO).unwrap();
+        assert_eq!(zero.amount_out, U256::ZERO);
+        assert_eq!(zero.fee_paid, U256::ZERO);
+        let back_in = U256::from(2_500u64);
+        let back = crate::state::estimate(&curve, 7, token1, token0, back_in).unwrap();
+        let direct_back = detail.quote(token1, token0, back_in).unwrap();
+        assert_eq!(back, direct_back);
+        assert!(direct_back.fee_paid > U256::ZERO);
     }
 
     #[test]

@@ -4,8 +4,6 @@
 //! same quote the search scored, including off the sample grid. The bytes are
 //! the tag-3 payload's direction entry.
 
-#![allow(dead_code)]
-
 use alloy_primitives::Address;
 use num_bigint::BigInt;
 use num_rational::BigRational;
@@ -827,6 +825,7 @@ impl Formula {
         })
     }
 
+    #[allow(dead_code)]
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, String> {
         let mut cursor = Cursor::new(bytes);
         let formula = Self::decode_from(&mut cursor)?;
