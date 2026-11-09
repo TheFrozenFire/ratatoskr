@@ -1243,7 +1243,9 @@ impl Catalog {
 
 /// One pass of the state pipeline. The caller loops until shutdown.
 ///
-/// A pass reconciles only when asked. Each pass leases a single stage.
+/// A pass reconciles only when asked. Each pass runs every stage that has
+/// work ready. A pool's ticks, quotes, and curve are not held behind the
+/// rest of an earlier stage.
 pub async fn run<S, P>(
     store: &S,
     peer: Option<&P>,
@@ -1343,14 +1345,18 @@ async fn sleep_or_stop(stop: &mut tokio::sync::watch::Receiver<bool>) {
     }
 }
 
-async fn drive_one<S: EntityStore>(
+async fn drive_one<S>(
     store: &S,
     rpc: &Rpc,
     block: u64,
     now: u64,
     give_up_after: u32,
     notes: &mut Vec<String>,
-) -> eyre::Result<bool> {
+) -> eyre::Result<bool>
+where
+    S: EntityStore + Clone + 'static,
+{
+    let mut claimed = Vec::new();
     for stage in [
         STAGE_IMMUTABLE,
         STAGE_MUTABLE,
@@ -1358,38 +1364,86 @@ async fn drive_one<S: EntityStore>(
         STAGE_QUOTE,
         STAGE_CURVE,
     ] {
-        let lease = if stage == STAGE_QUOTE {
-            600
-        } else {
-            LEASE_SECS
-        };
+        let lease = if stage == STAGE_QUOTE { 600 } else { LEASE_SECS };
         let limit = if stage == STAGE_QUOTE {
             QUOTE_BATCH
         } else {
             DETAIL_BATCH
         };
         let jobs = store.claim_work(stage, limit, now, lease).await?;
-        if jobs.is_empty() {
-            continue;
+        if !jobs.is_empty() {
+            claimed.push((stage, jobs));
         }
-        let started = std::time::Instant::now();
-        crate::metrics::begin_batch(stage, jobs.len() as u64);
-        let result = match stage {
-            STAGE_IMMUTABLE | STAGE_MUTABLE => {
-                drive_details(store, rpc, block, stage, &jobs, give_up_after, notes).await
-            }
-            STAGE_TICKS => drive_ticks(store, rpc, &jobs, now, give_up_after, notes).await,
-            STAGE_QUOTE => crate::fit::drive_quotes(store, rpc, &jobs, give_up_after, notes).await,
-            STAGE_CURVE => drive_curves(store, &jobs, give_up_after, notes).await,
-            _ => Ok(()),
-        };
-        let ms = started.elapsed().as_millis() as u64;
-        crate::metrics::record_batch(stage, jobs.len() as u64, ms);
-        result?;
-        tracing::info!(stage, jobs = jobs.len(), ms, "state batch");
-        return Ok(true);
     }
-    Ok(false)
+    if claimed.is_empty() {
+        return Ok(false);
+    }
+    let handle = tokio::runtime::Handle::current();
+    let mut threads = Vec::with_capacity(claimed.len());
+    for (stage, jobs) in claimed {
+        let store = store.clone();
+        let rpc = rpc.clone();
+        let handle = handle.clone();
+        threads.push(std::thread::spawn(move || {
+            handle.block_on(run_stage(
+                store,
+                rpc,
+                stage,
+                jobs,
+                block,
+                now,
+                give_up_after,
+            ))
+        }));
+    }
+    let mut failed = None;
+    for thread in threads {
+        match thread.join() {
+            Ok(Ok(batch_notes)) => notes.extend(batch_notes),
+            Ok(Err(err)) if failed.is_none() => failed = Some(err),
+            Ok(Err(_)) => {}
+            Err(_) => {
+                if failed.is_none() {
+                    failed = Some(eyre::eyre!("stage task panicked"));
+                }
+            }
+        }
+    }
+    if let Some(err) = failed {
+        return Err(err);
+    }
+    Ok(true)
+}
+
+async fn run_stage<S: EntityStore>(
+    store: S,
+    rpc: Rpc,
+    stage: u8,
+    jobs: Vec<WorkJob>,
+    block: u64,
+    now: u64,
+    give_up_after: u32,
+) -> eyre::Result<Vec<String>> {
+    let count = jobs.len() as u64;
+    crate::metrics::begin_batch(stage, count);
+    let started = std::time::Instant::now();
+    let mut notes = Vec::new();
+    let result = match stage {
+        STAGE_IMMUTABLE | STAGE_MUTABLE => {
+            drive_details(&store, &rpc, block, stage, &jobs, give_up_after, &mut notes).await
+        }
+        STAGE_TICKS => drive_ticks(&store, &rpc, &jobs, now, give_up_after, &mut notes).await,
+        STAGE_QUOTE => {
+            crate::fit::drive_quotes(&store, &rpc, &jobs, give_up_after, &mut notes).await
+        }
+        STAGE_CURVE => drive_curves(&store, &jobs, give_up_after, &mut notes).await,
+        _ => Ok(()),
+    };
+    let ms = started.elapsed().as_millis() as u64;
+    crate::metrics::record_batch(stage, count, ms);
+    tracing::info!(stage, jobs = count, ms, "state batch");
+    result?;
+    Ok(notes)
 }
 
 async fn drive_details<S: EntityStore>(

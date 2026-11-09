@@ -7,22 +7,30 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, Gauge, Paragraph, Row, Table, Wrap},
+    text::{Line, Span},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap},
     Terminal,
 };
 use serde_json::Value;
+use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
+
+const RATE_WINDOW: Duration = Duration::from_secs(10);
+
+struct Mark {
+    at: Instant,
+    jobs: Vec<u64>,
+}
 
 struct View {
     snap: Option<Value>,
     fetched: Option<Instant>,
     error: String,
-    prev_jobs: Vec<(String, u64)>,
-    prev_at: Option<Instant>,
+    history: VecDeque<Mark>,
     rates: Vec<f64>,
 }
 
@@ -36,8 +44,7 @@ pub fn run(base: &str) -> eyre::Result<()> {
         snap: None,
         fetched: None,
         error: String::new(),
-        prev_jobs: Vec::new(),
-        prev_at: None,
+        history: VecDeque::new(),
         rates: Vec::new(),
     };
     let result = loop {
@@ -50,14 +57,20 @@ pub fn run(base: &str) -> eyre::Result<()> {
                 }
             }
         }
-        match fetch(&url) {
-            Ok(snap) => {
-                view.note(&snap);
-                view.snap = Some(snap);
-                view.fetched = Some(Instant::now());
-                view.error.clear();
+        let due = view
+            .fetched
+            .map(|at| at.elapsed() >= Duration::from_millis(400))
+            .unwrap_or(true);
+        if due {
+            match fetch(&url) {
+                Ok(snap) => {
+                    view.note(&snap);
+                    view.snap = Some(snap);
+                    view.fetched = Some(Instant::now());
+                    view.error.clear();
+                }
+                Err(err) => view.error = err,
             }
-            Err(err) => view.error = err,
         }
         terminal.draw(|frame| draw(frame, &view, &url))?;
     };
@@ -70,66 +83,81 @@ impl View {
     fn note(&mut self, snap: &Value) {
         let now = Instant::now();
         let jobs = stage_jobs(snap);
-        if let Some(prev_at) = self.prev_at {
-            let secs = now.duration_since(prev_at).as_secs_f64();
-            self.rates = jobs
-                .iter()
-                .enumerate()
-                .map(|(index, (_, jobs))| {
-                    let prev = self
-                        .prev_jobs
-                        .get(index)
-                        .map(|(_, jobs)| *jobs)
-                        .unwrap_or(*jobs);
-                    if secs <= 0.0 {
-                        0.0
-                    } else {
-                        jobs.saturating_sub(prev) as f64 / secs
-                    }
-                })
-                .collect();
+        self.history.push_back(Mark { at: now, jobs });
+        while self
+            .history
+            .front()
+            .is_some_and(|mark| now.duration_since(mark.at) > RATE_WINDOW)
+        {
+            self.history.pop_front();
         }
-        self.prev_jobs = jobs;
-        self.prev_at = Some(now);
+        let Some(oldest) = self.history.front() else {
+            return;
+        };
+        let secs = now.duration_since(oldest.at).as_secs_f64();
+        if secs < 1.0 {
+            return;
+        }
+        self.rates = self
+            .history
+            .back()
+            .map(|latest| {
+                latest
+                    .jobs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, jobs)| {
+                        let prev = oldest.jobs.get(index).copied().unwrap_or(0);
+                        jobs.saturating_sub(prev) as f64 / secs
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
     }
 }
 
 fn draw(frame: &mut ratatui::Frame, view: &View, url: &str) {
+    let lines = job_error_lines(view);
+    let error_rows = (lines.len().clamp(1, 6) as u16).saturating_add(2);
     let area = frame.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Min(9),
+            Constraint::Length(4),
             Constraint::Length(3),
             Constraint::Length(8),
+            Constraint::Length(7),
+            Constraint::Length(error_rows),
         ])
         .split(area);
-    frame.render_widget(header(view), chunks[0]);
+    frame.render_widget(header(view, url), chunks[0]);
     frame.render_widget(catalog(view), chunks[1]);
     frame.render_widget(stages(view), chunks[2]);
-    frame.render_widget(active_bar(view), chunks[3]);
-    frame.render_widget(errors(view, url), chunks[4]);
+    frame.render_widget(queues(view, chunks[3]), chunks[3]);
+    frame.render_widget(job_errors(lines), chunks[4]);
 }
 
-fn header(view: &View) -> Paragraph<'static> {
+fn header(view: &View, url: &str) -> Paragraph<'static> {
     let snap = view.snap.as_ref();
     let block = snap.and_then(|snap| snap["block"].as_u64()).unwrap_or(0);
     let uptime = snap
         .and_then(|snap| snap["uptime_ms"].as_u64())
         .unwrap_or(0);
-    let age = view
-        .fetched
-        .map(|at| format!("{:.1}s ago", at.elapsed().as_secs_f64()))
-        .unwrap_or_else(|| "never".into());
+    let link = if view.error.is_empty() {
+        view.fetched
+            .map(|at| format!("snapshot {:.1}s ago", at.elapsed().as_secs_f64()))
+            .unwrap_or_else(|| "snapshot never".into())
+    } else {
+        format!("exporter down ({url}): {}", view.error)
+    };
     let text = format!(
-        " block {block}    up {}    snapshot {age}",
-        format_uptime(uptime)
+        " block {block}    up {}    {link}\n {}",
+        format_uptime(uptime),
+        pace_line(view)
     );
     Paragraph::new(text).block(
         Block::default()
-            .title(" ratatoskr state ")
+            .title(" ratatoskr state    q quits ")
             .borders(Borders::ALL),
     )
 }
@@ -152,38 +180,54 @@ fn catalog(view: &View) -> Paragraph<'static> {
 }
 
 fn stages(view: &View) -> Table<'static> {
-    let rows = view
-        .snap
-        .as_ref()
-        .and_then(|snap| snap["stages"].as_array())
-        .cloned()
-        .unwrap_or_default();
+    let identities = identities_of(view);
+    let rows = stages_of(view);
     let table_rows: Vec<Row> = rows
         .iter()
         .enumerate()
         .map(|(index, stage)| {
             let inflight = stage["inflight"].as_u64().unwrap_or(0);
+            let batches = stage["batches"].as_u64().unwrap_or(0);
+            let queued = stage["queued"].as_u64().unwrap_or(0);
             let mut style = Style::default();
             if inflight > 0 {
                 style = style.fg(Color::Green).add_modifier(Modifier::BOLD);
             }
             let rate = view.rates.get(index).copied().unwrap_or(0.0);
+            let last = if batches == 0 {
+                "—".into()
+            } else {
+                format!("{} ms", stage["last_ms"].as_u64().unwrap_or(0))
+            };
+            let rate_text = if batches == 0 {
+                "—".into()
+            } else {
+                format!("{rate:.1}/s")
+            };
             Row::new(vec![
-                stage["name"].as_str().unwrap_or("").to_string(),
-                commas(stage["queued"].as_u64().unwrap_or(0)),
-                commas(stage["stored"].as_u64().unwrap_or(0)),
-                commas(stage["batches"].as_u64().unwrap_or(0)),
-                commas(stage["jobs"].as_u64().unwrap_or(0)),
-                inflight.to_string(),
-                format!("{} ms", stage["last_ms"].as_u64().unwrap_or(0)),
-                format!("{rate:.1}/s"),
-                spark(&stage["samples_ms"]),
+                Cell::from(stage["name"].as_str().unwrap_or("").to_string()),
+                num_cell(queued),
+                right_cell(percent(queued, identities)),
+                num_cell(batches),
+                num_cell(stage["jobs"].as_u64().unwrap_or(0)),
+                num_cell(inflight),
+                right_cell(last),
+                right_cell(rate_text),
+                Cell::from(spark(&stage["samples_ms"])),
             ])
             .style(style)
         })
         .collect();
-    let header = Row::new([
-        "stage", "queued", "stored", "batches", "jobs", "now", "last", "rate", "recent",
+    let header = Row::new(vec![
+        Cell::from("stage"),
+        right_cell("queued"),
+        right_cell("left"),
+        right_cell("batches"),
+        right_cell("jobs"),
+        right_cell("now"),
+        right_cell("last"),
+        right_cell("rate"),
+        Cell::from("batch ms"),
     ])
     .style(Style::default().add_modifier(Modifier::BOLD));
     Table::new(
@@ -191,9 +235,9 @@ fn stages(view: &View) -> Table<'static> {
         [
             Constraint::Length(12),
             Constraint::Length(12),
-            Constraint::Length(12),
+            Constraint::Length(8),
             Constraint::Length(10),
-            Constraint::Length(12),
+            Constraint::Length(10),
             Constraint::Length(6),
             Constraint::Length(10),
             Constraint::Length(10),
@@ -204,84 +248,183 @@ fn stages(view: &View) -> Table<'static> {
     .block(Block::default().title(" stages ").borders(Borders::ALL))
 }
 
-fn active_bar(view: &View) -> Gauge<'static> {
-    let snap = view.snap.as_ref();
-    let identities = snap
-        .and_then(|snap| snap["identities"].as_u64())
-        .unwrap_or(0);
-    let stages = snap
-        .and_then(|snap| snap["stages"].as_array())
-        .cloned()
-        .unwrap_or_default();
+fn queues(view: &View, area: Rect) -> Paragraph<'static> {
+    let identities = identities_of(view);
+    let width = area.width.saturating_sub(36).clamp(12, 48) as usize;
+    let lines = stages_of(view)
+        .iter()
+        .map(|stage| {
+            let name = stage["name"].as_str().unwrap_or("");
+            let queued = stage["queued"].as_u64().unwrap_or(0);
+            let inflight = stage["inflight"].as_u64().unwrap_or(0);
+            let ratio = ratio(queued, identities);
+            let style = if inflight > 0 {
+                Style::default().fg(Color::Green)
+            } else if queued > 0 {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            Line::from(vec![
+                Span::styled(format!(" {name:<10}"), style),
+                Span::styled(format!(" {:>10}", commas(queued)), style),
+                Span::styled(format!(" {:>6}  ", percent(queued, identities)), style),
+                Span::styled(bar(ratio, width), style),
+            ])
+        })
+        .collect::<Vec<_>>();
+    Paragraph::new(lines).block(
+        Block::default()
+            .title(" jobs waiting ")
+            .borders(Borders::ALL),
+    )
+}
+
+fn pace_line(view: &View) -> String {
+    let stages = stages_of(view);
+    let running: Vec<String> = stages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, stage)| {
+            if stage["inflight"].as_u64().unwrap_or(0) == 0 {
+                return None;
+            }
+            let name = stage["name"].as_str().unwrap_or("stage");
+            let rate = view.rates.get(index).copied().unwrap_or(0.0);
+            Some(format!("{name} {rate:.0}/s"))
+        })
+        .collect();
+    if !running.is_empty() {
+        return running.join("    ");
+    }
+    let identities = identities_of(view);
     let active = stages
         .iter()
-        .find(|stage| stage["inflight"].as_u64().unwrap_or(0) > 0);
-    let (label, ratio) = match active {
-        Some(stage) => {
-            let name = stage["name"].as_str().unwrap_or("stage").to_string();
-            let stored = stage["stored"].as_u64().unwrap_or(0);
-            let ratio = if identities == 0 {
-                0.0
-            } else {
-                (stored as f64 / identities as f64).clamp(0.0, 1.0)
-            };
-            (format!(" {name}  {stored}/{identities} stored"), ratio)
-        }
-        None => (" idle".into(), 0.0),
+        .enumerate()
+        .find(|(_, stage)| stage["queued"].as_u64().unwrap_or(0) > 0);
+    let Some((index, stage)) = active else {
+        return "idle".into();
     };
-    Gauge::default()
-        .block(
-            Block::default()
-                .title(" active stage ")
-                .borders(Borders::ALL),
-        )
-        .gauge_style(Style::default().fg(Color::Cyan))
-        .label(label)
-        .ratio(ratio)
+    let name = stage["name"].as_str().unwrap_or("stage");
+    let queued = stage["queued"].as_u64().unwrap_or(0);
+    let done = identities.saturating_sub(queued);
+    let rate = view.rates.get(index).copied().unwrap_or(0.0);
+    let eta = if rate >= 1.0 {
+        format_duration((queued as f64 / rate) as u64)
+    } else {
+        "—".into()
+    };
+    format!(
+        "{name} {}/{} done    {} left    {rate:.1}/s    eta {eta}",
+        commas(done),
+        commas(identities),
+        commas(queued)
+    )
 }
 
-fn errors(view: &View, url: &str) -> Paragraph<'static> {
-    let mut lines = Vec::new();
-    if !view.error.is_empty() {
-        lines.push(format!(" exporter: {}", view.error));
-    }
+fn job_error_lines(view: &View) -> Vec<Line<'static>> {
     if let Some(snap) = &view.snap {
-        if let Some(errors) = snap["errors"].as_array() {
-            if errors.is_empty() {
-                lines.push(" no stored job errors".into());
-            }
-            for error in errors.iter().take(5) {
-                lines.push(format!(
-                    " {:>8}  {}",
-                    commas(error["count"].as_u64().unwrap_or(0)),
-                    error["error"].as_str().unwrap_or("")
-                ));
-            }
+        let Some(errors) = snap["errors"].as_array() else {
+            return vec![Line::from(" none")];
+        };
+        if errors.is_empty() {
+            return vec![Line::from(" none")];
         }
-    } else if view.error.is_empty() {
-        lines.push(" waiting for the exporter".into());
+        return errors
+            .iter()
+            .take(6)
+            .map(|error| {
+                Line::from(Span::styled(
+                    format!(
+                        " {:>8}  {}",
+                        commas(error["count"].as_u64().unwrap_or(0)),
+                        error["error"].as_str().unwrap_or("")
+                    ),
+                    Style::default().fg(Color::Yellow),
+                ))
+            })
+            .collect();
     }
-    lines.push(format!(" {url}    q quits"));
-    Paragraph::new(lines.join("\n"))
-        .wrap(Wrap { trim: false })
-        .block(Block::default().title(" errors ").borders(Borders::ALL))
+    if view.error.is_empty() {
+        vec![Line::from(" waiting for the exporter")]
+    } else {
+        vec![Line::from(" no snapshot yet")]
+    }
 }
 
-fn stage_jobs(snap: &Value) -> Vec<(String, u64)> {
+fn job_errors(lines: Vec<Line<'static>>) -> Paragraph<'static> {
+    Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(Block::default().title(" job errors ").borders(Borders::ALL))
+}
+
+fn stage_jobs(snap: &Value) -> Vec<u64> {
     snap["stages"]
         .as_array()
         .map(|stages| {
             stages
                 .iter()
-                .map(|stage| {
-                    (
-                        stage["name"].as_str().unwrap_or("").to_string(),
-                        stage["jobs"].as_u64().unwrap_or(0),
-                    )
-                })
+                .map(|stage| stage["jobs"].as_u64().unwrap_or(0))
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn identities_of(view: &View) -> u64 {
+    view.snap
+        .as_ref()
+        .and_then(|snap| snap["identities"].as_u64())
+        .unwrap_or(0)
+}
+
+fn stages_of(view: &View) -> Vec<Value> {
+    view.snap
+        .as_ref()
+        .and_then(|snap| snap["stages"].as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn num_cell(value: u64) -> Cell<'static> {
+    right_cell(commas(value))
+}
+
+fn right_cell(text: impl Into<String>) -> Cell<'static> {
+    Cell::from(Line::from(text.into()).alignment(Alignment::Right))
+}
+
+fn ratio(part: u64, whole: u64) -> f64 {
+    if whole == 0 {
+        0.0
+    } else {
+        (part as f64 / whole as f64).clamp(0.0, 1.0)
+    }
+}
+
+fn percent(part: u64, whole: u64) -> String {
+    format!("{:.1}%", ratio(part, whole) * 100.0)
+}
+
+fn bar(ratio: f64, width: usize) -> String {
+    let filled = ((ratio * width as f64).round() as usize).min(width);
+    format!(
+        "{}{}",
+        "█".repeat(filled),
+        "░".repeat(width.saturating_sub(filled))
+    )
+}
+
+fn format_duration(secs: u64) -> String {
+    let hours = secs / 3600;
+    let mins = (secs % 3600) / 60;
+    let rem = secs % 60;
+    if hours > 0 {
+        format!("{hours}h {mins:02}m")
+    } else if mins > 0 {
+        format!("{mins}m {rem:02}s")
+    } else {
+        format!("{rem}s")
+    }
 }
 
 fn spark(samples: &Value) -> String {
@@ -295,7 +438,7 @@ fn spark(samples: &Value) -> String {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let max = values.iter().copied().max().unwrap_or(1).max(1);
+    let max = values.iter().copied().max().unwrap_or(1).max(1000);
     values
         .iter()
         .map(|value| {
@@ -335,6 +478,22 @@ fn status_url(base: &str) -> String {
 }
 
 fn fetch(url: &str) -> Result<Value, String> {
+    let mut last = String::new();
+    for attempt in 0..2 {
+        match fetch_once(url) {
+            Ok(value) => return Ok(value),
+            Err(err) => {
+                last = err;
+                if attempt == 0 {
+                    std::thread::sleep(Duration::from_millis(30));
+                }
+            }
+        }
+    }
+    Err(last)
+}
+
+fn fetch_once(url: &str) -> Result<Value, String> {
     let rest = url
         .strip_prefix("http://")
         .ok_or_else(|| "status url needs http://".to_string())?;
@@ -350,6 +509,7 @@ fn fetch(url: &str) -> Result<Value, String> {
         Duration::from_millis(400),
     )
     .map_err(|err| err.to_string())?;
+    let _ = stream.set_nodelay(true);
     stream
         .set_read_timeout(Some(Duration::from_millis(800)))
         .ok();
@@ -361,14 +521,41 @@ fn fetch(url: &str) -> Result<Value, String> {
         "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
     )
     .map_err(|err| err.to_string())?;
+    let body = read_body(&mut stream)?;
+    serde_json::from_str(&body).map_err(|err| format!("{err}"))
+}
+
+fn read_body(stream: &mut TcpStream) -> Result<String, String> {
     let mut buf = Vec::new();
-    stream
-        .read_to_end(&mut buf)
-        .map_err(|err| err.to_string())?;
-    let text = String::from_utf8_lossy(&buf);
-    let body = text
-        .split_once("\r\n\r\n")
-        .map(|(_, body)| body)
-        .unwrap_or("");
-    serde_json::from_str(body).map_err(|err| format!("{err}: {body}"))
+    let mut tmp = [0_u8; 4096];
+    loop {
+        if let Some(body) = complete_body(&buf) {
+            return Ok(body);
+        }
+        let n = stream.read(&mut tmp).map_err(|err| err.to_string())?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        if buf.len() > 1_000_000 {
+            return Err("status response too large".into());
+        }
+    }
+    complete_body(&buf).ok_or_else(|| "truncated status response".into())
+}
+
+fn complete_body(buf: &[u8]) -> Option<String> {
+    let split = buf.windows(4).position(|window| window == b"\r\n\r\n")?;
+    let headers = std::str::from_utf8(buf.get(..split)?).ok()?;
+    let length = headers.lines().find_map(|line| {
+        let value = line
+            .split_once(':')
+            .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))?
+            .1
+            .trim();
+        value.parse::<usize>().ok()
+    })?;
+    let start = split + 4;
+    let body = buf.get(start..start + length)?;
+    String::from_utf8(body.to_vec()).ok()
 }
