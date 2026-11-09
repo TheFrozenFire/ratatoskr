@@ -896,7 +896,7 @@ impl Catalog {
     ///
     /// Pools with no snapshot yet stay, so a fill can be ingested afterwards.
     /// A one-wei reserve stays. Zero reserves and an empty book do not.
-    pub fn drop_empty_pools(&self) -> eyre::Result<u64> {
+    pub fn drop_empty_pools(&self) -> eyre::Result<Vec<(u8, B256)>> {
         let mut drop = Vec::new();
         for kind in 1..=METRIC {
             let mut after = None;
@@ -917,7 +917,8 @@ impl Catalog {
                 }
             }
         }
-        self.delete_pools(&drop)
+        self.delete_pools(&drop)?;
+        Ok(drop)
     }
 
     /// Delete a stride of `listed` identities until `target` rows remain.
@@ -1636,8 +1637,9 @@ async fn drive_ticks<S: EntityStore>(
         }
         done.push((job.stage, job.kind, job.id));
     }
-    store.enqueue_work(&follow, now).await?;
+    // The next tick page reuses this job's key. Finish first, or that insert is deleted.
     store.finish_work(&done, &failed).await?;
+    store.enqueue_work(&follow, now).await?;
     Ok(())
 }
 
@@ -3062,7 +3064,7 @@ mod tests {
         catalog
             .commit_chunk("list", 1, &[row(3)], Put::Merge)
             .unwrap();
-        assert_eq!(catalog.drop_empty_pools().unwrap(), 1);
+        assert_eq!(catalog.drop_empty_pools().unwrap().len(), 1);
         assert!(catalog.read_venue(UNI_V2, row(1).id).unwrap().is_none());
         assert!(catalog.read_venue(UNI_V2, row(2).id).unwrap().is_some());
         assert!(catalog.read_venue(UNI_V2, row(3).id).unwrap().is_some());

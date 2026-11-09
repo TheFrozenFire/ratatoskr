@@ -952,8 +952,9 @@ pub fn fill_identities(src: &Path, dest: &Path, add: u64) -> eyre::Result<FillRe
     let source = Database::open(src).wrap_err("open identity source")?;
     let source_counts = count_identities(&source)?;
     let catalog = Catalog::open(&dest_dir)?;
-    let present = identity_keys(&catalog)?;
+    let mut present = identity_keys(&catalog)?;
     drop(catalog);
+    remember_dropped(&dest_dir, &mut present)?;
     let mut remaining = BTreeMap::new();
     for (kind, count) in &source_counts {
         let have = present.iter().filter(|key| key[0] == *kind).count() as u64;
@@ -1087,15 +1088,50 @@ fn allocate_sample(counts: &BTreeMap<u8, u64>, target: u64) -> BTreeMap<u8, u64>
     take
 }
 
+fn remember_dropped(dir: &Path, present: &mut HashSet<[u8; 33]>) -> eyre::Result<()> {
+    let path = dir.join("dropped-empty.txt");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err).wrap_err("read dropped empty ids"),
+    };
+    for line in text.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let kind = parts
+            .next()
+            .ok_or_else(|| eyre::eyre!("dropped id"))?
+            .parse::<u8>()
+            .map_err(|err| eyre::eyre!("dropped kind: {err}"))?;
+        let id = parts
+            .next()
+            .ok_or_else(|| eyre::eyre!("dropped id"))?
+            .parse::<B256>()
+            .map_err(|err| eyre::eyre!("dropped id: {err}"))?;
+        present.insert(key(kind, &id));
+    }
+    Ok(())
+}
+
+pub fn append_dropped_ids(dir: &Path, ids: &[(u8, B256)]) -> eyre::Result<()> {
+    append_ids(dir, "dropped-empty.txt", ids)
+}
+
 pub fn append_fill_ids(dir: &Path, ids: &[(u8, B256)]) -> eyre::Result<()> {
+    append_ids(dir, "fill-added.txt", ids)
+}
+
+fn append_ids(dir: &Path, name: &str, ids: &[(u8, B256)]) -> eyre::Result<()> {
     if ids.is_empty() {
         return Ok(());
     }
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(dir.join("fill-added.txt"))
-        .wrap_err("append fill ids")?;
+        .open(dir.join(name))
+        .wrap_err("append ids")?;
     for (kind, id) in ids {
         use std::io::Write;
         writeln!(file, "{kind} {id}").wrap_err("write fill id")?;

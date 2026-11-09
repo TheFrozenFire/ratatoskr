@@ -213,7 +213,8 @@ async fn supervise(args: Args) -> eyre::Result<()> {
             })
             .await
             .wrap_err("drop empty")??;
-            println!("dropped_empty {dropped}");
+            venues::append_dropped_ids(&sample_dir, &dropped)?;
+            println!("dropped_empty {}", dropped.len());
         }
         if let Some(add) = args.fill {
             let src = args.copy_from.clone().expect("checked");
