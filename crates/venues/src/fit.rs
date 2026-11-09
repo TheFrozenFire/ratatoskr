@@ -56,6 +56,16 @@ const PANCAKE_V3_QUOTER: Address = address!("B048Bbc1Ee6b733FFfCFb9e9CeF7375518e
 const SUSHI_V3_QUOTER: Address = address!("64e8802FE490fa7cc61d3463958199161Bb608A7");
 const UNI_V4_QUOTER: Address = address!("99bd42B2B22e531f283b7F8a86dFf631EB16A9D1");
 const BALANCER_V3_ROUTER: Address = address!("ae563e3f8219521950555f5962419c8919758ea2");
+/// Slipstream Metaquoter. `quoteExactInputSingleV3` takes the pool, not a fee.
+const AERO_QUOTER: Address = address!("1ddfec5058180c207f55bb77d95acdd0d8227868");
+/// `quoteLiveExactInSingle`. The second return word is `amountOut`.
+const METRIC_QUOTER: Address = address!("3B9ea79f482094323d06064E637a7F4528560fcb");
+/// DXswap factory. Its router reads the pair fee. Other v2 forks stay unquoted.
+const DXSWAP_FACTORY: Address = address!("d34971BaB6E5E356fd250715F5dE0492BB070452");
+const DXSWAP_ROUTER: Address = address!("b9960d9bca016e9748be75dd52f02188b9d0829f");
+/// Lista V3. `quoteExactInputSingle` uses the stored fee, including fee 1.
+const LISTA_V3_FACTORY: Address = address!("956920F97690Bdd76a6a10C7ba931DEC14f61169");
+const LISTA_V3_QUOTER: Address = address!("E043af034c0c920994f8e3eE9aFa1173Fe8403DB");
 
 const SEL_AGGREGATE3: [u8; 4] = [0x82, 0xad, 0x56, 0xcb];
 const SEL_GET_AMOUNTS: [u8; 4] = [0xd0, 0x6c, 0xa6, 0x1f];
@@ -65,6 +75,8 @@ const SEL_DY_INT: [u8; 4] = [0x5e, 0x0d, 0x44, 0x3f];
 const SEL_DY_UINT: [u8; 4] = [0x55, 0x6d, 0x6e, 0x9f];
 const SEL_BAL3: [u8; 4] = [0x3e, 0xbc, 0x54, 0xe5];
 const SEL_BAL2: [u8; 4] = [0xf8, 0x4d, 0x06, 0x6e];
+const SEL_AERO_QUOTE: [u8; 4] = [0x0a, 0x67, 0x41, 0x42];
+const SEL_METRIC_QUOTE: [u8; 4] = [0x7a, 0x6e, 0xfb, 0xfd];
 
 /// Fractions of `max_in`. The first four are geometric. The rest sit where
 /// the book bends.
@@ -85,7 +97,7 @@ const MAX_LEGS: usize = 4;
 const BISECT_STEPS: u8 = 8;
 const PAGE: usize = 32;
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Family {
     V2,
     V3,
@@ -93,6 +105,8 @@ enum Family {
     Curve,
     Bal2,
     Bal3,
+    Aero,
+    Metric,
 }
 
 fn batch_of(_family: Family) -> (usize, u64) {
@@ -512,10 +526,9 @@ fn header_value() -> Value {
         "pairs": "Every ordered pair when the pool has at most 4 tokens. A larger pool keeps the first 4 and sets pairs_capped.",
         "resume": "The state pipeline is the source of the chain samples. This file is rewritten from the catalog. A repeated pool id is a torn line; keep the last copy.",
         "gaps": {
-            "v2_fork": "No shared router. The Uniswap router hardcodes a 0.3% fee.",
-            "v3_fork": "No confirmed quoter.",
-            "aero": "No confirmed mainnet quoter. Slipstream quotes by tick spacing.",
-            "metric": "No on-chain quoter. local_out is a marginal-price estimate."
+            "v2_fork": "DXswap (factory 0xd34971bab6e5e356fd250715f5de0492bb070452) quotes through router 0xb9960d9bca016e9748be75dd52f02188b9d0829f. Other v2 forks have no confirmed router. The Uniswap router hardcodes a 0.3% fee and the canonical factory.",
+            "v3_fork": "Lista V3 (factory 0x956920f97690bdd76a6a10c7ba931dec14f61169) quotes through QuoterV2 0xe043af034c0c920994f8e3ee9afa1173fe8403db. The other v3 fork factories have no confirmed quoter.",
+            "uniswap_v4": "quoteExactInputSingle takes uint128. A larger input is left unquoted."
         },
         "quoters": {
             "uniswap_v2": { "address": addr(UNI_V2_ROUTER), "method": "getAmountsOut" },
@@ -528,6 +541,10 @@ fn header_value() -> Value {
             "balancer_v2": { "method": "queryBatchSwap" },
             "balancer_v3": { "address": addr(BALANCER_V3_ROUTER), "method": "querySwapSingleTokenExactIn" },
             "curve": { "method": "get_dy", "int128": "0x5e0d443f", "uint256": "0x556d6e9f" },
+            "aero": { "address": addr(AERO_QUOTER), "method": "quoteExactInputSingleV3" },
+            "metric": { "address": addr(METRIC_QUOTER), "method": "quoteLiveExactInSingle" },
+            "v2_fork": { "factory": addr(DXSWAP_FACTORY), "address": addr(DXSWAP_ROUTER), "method": "getAmountsOut" },
+            "v3_fork": { "factory": addr(LISTA_V3_FACTORY), "address": addr(LISTA_V3_QUOTER), "method": "quoteExactInputSingle" },
             "multicall3": addr(MULTICALL3)
         }
     })
@@ -940,6 +957,7 @@ fn quote_page(rpc: &Rpc, quoters: &mut Quoters, plans: &mut [PoolPlan]) -> eyre:
             for (sample_index, sample) in dir.samples.iter_mut().enumerate() {
                 match prepare(
                     &detail,
+                    plan.factory,
                     dir.token_in,
                     dir.token_out,
                     sample.amount_in,
@@ -1097,7 +1115,14 @@ fn bisect(rpc: &Rpc, quoters: &mut Quoters, plans: &mut [PoolPlan]) -> eyre::Res
                     continue;
                 };
                 let dir = &plan.directions[dir_index];
-                prepare(detail, dir.token_in, dir.token_out, mid, plan.block)
+                prepare(
+                    detail,
+                    plan.factory,
+                    dir.token_in,
+                    dir.token_out,
+                    mid,
+                    plan.block,
+                )
             };
             let Prep::Ready(prepared) = prepared else {
                 bounds[index].hi = mid;
@@ -1190,6 +1215,7 @@ fn bisect(rpc: &Rpc, quoters: &mut Quoters, plans: &mut [PoolPlan]) -> eyre::Res
 
 fn prepare(
     detail: &PoolDetail,
+    factory: Option<Address>,
     token_in: Address,
     token_out: Address,
     amount: U256,
@@ -1200,12 +1226,14 @@ fn prepare(
     }
     let built = match detail {
         PoolDetail::ConstantProduct(pool) => {
-            prepare_product(pool.kind, token_in, token_out, amount)
+            prepare_product(pool.kind, factory, token_in, token_out, amount)
         }
-        PoolDetail::Concentrated(pool) => prepare_concentrated(pool, token_in, token_out, amount),
+        PoolDetail::Concentrated(pool) => {
+            prepare_concentrated(pool, factory, token_in, token_out, amount)
+        }
         PoolDetail::Balancer(pool) => prepare_balancer(pool, token_in, token_out, amount),
         PoolDetail::Curve(pool) => prepare_curve(pool, token_in, token_out, amount),
-        PoolDetail::Metric(_) => Err("metric has no on-chain quoter".into()),
+        PoolDetail::Metric(pool) => prepare_metric(pool, token_in, token_out, amount),
         PoolDetail::Failed(_) => Err("pool read failed".into()),
     };
     match built {
@@ -1216,6 +1244,7 @@ fn prepare(
 
 fn prepare_product(
     kind: u8,
+    factory: Option<Address>,
     token_in: Address,
     token_out: Address,
     amount: U256,
@@ -1224,9 +1253,10 @@ fn prepare_product(
         UNI_V2 => UNI_V2_ROUTER,
         SUSHI_V2 => SUSHI_V2_ROUTER,
         PANCAKE_V2 => PANCAKE_V2_ROUTER,
-        V2_FORK => {
-            return Err("no shared quoter for a v2 fork; fee is per pair".into());
-        }
+        V2_FORK => match factory {
+            Some(factory) if factory == DXSWAP_FACTORY => DXSWAP_ROUTER,
+            _ => return Err("no shared quoter for a v2 fork; fee is per pair".into()),
+        },
         _ => return Err("no v2 quoter".into()),
     };
     Ok(ready(
@@ -1239,6 +1269,7 @@ fn prepare_product(
 
 fn prepare_concentrated(
     pool: &crate::detail::Concentrated,
+    factory: Option<Address>,
     token_in: Address,
     token_out: Address,
     amount: U256,
@@ -1288,10 +1319,57 @@ fn prepare_concentrated(
                 ),
             ))
         }
-        V3_FORK => Err("no confirmed quoter for this v3 fork".into()),
-        AERO => Err("no confirmed quoter for aerodrome on mainnet".into()),
+        V3_FORK => {
+            if factory != Some(LISTA_V3_FACTORY) {
+                return Err("no confirmed quoter for this v3 fork".into());
+            }
+            let fee = pool.fee_pips.ok_or_else(|| "fee unread".to_string())?;
+            Ok(ready(
+                Family::V3,
+                LISTA_V3_QUOTER,
+                "quoteExactInputSingle",
+                encode_v3_quote(token_in, token_out, amount, fee),
+            ))
+        }
+        AERO => Ok(ready(
+            Family::Aero,
+            AERO_QUOTER,
+            "quoteExactInputSingleV3",
+            encode_aero_quote(pool.home, token_in, amount),
+        )),
         _ => Err("no concentrated quoter".into()),
     }
+}
+
+fn prepare_metric(
+    pool: &crate::detail::MetricPool,
+    token_in: Address,
+    token_out: Address,
+    amount: U256,
+) -> Result<Prepared, String> {
+    let zero_for_one = if token_in == pool.token0 && token_out == pool.token1 {
+        true
+    } else if token_in == pool.token1 && token_out == pool.token0 {
+        false
+    } else {
+        return Err("token".into());
+    };
+    // `quoteLiveExactInSingle` reverts AmountTooLarge above `int128`.
+    if amount > U256::from(i128::MAX as u128) {
+        return Err("amount exceeds int128".into());
+    }
+    // zeroForOne uses no price limit. oneForZero uses `type(uint128).max`.
+    let limit = if zero_for_one {
+        U256::ZERO
+    } else {
+        U256::from(u128::MAX)
+    };
+    Ok(ready(
+        Family::Metric,
+        METRIC_QUOTER,
+        "quoteLiveExactInSingle",
+        encode_metric_quote(pool.pool, zero_for_one, amount, limit),
+    ))
 }
 
 fn prepare_balancer(
@@ -1541,6 +1619,8 @@ fn interpret(method: &str, raw: RawOut) -> ChainOut {
     let amount = match method {
         "getAmountsOut" => decode_uint_array(&raw.bytes).and_then(|words| words.get(1).copied()),
         "queryBatchSwap" => decode_negative(&raw.bytes, 1),
+        // `(amountIn, amountOut)`. The first word repeats the input.
+        "quoteLiveExactInSingle" => word_at(&raw.bytes, 1),
         _ => first_word(&raw.bytes),
     };
     match amount {
@@ -1556,7 +1636,12 @@ fn interpret(method: &str, raw: RawOut) -> ChainOut {
 }
 
 fn first_word(bytes: &[u8]) -> Option<U256> {
-    let word = bytes.get(..32)?;
+    word_at(bytes, 0)
+}
+
+fn word_at(bytes: &[u8], index: usize) -> Option<U256> {
+    let start = index.checked_mul(32)?;
+    let word = bytes.get(start..start.checked_add(32)?)?;
     Some(U256::from_be_slice(word))
 }
 
@@ -2107,6 +2192,27 @@ fn encode_amounts_out(amount: U256, token_in: Address, token_out: Address) -> Ve
     out
 }
 
+fn encode_aero_quote(pool: Address, token_in: Address, amount: U256) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&SEL_AERO_QUOTE);
+    push_addr(&mut out, pool);
+    push_addr(&mut out, token_in);
+    push_u256(&mut out, amount);
+    push_u256(&mut out, U256::ZERO);
+    out
+}
+
+fn encode_metric_quote(pool: Address, zero_for_one: bool, amount: U256, limit: U256) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&SEL_METRIC_QUOTE);
+    push_addr(&mut out, pool);
+    push_addr(&mut out, Address::ZERO);
+    push_bool(&mut out, zero_for_one);
+    push_u256(&mut out, amount);
+    push_u256(&mut out, limit);
+    out
+}
+
 fn encode_v3_quote(token_in: Address, token_out: Address, amount: U256, fee: u32) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&SEL_V3_QUOTE);
@@ -2382,5 +2488,200 @@ mod tests {
             },
         );
         assert_eq!(out.amount_out, Some(U256::from(9u8)));
+    }
+
+    fn product(kind: u8) -> PoolDetail {
+        PoolDetail::ConstantProduct(ConstantProduct {
+            kind,
+            id: B256::ZERO,
+            pair: Address::ZERO,
+            token0: address!("0000000000000000000000000000000000000001"),
+            token1: address!("0000000000000000000000000000000000000002"),
+            reserve0: U256::from(1u64),
+            reserve1: U256::from(1u64),
+            fee_pips: Some(25),
+            timestamp: 0,
+            flags: 0,
+        })
+    }
+
+    fn concentrated(kind: u8, home: Address, fee: u32) -> PoolDetail {
+        PoolDetail::Concentrated(crate::detail::Concentrated {
+            kind,
+            id: B256::ZERO,
+            home,
+            hooks: Address::ZERO,
+            token0: address!("0000000000000000000000000000000000000001"),
+            token1: address!("0000000000000000000000000000000000000002"),
+            fee_pips: Some(fee),
+            protocol_fee: 0,
+            tick_spacing: 1,
+            sqrt_price_x96: U256::ZERO,
+            tick: 0,
+            liquidity: 0,
+            next_scan: None,
+            bitmaps: Vec::new(),
+            ticks: Vec::new(),
+            flags: 0,
+        })
+    }
+
+    fn metric_pool() -> PoolDetail {
+        PoolDetail::Metric(crate::detail::MetricPool {
+            kind: crate::catalog::METRIC,
+            id: B256::ZERO,
+            pool: address!("aef2ad7aBB651945e6D24276715f25BDED0ad41e"),
+            pause_level: 0,
+            bin_index: 0,
+            position: 0,
+            distance_e6: 0,
+            spread_fee_e6: 0,
+            notional_fee_e8: 0,
+            asymmetry_x8: 0,
+            scale0: U256::ZERO,
+            scale1: U256::ZERO,
+            lowest_bin: 0,
+            highest_bin: 0,
+            token0: address!("0000000000000000000000000000000000000001"),
+            token1: address!("0000000000000000000000000000000000000002"),
+            reference_x64: U256::ZERO,
+            provider: Address::ZERO,
+            next_scan: None,
+            bins: Vec::new(),
+            flags: 0,
+        })
+    }
+
+    fn ready_of(prep: Prep) -> Prepared {
+        match prep {
+            Prep::Ready(prepared) => prepared,
+            Prep::Skip(reason) => panic!("skipped: {reason}"),
+        }
+    }
+
+    #[test]
+    fn fork_quoters_select_the_confirmed_factory() {
+        let token_in = address!("0000000000000000000000000000000000000001");
+        let token_out = address!("0000000000000000000000000000000000000002");
+        let amount = U256::from(1_000_000u64);
+        let dx = ready_of(prepare(
+            &product(crate::catalog::V2_FORK),
+            Some(DXSWAP_FACTORY),
+            token_in,
+            token_out,
+            amount,
+            1,
+        ));
+        assert_eq!(dx.target, DXSWAP_ROUTER);
+        assert_eq!(dx.method, "getAmountsOut");
+        assert_eq!(dx.data, encode_amounts_out(amount, token_in, token_out));
+        match prepare(
+            &product(crate::catalog::V2_FORK),
+            Some(address!("7de800467aFcE442019884f51A4A1B9143a34fAc")),
+            token_in,
+            token_out,
+            amount,
+            1,
+        ) {
+            Prep::Skip(reason) => {
+                assert_eq!(reason, "no shared quoter for a v2 fork; fee is per pair");
+            }
+            Prep::Ready(_) => panic!("xchange has no router"),
+        }
+
+        let home = address!("2D90ebFfC87BBE29E4d78e7627adFE9D0f3D7978");
+        let aero = ready_of(prepare(
+            &concentrated(crate::catalog::AERO, home, 1),
+            None,
+            token_in,
+            token_out,
+            amount,
+            1,
+        ));
+        assert_eq!(aero.target, AERO_QUOTER);
+        assert_eq!(aero.method, "quoteExactInputSingleV3");
+        assert_eq!(
+            hex_of(&aero.data),
+            "0x0a6741420000000000000000000000002d90ebffc87bbe29e4d78e7627adfe9d0f3d7978000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000f42400000000000000000000000000000000000000000000000000000000000000000"
+        );
+
+        let lista = ready_of(prepare(
+            &concentrated(crate::catalog::V3_FORK, Address::ZERO, 1),
+            Some(LISTA_V3_FACTORY),
+            token_in,
+            token_out,
+            amount,
+            1,
+        ));
+        assert_eq!(lista.target, LISTA_V3_QUOTER);
+        assert_eq!(lista.data, encode_v3_quote(token_in, token_out, amount, 1));
+        match prepare(
+            &concentrated(crate::catalog::V3_FORK, Address::ZERO, 3000),
+            Some(address!("88695A239A0A3F70729C4CB30fd32F9b4978513D")),
+            token_in,
+            token_out,
+            amount,
+            1,
+        ) {
+            Prep::Skip(reason) => assert_eq!(reason, "no confirmed quoter for this v3 fork"),
+            Prep::Ready(_) => panic!("bambaswap has no quoter"),
+        }
+
+        let metric = ready_of(prepare(
+            &metric_pool(),
+            None,
+            token_in,
+            token_out,
+            amount,
+            1,
+        ));
+        assert_eq!(metric.target, METRIC_QUOTER);
+        assert_eq!(metric.family, Family::Metric);
+        assert_eq!(
+            hex_of(&metric.data),
+            "0x7a6efbfd000000000000000000000000aef2ad7abb651945e6d24276715f25bded0ad41e0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000f42400000000000000000000000000000000000000000000000000000000000000000"
+        );
+        let back = ready_of(prepare(
+            &metric_pool(),
+            None,
+            token_out,
+            token_in,
+            amount,
+            1,
+        ));
+        assert_eq!(
+            hex_of(&back.data),
+            "0x7a6efbfd000000000000000000000000aef2ad7abb651945e6d24276715f25bded0ad41e0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000ffffffffffffffffffffffffffffffff"
+        );
+        let too_big = U256::from(i128::MAX as u128) + U256::from(1u8);
+        match prepare(&metric_pool(), None, token_in, token_out, too_big, 1) {
+            Prep::Skip(reason) => assert_eq!(reason, "amount exceeds int128"),
+            Prep::Ready(_) => panic!("amount above int128"),
+        }
+        let mut words = Vec::new();
+        push_u256(&mut words, U256::from(100_000_000u64));
+        push_u256(&mut words, U256::from(100_099_602u64));
+        let out = interpret(
+            "quoteLiveExactInSingle",
+            RawOut {
+                ok: true,
+                bytes: words,
+                error: None,
+            },
+        );
+        assert_eq!(out.amount_out, Some(U256::from(100_099_602u64)));
+
+        let header = header_value();
+        assert!(header["quoters"]["aero"]["address"].is_string());
+        assert!(header["gaps"].get("aero").is_none());
+        assert!(header["gaps"].get("metric").is_none());
+        assert!(header["gaps"]["v2_fork"]
+            .as_str()
+            .unwrap()
+            .contains("DXswap"));
+        assert!(header["gaps"]["v3_fork"]
+            .as_str()
+            .unwrap()
+            .contains("Lista"));
     }
 }
