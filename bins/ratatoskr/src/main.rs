@@ -150,9 +150,6 @@ async fn supervise(args: Args) -> eyre::Result<()> {
     if args.drop_partial_quotes && args.data_dir.is_none() {
         return Err(eyre::eyre!("--drop-partial-quotes needs --data-dir"));
     }
-    if let Some(dir) = &args.data_dir {
-        refuse_live(dir)?;
-    }
     let paths = paths_from(args.data_dir.as_deref())?;
     if args.drop_partial_quotes {
         let venues_path = paths.venues.clone();
@@ -703,10 +700,12 @@ fn paths_from(data_dir: Option<&Path>) -> eyre::Result<Paths> {
     })
 }
 
+#[cfg(test)]
 fn live_share() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/ratatoskr")
 }
 
+#[cfg(test)]
 fn refuse_live(dir: &Path) -> eyre::Result<()> {
     let live = live_share();
     if dir == live {
