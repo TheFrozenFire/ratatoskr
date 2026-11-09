@@ -8,7 +8,7 @@ use num_bigint::{BigInt, Sign};
 use num_integer::Integer;
 use num_rational::BigRational;
 use num_traits::{One, Signed, ToPrimitive, Zero};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -65,6 +65,7 @@ fn bi(value: i64) -> BigInt {
 }
 
 fn pow10(exp: u32) -> BigInt {
+    let exp = exp.min(4_096);
     let mut acc = BigInt::one();
     let mut base = BigInt::from(10);
     let mut left = exp;
@@ -85,7 +86,11 @@ fn rat_i(value: i64) -> BigRational {
 }
 
 fn fd(numer: &BigInt, denom: &BigInt) -> BigInt {
-    numer.div_floor(denom)
+    if denom.is_zero() {
+        BigInt::zero()
+    } else {
+        numer.div_floor(denom)
+    }
 }
 
 fn trunc_rat(value: &BigRational) -> BigInt {
@@ -329,9 +334,13 @@ impl Formula {
                 let rates = rates.clone();
                 let ppm = ppm.clone();
                 let denom = denom.clone();
+                let Some(i) = rate_index(rates.len(), *i) else {
+                    return Arc::new(|_| None);
+                };
+                let Some(j) = rate_index(rates.len(), *j) else {
+                    return Arc::new(|_| None);
+                };
                 let which = *which as usize;
-                let i = *i as usize;
-                let j = *j as usize;
                 let fee_on_input = *fee_on_input;
                 Arc::new(move |dx: BigInt| {
                     if fee_on_input {
@@ -383,8 +392,12 @@ impl Formula {
                 let fee = fee.clone();
                 let rates = rates.clone();
                 let ppm = ppm.clone();
-                let i = *i as usize;
-                let j = *j as usize;
+                let Some(i) = rate_index(rates.len(), *i) else {
+                    return Arc::new(|_| None);
+                };
+                let Some(j) = rate_index(rates.len(), *j) else {
+                    return Arc::new(|_| None);
+                };
                 Arc::new(move |dx: BigInt| {
                     let dy = stable_flat_quote(&xp, &amp, i, j, &fee, &rates, &dx)?;
                     Some(fd(&(&dy * &ppm), &bi(10_000)))
@@ -396,8 +409,12 @@ impl Formula {
                 let fee = fee.clone();
                 let rates = rates.clone();
                 let ppms = ppms.clone();
-                let i = *i as usize;
-                let j = *j as usize;
+                let Some(i) = rate_index(rates.len().min(ppms.len()), *i) else {
+                    return Arc::new(|_| None);
+                };
+                let Some(j) = rate_index(rates.len().min(ppms.len()), *j) else {
+                    return Arc::new(|_| None);
+                };
                 Arc::new(move |dx: BigInt| {
                     let mut paid = if rates[i].is_zero() { dx } else { fd(&(&dx * &rates[i]), &wad()) };
                     paid = fd(&(&paid * &ppms[i]), &bi(10_000));
@@ -1908,6 +1925,10 @@ fn stable_scale_candidate(
     scale_candidate(&xp, &amp, i, j, &fee, &rates, direction, rows, &fee_denom(), false)
 }
 
+fn rate_index(len: usize, index: i64) -> Option<usize> {
+    usize::try_from(index).ok().filter(|index| *index < len)
+}
+
 fn stable_flat_quote(
     xp: &[BigInt],
     amp: &BigInt,
@@ -1917,7 +1938,9 @@ fn stable_flat_quote(
     rates: &[BigInt],
     dx: &BigInt,
 ) -> Option<BigInt> {
-    let paid = if rates[i].is_zero() { dx.clone() } else { fd(&(dx * &rates[i]), &wad()) };
+    let rate_i = rates.get(i)?;
+    let rate_j = rates.get(j)?;
+    let paid = if rate_i.is_zero() { dx.clone() } else { fd(&(dx * rate_i), &wad()) };
     let dy = stable_swap_out(
         xp,
         amp.clone(),
@@ -1929,10 +1952,10 @@ fn stable_flat_quote(
         false,
         BigInt::zero(),
     )?;
-    if rates[j].is_zero() {
+    if rate_j.is_zero() {
         Some(dy)
     } else {
-        Some(fd(&(&dy * &wad()), &rates[j]))
+        Some(fd(&(&dy * &wad()), rate_j))
     }
 }
 
@@ -2197,10 +2220,19 @@ fn rat_dec(value: &BigRational) -> BigDecimal {
 
 fn trunc_dec(value: &BigDecimal) -> BigInt {
     let (digits, scale) = value.as_bigint_and_exponent();
-    if scale <= 0 {
-        return &digits * pow10(u32::try_from(-scale).unwrap_or(u32::MAX));
+    let exp = if scale <= 0 { -scale } else { scale };
+    let Ok(exp) = u32::try_from(exp) else {
+        return BigInt::zero();
+    };
+    // Past this, the integer part is not a token amount.
+    if exp > 4_096 {
+        return BigInt::zero();
     }
-    digits / pow10(u32::try_from(scale).unwrap_or(u32::MAX))
+    if scale <= 0 {
+        &digits * pow10(exp)
+    } else {
+        digits / pow10(exp)
+    }
 }
 
 fn ln2_he(prec: u64) -> BigDecimal {
@@ -2252,21 +2284,21 @@ fn ln_he(value: &BigDecimal) -> BigDecimal {
     }
     let two = &one * 2;
     let half = &pow10(SCALE - 1) * 5;
-    let ln2 = fixed_of(&ln2_he(SCALE as u64), SCALE);
+    let ln2 = ln2_scaled();
     let mut extra = BigInt::zero();
     for _ in 0..20_000 {
         if reduced <= two {
             break;
         }
         reduced = round_div(&reduced, &BigInt::from(2));
-        extra += &ln2;
+        extra += ln2;
     }
     for _ in 0..20_000 {
         if reduced >= half {
             break;
         }
         reduced *= 2;
-        extra -= &ln2;
+        extra -= ln2;
     }
     let z = round_div(&((&reduced - &one) * &one), &(&reduced + &one));
     let z2 = round_div(&(&z * &z), &one);
@@ -2289,20 +2321,20 @@ fn exp_fixed(value: &BigDecimal) -> BigDecimal {
     const SCALE: u32 = 96;
     let one = pow10(SCALE);
     let mut x = fixed_of(value, SCALE);
-    let ln2 = fixed_of(&ln2_he(SCALE as u64), SCALE);
+    let ln2 = ln2_scaled();
     let mut k: i32 = 0;
     for _ in 0..400 {
-        if x <= ln2 {
+        if x <= *ln2 {
             break;
         }
-        x -= &ln2;
+        x -= ln2;
         k += 1;
     }
     for _ in 0..400 {
-        if x >= -&ln2 {
+        if x >= -ln2 {
             break;
         }
-        x += &ln2;
+        x += ln2;
         k -= 1;
     }
     let mut term = one.clone();
@@ -2321,6 +2353,11 @@ fn exp_fixed(value: &BigDecimal) -> BigDecimal {
         sum = round_div(&sum, &(BigInt::one() << ((-k) as usize)));
     }
     he40(BigDecimal::new(sum, SCALE as i64))
+}
+
+fn ln2_scaled() -> &'static BigInt {
+    static LN2: std::sync::OnceLock<BigInt> = std::sync::OnceLock::new();
+    LN2.get_or_init(|| fixed_of(&ln2_he(96), 96))
 }
 
 fn ln1exp(value: &BigDecimal) -> BigDecimal {
@@ -2497,14 +2534,16 @@ fn logistic_quote(slope: &BigRational, rate: &BigRational, knee: &BigRational) -
     let s = rat_dec(slope);
     let k = rat_dec(rate);
     let x0 = rat_dec(knee);
+    if k.sign() != Sign::Plus || s.sign() != Sign::Plus || x0.sign() != Sign::Plus {
+        return Arc::new(|_| Some(BigInt::zero()));
+    }
+    // The opening height and the slope/rate ratio do not depend on the input.
+    let numer = ln1exp(&he40(&k * &x0));
+    let slope_over_rate = he_div_at(&s, &k, 40);
     Arc::new(move |x: BigInt| {
-        if k.sign() != Sign::Plus || s.sign() != Sign::Plus || x0.sign() != Sign::Plus {
-            return Some(BigInt::zero());
-        }
         let x = BigDecimal::from(x);
-        let numer = ln1exp(&he40(&k * &x0));
         let denom = ln1exp(&he40(&(-&k) * he40(&x - &x0)));
-        let y = he40(&he_div_at(&s, &k, 40) * he40(&numer - &denom));
+        let y = he40(&slope_over_rate * he40(&numer - &denom));
         if y.sign() != Sign::Plus {
             Some(BigInt::zero())
         } else {
@@ -2751,6 +2790,7 @@ fn wave_quote(base: Predict, cap: &BigInt, x_last: &BigInt, a_ppm: i64, b_ppm: i
     })
 }
 
+#[derive(Clone, Copy)]
 struct WaveWindow {
     starts: &'static [[i64; 3]],
     bounds: [(i64, i64); 3],
@@ -2759,6 +2799,86 @@ struct WaveWindow {
     wave_steps: usize,
     wave_rounds: usize,
     stop_wave: bool,
+}
+
+/// One sharpness. The four sharpness values do not read each other's best
+/// score, so they run together. A later value replaces the best only when its
+/// relative error is strictly smaller, which is the sequential order.
+fn search_sharp(
+    sharp: i64,
+    slope0: &BigRational,
+    knee0: &BigRational,
+    cap: &BigInt,
+    x_last: &BigInt,
+    target: &[(BigInt, BigInt)],
+    window: WaveWindow,
+) -> Option<RelHit> {
+    let mut logistic: Option<RelHit> = None;
+    for start in window.starts {
+        let start_bi = [bi(start[0]), bi(start[1]), bi(start[2])];
+        let bounds = [
+            (bi(window.bounds[0].0), bi(window.bounds[0].1)),
+            (bi(window.bounds[1].0), bi(window.bounds[1].1)),
+            (bi(window.bounds[2].0), bi(window.bounds[2].1)),
+        ];
+        let got = coord_search(
+            |ppm| {
+                let values = i64s(ppm)?;
+                if values.len() != 3 {
+                    return None;
+                }
+                let base = logistic_at(slope0, knee0, values[0], sharp, values[1])?;
+                if values[2] <= 0 {
+                    return None;
+                }
+                let formula = scaled_formula(base, values[2]);
+                let rel = worst_rel(&formula.predict(), target)?;
+                Some(RelHit { rel, formula })
+            },
+            &start_bi,
+            &bounds,
+            window.steps,
+            1,
+        );
+        if let Some(hit) = got {
+            if rel_better(&logistic, &hit.rel) {
+                logistic = Some(hit);
+            }
+        }
+        if window.stop_on_zero && logistic.as_ref().is_some_and(|hit| hit.rel.is_zero()) {
+            break;
+        }
+    }
+    let base = logistic?.formula;
+    let mut best: Option<RelHit> = None;
+    for start in [[0, 0], [-40, -50]] {
+        let start_bi = [bi(start[0]), bi(start[1])];
+        let bounds = [(bi(-200), bi(200)), (bi(-200), bi(200))];
+        let got = coord_search(
+            |ppm| {
+                let values = i64s(ppm)?;
+                if values.len() != 2 {
+                    return None;
+                }
+                let formula = wave_formula(base.clone(), cap, x_last, values[0], values[1]);
+                let rel = worst_rel(&formula.predict(), target)?;
+                Some(RelHit { rel, formula })
+            },
+            &start_bi,
+            &bounds,
+            window.wave_steps,
+            window.wave_rounds,
+        );
+        if let Some(hit) = got {
+            if rel_better(&best, &hit.rel) {
+                best = Some(hit);
+            }
+        }
+        if window.stop_wave && best.as_ref().is_some_and(|hit| hit.rel.is_zero()) {
+            break;
+        }
+    }
+    best
 }
 
 fn logistic_wave_search(
@@ -2780,77 +2900,27 @@ fn logistic_wave_search(
     if x_last <= BigInt::zero() || cap <= BigInt::zero() {
         return Ok(None);
     }
+    let hits = std::thread::scope(|scope| {
+        let mut joins = Vec::new();
+        for sharp in CAP_SHARPNESS {
+            let slope0 = slope0.clone();
+            let knee0 = knee0.clone();
+            let cap = cap.clone();
+            let x_last = x_last.clone();
+            let target = target.clone();
+            joins.push(scope.spawn(move || {
+                search_sharp(sharp, &slope0, &knee0, &cap, &x_last, &target, window)
+            }));
+        }
+        joins
+            .into_iter()
+            .map(|join| join.join().expect("sharp search"))
+            .collect::<Vec<_>>()
+    });
     let mut best: Option<RelHit> = None;
-    for sharp in CAP_SHARPNESS {
-        let mut logistic: Option<RelHit> = None;
-        for start in window.starts {
-            let start_bi = [bi(start[0]), bi(start[1]), bi(start[2])];
-            let bounds = [
-                (bi(window.bounds[0].0), bi(window.bounds[0].1)),
-                (bi(window.bounds[1].0), bi(window.bounds[1].1)),
-                (bi(window.bounds[2].0), bi(window.bounds[2].1)),
-            ];
-            let got = coord_search(
-                |ppm| {
-                    let values = i64s(ppm)?;
-                    if values.len() != 3 {
-                        return None;
-                    }
-                    let base = logistic_at(&slope0, &knee0, values[0], sharp, values[1])?;
-                    if values[2] <= 0 {
-                        return None;
-                    }
-                    let formula = scaled_formula(base, values[2]);
-                    let rel = worst_rel(&formula.predict(), &target)?;
-                    Some(RelHit { rel, formula })
-                },
-                &start_bi,
-                &bounds,
-                window.steps,
-                1,
-            );
-            if let Some(hit) = got {
-                if rel_better(&logistic, &hit.rel) {
-                    logistic = Some(hit);
-                }
-            }
-            if window.stop_on_zero && logistic.as_ref().is_some_and(|hit| hit.rel.is_zero()) {
-                break;
-            }
-        }
-        let Some(logistic) = logistic else {
-            continue;
-        };
-        let base = logistic.formula;
-        for start in [[0, 0], [-40, -50]] {
-            let start_bi = [bi(start[0]), bi(start[1])];
-            let bounds = [(bi(-200), bi(200)), (bi(-200), bi(200))];
-            let got = coord_search(
-                |ppm| {
-                    let values = i64s(ppm)?;
-                    if values.len() != 2 {
-                        return None;
-                    }
-                    let formula = wave_formula(base.clone(), &cap, &x_last, values[0], values[1]);
-                    let rel = worst_rel(&formula.predict(), &target)?;
-                    Some(RelHit { rel, formula })
-                },
-                &start_bi,
-                &bounds,
-                window.wave_steps,
-                window.wave_rounds,
-            );
-            if let Some(hit) = got {
-                if rel_better(&best, &hit.rel) {
-                    best = Some(hit);
-                }
-            }
-            if window.stop_wave && best.as_ref().is_some_and(|hit| hit.rel.is_zero()) {
-                break;
-            }
-        }
-        if window.stop_wave && best.as_ref().is_some_and(|hit| hit.rel.is_zero()) {
-            break;
+    for hit in hits.into_iter().flatten() {
+        if rel_better(&best, &hit.rel) {
+            best = Some(hit);
         }
     }
     Ok(best.map(|hit| hit.formula))
@@ -3415,8 +3485,12 @@ fn loo_alpha_candidate(base: &Formula, direction: &Value, rows: &[(BigInt, BigIn
     Ok(gated(&formula, &hold, rows))
 }
 
-fn wave_loo_candidate(direction: &Value, rows: &[(BigInt, BigInt)]) -> Result<Option<Scored>, String> {
-    let Some(base) = near_wave(direction, rows)? else {
+fn wave_loo_from(
+    base: Option<Formula>,
+    direction: &Value,
+    rows: &[(BigInt, BigInt)],
+) -> Result<Option<Scored>, String> {
+    let Some(base) = base else {
         return Ok(None);
     };
     let Some((score, predict)) = loo_alpha_candidate(&base, direction, rows)? else {
@@ -3435,6 +3509,10 @@ fn wave_loo_candidate(direction: &Value, rows: &[(BigInt, BigInt)]) -> Result<Op
         previous = value;
     }
     Ok(Some((score, predict)))
+}
+
+fn wave_loo_candidate(direction: &Value, rows: &[(BigInt, BigInt)]) -> Result<Option<Scored>, String> {
+    wave_loo_from(near_wave(direction, rows)?, direction, rows)
 }
 
 fn through_sample_candidates(
@@ -3786,13 +3864,232 @@ pub(crate) fn choose(state: &Value, direction: &Value, rows: &[(BigInt, BigInt)]
         consider(&mut found, "cap", &fillet_cap_candidate(direction, rows)?);
         consider(&mut found, "cap", &logistic_cap_candidate(direction, rows)?);
         consider(&mut found, "cap", &logistic_refine_candidate(direction, rows)?);
-        consider(&mut found, "cap", &logistic_wave_candidate(direction, rows)?);
-        consider(&mut found, "cap", &wave_loo_candidate(direction, rows)?);
+        let near = near_wave(direction, rows)?;
+        let (_, hold) = split_holdout(direction)?;
+        let near_scored = near
+            .as_ref()
+            .and_then(|formula| accept_cap(formula.clone(), &hold, rows));
+        consider(&mut found, "cap", &near_scored);
+        consider(&mut found, "cap", &wave_loo_from(near, direction, rows)?);
         consider(&mut found, "cap", &logistic_wide_candidate(direction, rows)?);
     }
     Ok(found.into_iter().min_by(|left, right| {
         (left.score, left.rank, left.name).cmp(&(right.score, right.rank, right.name))
     }).map(|item| Chosen { score: item.score, name: item.name, formula: item.formula }))
+}
+
+/// Run the selector on one direction. The score is the all-label score.
+pub fn select_fit(state: &Value, direction: &Value) -> Result<Option<(i64, &'static str)>, String> {
+    let rows = labels_of(direction)?;
+    Ok(choose(state, direction, &rows)?.map(|item| (item.score, item.name)))
+}
+
+/// One logistic quote. `amounts` share the closed form built for the search.
+pub fn logistic_outs(
+    slope: &BigRational,
+    rate: &BigRational,
+    knee: &BigRational,
+    amounts: &[BigInt],
+) -> Vec<Option<BigInt>> {
+    let predict = logistic_quote(slope, rate, knee);
+    amounts.iter().map(|amount| predict(amount.clone())).collect()
+}
+
+/// Decode a formula or a tag-3 payload and quote `amount`. Panics are bugs.
+pub fn poke_formula(bytes: &[u8], amount: &BigInt) {
+    if let Ok(formula) = Formula::decode(bytes) {
+        let _ = eval_formula(&formula, amount);
+        let mut encoded = Vec::new();
+        formula.encode(&mut encoded);
+        if let Ok(again) = Formula::decode(&encoded) {
+            assert_eq_formula(&formula, &again);
+            let _ = eval_formula(&again, amount);
+        } else {
+            panic!("encoded formula did not decode");
+        }
+    }
+    if let Ok(fit) = crate::fit_formula::decode_fit(bytes) {
+        for direction in &fit.directions {
+            let _ = eval_formula(&direction.formula, amount);
+        }
+        let encoded = crate::fit_formula::encode_fit(&fit.fallback, &fit.directions);
+        let again = crate::fit_formula::decode_fit(&encoded).expect("encoded fit");
+        if again.directions.len() != fit.directions.len() {
+            panic!("fit direction count changed");
+        }
+        for (left, right) in fit.directions.iter().zip(&again.directions) {
+            assert_eq_formula(&left.formula, &right.formula);
+        }
+    }
+}
+
+fn assert_eq_formula(left: &Formula, right: &Formula) {
+    if left != right {
+        panic!("formula round-trip changed");
+    }
+}
+
+/// Exercise `choose` on a bounded pool built from `bytes`.
+pub fn poke_choose(bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    let direction = shaped_direction(bytes);
+    let Ok(rows) = labels_of(&direction) else {
+        return;
+    };
+    let _ = choose(&shaped_state(bytes), &direction, &rows);
+    if bytes.len() <= 1_536 {
+        if let Ok(value) = serde_json::from_slice::<Value>(bytes) {
+            poke_choose_value(&value);
+        }
+    }
+}
+
+fn poke_choose_value(value: &Value) {
+    let Some(direction) = value.as_object() else {
+        return;
+    };
+    if direction.len() > 16 {
+        return;
+    }
+    let mut direction = Value::Object(direction.clone());
+    if let Some(samples) = direction.get_mut("samples").and_then(Value::as_array_mut) {
+        samples.truncate(4);
+        for sample in samples.iter_mut() {
+            clip_sample(sample);
+        }
+    }
+    let Ok(rows) = labels_of(&direction) else {
+        return;
+    };
+    if rows.len() > 4 {
+        return;
+    }
+    let state = json!({
+        "shape": value.get("shape").and_then(Value::as_str).unwrap_or("constant_product"),
+        "reserve0": clip_text(value.get("reserve0")),
+        "reserve1": clip_text(value.get("reserve1")),
+        "fee_pips_used": value.get("fee_pips_used").and_then(Value::as_i64).unwrap_or(0),
+        "token0": "a",
+        "token1": "b",
+        "coins": [],
+    });
+    let _ = choose(&state, &direction, &rows);
+}
+
+fn clip_sample(sample: &mut Value) {
+    let Some(sample) = sample.as_object_mut() else {
+        return;
+    };
+    for key in ["amount_in", "chain_out"] {
+        if let Some(text) = sample.get(key).and_then(Value::as_str) {
+            let clipped: String = text.chars().take(40).collect();
+            sample.insert(key.to_string(), Value::String(clipped));
+        }
+    }
+}
+
+fn clip_text(value: Option<&Value>) -> String {
+    value
+        .and_then(Value::as_str)
+        .unwrap_or("0")
+        .chars()
+        .take(40)
+        .collect()
+}
+
+fn shaped_state(bytes: &[u8]) -> Value {
+    let kind = bytes[0] % 5;
+    let reserve = word_at(bytes, 1);
+    match kind {
+        0 => json!({
+            "shape": "constant_product",
+            "reserve0": reserve.to_string(),
+            "reserve1": word_at(bytes, 9).to_string(),
+            "fee_pips_used": u16::from_le_bytes([bytes.first().copied().unwrap_or(0), bytes.get(1).copied().unwrap_or(0)]) % 10_000,
+            "token0": "a",
+            "token1": "b",
+        }),
+        1 => json!({
+            "shape": "curve",
+            "amp": word_at(bytes, 1).max(BigInt::one()).to_string(),
+            "fee": "1000000",
+            "gamma": "0",
+            "crypto": false,
+            "coins": [
+                {"token": "a", "balance": reserve.max(BigInt::one()).to_string(), "rate": "0", "price_scale": "0"},
+                {"token": "b", "balance": word_at(bytes, 9).max(BigInt::one()).to_string(), "rate": "0", "price_scale": "0"},
+            ],
+        }),
+        2 => json!({
+            "shape": "balancer",
+            "amp": "100",
+            "amp_precision": "1",
+            "fee": "0",
+            "tokens": ["a", "b"],
+            "balances": [reserve.max(BigInt::one()).to_string(), word_at(bytes, 9).max(BigInt::one()).to_string()],
+            "weights": ["1", "1"],
+            "stable": bytes[0].is_multiple_of(2),
+        }),
+        3 => json!({
+            "shape": "concentrated",
+            "token0": "a",
+            "token1": "b",
+            "fee_pips": 3000,
+            "sqrt_price_x96": word_at(bytes, 1).max(BigInt::one()).to_string(),
+            "liquidity": word_at(bytes, 9).max(BigInt::one()).to_string(),
+            "tick": 0,
+            "ticks": [],
+        }),
+        _ => json!({
+            "shape": "metric",
+            "token0": "a",
+            "token1": "b",
+            "reference_x64": word_at(bytes, 1).max(BigInt::one()).to_string(),
+            "scale0": "1",
+            "scale1": "1",
+            "bin_index": 0,
+            "distance_e6": 0,
+            "position": "0",
+            "bins": [],
+        }),
+    }
+}
+
+fn shaped_direction(bytes: &[u8]) -> Value {
+    let mut samples = Vec::new();
+    let mut at = 17;
+    while at + 8 <= bytes.len() && samples.len() < 4 {
+        let amount = word_at(bytes, at);
+        let out = word_at(bytes, at + 8);
+        if amount.is_positive() && out.is_positive() {
+            let fraction = if samples.len() == 2 { "0.25" } else { "0.1" };
+            samples.push(json!({
+                "amount_in": amount.to_string(),
+                "chain_out": out.to_string(),
+                "fraction": fraction,
+            }));
+        }
+        at += 16;
+    }
+    if samples.is_empty() {
+        samples.push(json!({"amount_in": "1000", "chain_out": "900", "fraction": "0.1"}));
+        samples.push(json!({"amount_in": "4000", "chain_out": "3000", "fraction": "0.5"}));
+    }
+    json!({
+        "token_in": "a",
+        "token_out": "b",
+        "samples": samples,
+    })
+}
+
+fn word_at(bytes: &[u8], at: usize) -> BigInt {
+    let mut buf = [0u8; 8];
+    for (slot, byte) in buf.iter_mut().enumerate() {
+        *byte = bytes.get(at + slot).copied().unwrap_or(0);
+    }
+    BigInt::from(u64::from_le_bytes(buf))
 }
 
 #[cfg(test)]
@@ -3818,6 +4115,40 @@ mod tests {
 
     fn rows_of(samples: &[(&str, &str, &str)]) -> Vec<(BigInt, BigInt)> {
         samples.iter().map(|(x, y, _)| (parse_bi(x), parse_bi(y))).collect()
+    }
+
+    #[test]
+    fn a_short_book_and_a_zero_divisor_do_not_panic() {
+        let missing = Formula::StablePpms {
+            xp: vec![bi(1), bi(1)],
+            amp: bi(100),
+            i: -1,
+            j: 5,
+            fee: BigInt::zero(),
+            rates: vec![BigInt::zero()],
+            ppms: Vec::new(),
+        };
+        assert!(eval_formula(&missing, &bi(10)).is_none());
+        let zero_ppm = Formula::StableScale {
+            xp: vec![bi(1_000), bi(1_000)],
+            amp: bi(100),
+            i: 0,
+            j: 1,
+            fee: BigInt::zero(),
+            rates: vec![BigInt::zero(), BigInt::zero()],
+            which: 0,
+            ppm: BigInt::zero(),
+            denom: bi(1_000_000),
+            fee_on_input: true,
+        };
+        let _ = eval_formula(&zero_ppm, &bi(100));
+        poke_formula(&[0xff, 3, 0, 0], &bi(1));
+        // Tag 2 then a list length of 0xf4f4f4f4. The length is not allocated.
+        poke_formula(&[2, 244, 244, 244, 244, 244], &bi(1));
+        poke_formula(&[22u8; 64], &bi(1));
+        assert!(Formula::decode(&[2, 244, 244, 244, 244, 244]).is_err());
+        poke_choose(&[1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        poke_choose(br#"{"shape":"constant_product","samples":[{"amount_in":"10","chain_out":"9","fraction":"0.1"}]}"#);
     }
 
     #[test]

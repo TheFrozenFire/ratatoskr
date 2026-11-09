@@ -219,9 +219,27 @@ struct Cursor<'a> {
     at: usize,
 }
 
+/// A coin vector, a tick ladder, or a knot table. The selector does not emit
+/// a longer list, and a length past the remaining bytes is not allocated.
+const MAX_LIST: usize = 8_192;
+/// Wave, scale, and added-residual wrap a base. Production nests a handful.
+const MAX_DEPTH: u32 = 8;
+
 impl<'a> Cursor<'a> {
     fn new(bytes: &'a [u8]) -> Self {
         Self { bytes, at: 0 }
+    }
+
+    fn list_len(&mut self, min_each: usize) -> Result<usize, String> {
+        let n = self.u32()? as usize;
+        if n > MAX_LIST {
+            return Err("long".to_string());
+        }
+        let remain = self.bytes.len().saturating_sub(self.at);
+        if n.saturating_mul(min_each) > remain {
+            return Err("short".to_string());
+        }
+        Ok(n)
     }
 
     fn take(&mut self, len: usize) -> Result<&'a [u8], String> {
@@ -308,7 +326,7 @@ fn read_bi(cursor: &mut Cursor<'_>) -> Result<BigInt, String> {
 }
 
 fn read_bis(cursor: &mut Cursor<'_>) -> Result<Vec<BigInt>, String> {
-    let n = cursor.u32()? as usize;
+    let n = cursor.list_len(4)?;
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
         out.push(read_bi(cursor)?);
@@ -317,7 +335,7 @@ fn read_bis(cursor: &mut Cursor<'_>) -> Result<Vec<BigInt>, String> {
 }
 
 fn read_pairs(cursor: &mut Cursor<'_>) -> Result<Vec<(BigInt, BigInt)>, String> {
-    let n = cursor.u32()? as usize;
+    let n = cursor.list_len(8)?;
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
         out.push((read_bi(cursor)?, read_bi(cursor)?));
@@ -641,7 +659,10 @@ impl Formula {
         }
     }
 
-    fn decode_from(cursor: &mut Cursor<'_>) -> Result<Self, String> {
+    fn decode_from(cursor: &mut Cursor<'_>, depth: u32) -> Result<Self, String> {
+        if depth > MAX_DEPTH {
+            return Err("deep".to_string());
+        }
         Ok(match cursor.u8()? {
             1 => Self::Hyperbola {
                 x1: read_bi(cursor)?,
@@ -789,7 +810,7 @@ impl Formula {
             16 => Self::Cubic { knots: read_pairs(cursor)? },
             17 => Self::HyperResidual { knots: read_pairs(cursor)? },
             18 => Self::Added {
-                base: Box::new(Self::decode_from(cursor)?),
+                base: Box::new(Self::decode_from(cursor, depth + 1)?),
                 knots: read_pairs(cursor)?,
                 alpha: read_rat(cursor)?,
             },
@@ -809,11 +830,11 @@ impl Formula {
                 knee: read_rat(cursor)?,
             },
             22 => Self::Scaled {
-                base: Box::new(Self::decode_from(cursor)?),
+                base: Box::new(Self::decode_from(cursor, depth + 1)?),
                 ppm: cursor.i64()?,
             },
             23 => Self::Wave {
-                base: Box::new(Self::decode_from(cursor)?),
+                base: Box::new(Self::decode_from(cursor, depth + 1)?),
                 cap: read_bi(cursor)?,
                 x_last: read_bi(cursor)?,
                 a_ppm: cursor.i64()?,
@@ -828,7 +849,7 @@ impl Formula {
     #[allow(dead_code)]
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, String> {
         let mut cursor = Cursor::new(bytes);
-        let formula = Self::decode_from(&mut cursor)?;
+        let formula = Self::decode_from(&mut cursor, 0)?;
         cursor.done()?;
         Ok(formula)
     }
@@ -860,7 +881,7 @@ pub(crate) fn decode_fit(payload: &[u8]) -> Result<FitPayload, String> {
     let mut cursor = Cursor::new(&payload[1..]);
     let fallback_len = cursor.u32()? as usize;
     let fallback = cursor.take(fallback_len)?.to_vec();
-    let count = cursor.u32()? as usize;
+    let count = cursor.list_len(49)?;
     let mut directions = Vec::with_capacity(count);
     for _ in 0..count {
         let token_in = Address::from_slice(cursor.take(20)?);
@@ -875,7 +896,7 @@ pub(crate) fn decode_fit(payload: &[u8]) -> Result<FitPayload, String> {
             token_out,
             score,
             name,
-            formula: Formula::decode_from(&mut cursor)?,
+            formula: Formula::decode_from(&mut cursor, 0)?,
         });
     }
     cursor.done()?;

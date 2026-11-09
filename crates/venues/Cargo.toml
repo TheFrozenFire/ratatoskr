@@ -26,5 +26,12 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+criterion = { version = "0.5", default-features = false }
+num-bigint = "0.4"
+num-rational = "0.4"
 tokio.workspace = true
 zstd = "0.13"
+
+[[bench]]
+name = "fit"
+harness = false

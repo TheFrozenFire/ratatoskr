@@ -77,11 +77,18 @@ fn parse_hex(text: &str) -> BigInt {
 }
 
 fn pow10(exp: u64) -> BigInt {
-    BigInt::from(10u32).pow(u32::try_from(exp).unwrap_or(u32::MAX))
+    // A quote scale past this is not a token amount. Capping keeps a wild
+    // input from asking for 10^(2^32).
+    let exp = u32::try_from(exp).unwrap_or(4_096).min(4_096);
+    BigInt::from(10u32).pow(exp)
 }
 
 fn floor_div(numer: &BigInt, denom: &BigInt) -> BigInt {
-    numer.div_floor(denom)
+    if denom.is_zero() {
+        BigInt::zero()
+    } else {
+        numer.div_floor(denom)
+    }
 }
 
 fn prec_80() -> NonZeroU64 {
@@ -306,7 +313,13 @@ fn small_u32(exp: &BigRational) -> Option<u32> {
     if exp.denom() != &BigInt::one() || exp.numer().sign() == Sign::Minus {
         return None;
     }
-    exp.numer().to_u32()
+    let k = exp.numer().to_u32()?;
+    // Exact power of an 80-digit base. A balancer weight ratio fits. Past this
+    // the log path is the same 80-digit floor, and the integer stays bounded.
+    if k > 4_096 {
+        return None;
+    }
+    Some(k)
 }
 
 fn bd_at(prec: u64) -> Context {
