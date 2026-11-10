@@ -1,0 +1,579 @@
+# Ratatoskr
+
+Ratatoskr is the catalog of mainnet pools and the history used to find them. The words below keep a pool, the snapshot that pool quotes from, the stored price curve, a chain quote, a receipt, and a peer from being treated as the same thing.
+
+## Language
+
+### Pools
+
+**Pool**:
+A venue that prices a swap between its tokens.
+_Avoid_: pair, market, venue
+
+**Pool identity**:
+The durable name of one pool: its kind, its pool id, the factory or singleton it belongs to, and the tokens named when it was listed.
+_Avoid_: row, address, venue
+
+**Kind**:
+The venue family on a pool identity, such as Uniswap v2, a v2 fork, Uniswap v3, Aero, Uniswap v4, Balancer v2, Balancer v3, Curve, or Metric.
+_Avoid_: shape, protocol, type
+
+**Shape**:
+The quoting rule on a snapshot: constant product, concentrated, Balancer, Curve, or Metric.
+_Avoid_: kind
+
+**Factory**:
+The contract that lists a kind or emits its creation events.
+_Avoid_: router, vault, registry
+
+**Singleton**:
+One contract that holds many pools, each named by a pool id.
+_Avoid_: factory, pool manager
+
+**Pool id**:
+The 32-byte name of a pool. A factory pool stores the pool address in the low bytes. A singleton pool stores the id from its creation event.
+_Avoid_: address, key
+
+**Token**:
+An asset a pool prices.
+_Avoid_: currency, coin, asset
+
+**Hook**:
+An external contract named in a singleton pool's identity, able to change that pool's fee or its swap.
+_Avoid_: extension, callback
+
+**Fork**:
+A factory that emits Uniswap's creation event and is not the Uniswap factory.
+_Avoid_: clone, unofficial pool
+
+**Settlement**:
+A venue that records fills and has no pool contract.
+_Avoid_: auction, order book, solver
+
+**Registry**:
+A contract that lists Curve pools, including pools no factory event named.
+_Avoid_: factory, address provider
+
+**List**:
+An on-chain array of pool ids, such as all pairs, all pools, a pool list, or an index-to-pool view.
+_Avoid_: index, log, census
+
+**Creation event**:
+The log that names a new pool when the factory keeps no list.
+_Avoid_: list, deploy, discovery hit
+
+**Observation**:
+The chain, block, transaction, log index, and emitter of one log.
+_Avoid_: receipt, sighting
+
+**Discovery hit**:
+An asset or a pool identity read from the shape of one log.
+_Avoid_: bloom hit, watch hit, creation event
+
+**Asset**:
+An ERC-20, ERC-721, or ERC-1155 named by a transfer-shaped log. The standard is a guess from the topic count.
+_Avoid_: token, pool
+
+**Canonical factory**:
+The one emitter accepted for a kind that many contracts share, such as Uniswap v4, Balancer, or Metric.
+_Avoid_: canonical pool
+
+### Shapes
+
+**Constant-product pool**:
+A two-token pool whose price curve is determined by two reserves and a pool fee.
+_Avoid_: pair, v2, xy=k
+
+**Reserve**:
+The token balance a constant-product pool prices from.
+_Avoid_: balance, liquidity
+
+**Concentrated pool**:
+A pool whose liquidity sits between ticks. Uniswap v3, its forks, Aero, and Uniswap v4 have this shape.
+_Avoid_: v3, range, CL pool
+
+**Price**:
+A concentrated pool's current square-root price and the tick that price sits on.
+_Avoid_: spot, marginal price, quote
+
+**Liquidity**:
+The in-range liquidity of a concentrated pool.
+_Avoid_: reserve, depth, tick word
+
+**Tick**:
+A price boundary where concentrated liquidity can be added or removed.
+_Avoid_: tick word, bin, bitmap
+
+**Tick word**:
+The liquidity gross and the liquidity net at one initialized tick.
+_Avoid_: tick, bitmap, slot
+
+**Tick bitmap**:
+The set of words that name which ticks are initialized.
+_Avoid_: tick word, book, liquidity
+
+**Balancer pool**:
+A pool whose tokens and balances live in a shared vault. The pool is weighted or stable.
+_Avoid_: vault, weighted product
+
+**Weight**:
+A Balancer token's static share of pool value.
+_Avoid_: balance, amplification
+
+**Curve pool**:
+A pool of Curve coins. It is a stableswap or a crypto pool.
+_Avoid_: price curve, curve
+
+**Curve coin**:
+One token of a Curve pool, with its balance, rate, and price scale.
+_Avoid_: token, reserve
+
+**Amplification**:
+The stableswap parameter that holds price near one until balances diverge.
+_Avoid_: gamma, weight
+
+**Stableswap**:
+A Curve pool whose price curve is determined by coin balances, amplification, rates, and a pool fee.
+_Avoid_: crypto pool, stable Balancer pool
+
+**Crypto pool**:
+A Curve pool whose snapshot carries price scales and gamma.
+_Avoid_: stableswap
+
+**Metric pool**:
+An oracle-bin pool whose current price sits in one bin.
+_Avoid_: concentrated pool, oracle
+
+**Bin**:
+One price interval of a Metric pool, with scaled balances of both tokens.
+_Avoid_: tick, bucket
+
+**Pool fee**:
+The fraction of input the pool withholds.
+_Avoid_: protocol fee, gas, spread
+
+**Protocol fee**:
+A fee recorded on a concentrated snapshot beside the pool fee.
+_Avoid_: pool fee, hook
+
+### Snapshots
+
+**Snapshot**:
+The fields a pool reads when it quotes, pinned to one block.
+_Avoid_: state, detail, chain state, price curve
+
+**Chain state**:
+A node's execution state. This project does not store chain state.
+_Avoid_: snapshot, header chain
+
+**Immutable fields**:
+Snapshot facts written once, such as tokens, tick spacing, hooks, and static weights.
+_Avoid_: pool identity, mutable snapshot
+
+**Mutable snapshot**:
+Snapshot facts that trades change, such as reserves, price, liquidity, and balances, pinned to one block.
+_Avoid_: head, immutable fields, generation
+
+**Generation**:
+The identity of one mutable snapshot. Tick pages and the price curve of that snapshot carry the same generation.
+_Avoid_: version, block, cursor
+
+**Mismatch**:
+A later read of immutable fields that disagrees with the stored fields. The stored fields stay.
+_Avoid_: dirty, failed read
+
+**Tick page**:
+A stored slice of tick words for one generation.
+_Avoid_: tick bitmap, tick lens
+
+**Empty snapshot**:
+A snapshot that cannot price a positive input. The pool identity stays, and there is no price curve.
+_Avoid_: skipped curve, hole, failed read
+
+**Truncated book**:
+A concentrated snapshot whose tick bitmap was cut off before every initialized tick was named.
+_Avoid_: empty snapshot, tick page
+
+**Failed read**:
+A snapshot that records the pool and records that its fields did not come back.
+_Avoid_: empty snapshot, mismatch
+
+### Price curves
+
+**Price curve**:
+The stored relation from an input amount of one token to the output amount of another, for one direction of one pool at one generation.
+_Avoid_: the function, fit, curve, formula, quote
+
+**Direction**:
+One ordered pair of tokens, input then output.
+_Avoid_: side, leg, pair
+
+**Formula**:
+A named closed form that produces the output of a price curve on one direction.
+_Avoid_: price curve, function, model
+
+**Product formula**:
+The formula of a constant-product pool.
+_Avoid_: reserve, constant-product pool
+
+**Ladder**:
+The formula of a concentrated pool.
+_Avoid_: tick walk, concentrated quote, v3 math
+
+**Structural formula**:
+A formula whose parameters are snapshot fields, such as the product formula, the ladder, a stableswap, a weighted Balancer pool, a stable Balancer pool, or a bin.
+_Avoid_: sample formula, canonical pool
+
+**Sample formula**:
+A formula drawn through knots on the grid, such as a chord, a cubic, a residual, or a wave.
+_Avoid_: structural formula, interpolation, chain quote
+
+**Knot**:
+One input amount and the output amount a sample formula is drawn through.
+_Avoid_: grid, holdout, label
+
+**Grid**:
+The series of quotes used to sample a price curve. Each point is a fraction of the sampling ceiling.
+_Avoid_: knots, chain quotes, domain
+
+**Sampling ceiling**:
+The largest input on a direction that still has a price.
+_Avoid_: max in, balance, reserve, domain
+
+**Holdout**:
+A grid point at one quarter or four fifths of the sampling ceiling, withheld from choosing a formula's parameters and used only to score the formula.
+_Avoid_: knot, label, test set
+
+**Label**:
+The output amount a formula is scored against. A label names its source.
+_Avoid_: chain quote, local quote
+
+**Local quote**:
+An output amount computed from the snapshot.
+_Avoid_: chain quote, estimate, label
+
+**Chain quote**:
+An output amount from the venue's own quoter at the snapshot's block.
+_Avoid_: local quote, label, price curve
+
+**Quote record**:
+The stored chain quotes for one snapshot and one generation.
+_Avoid_: price curve, local quote, grid
+
+**Quoter**:
+The venue contract that returns a chain quote.
+_Avoid_: lens, router
+
+**Estimate**:
+The output amount a stored price curve assigns to an input on one direction.
+_Avoid_: local quote, chain quote
+
+**Acceptance bar**:
+The worst relative error a stored formula is allowed on its labels: ten basis points.
+_Avoid_: score, tolerance
+
+**Skipped curve**:
+A price curve that names no formula.
+_Avoid_: empty snapshot, failed read
+
+**Canonical pool**:
+A pool whose structural formula is treated as determined by the snapshot: a constant-product pool, a concentrated pool, an equal-weight or stable Balancer pool, or a stableswap.
+_Avoid_: canonical factory
+
+**Selection**:
+The choice of one formula for a direction by scoring candidates against labels.
+_Avoid_: fit, derive, estimate
+
+### History
+
+**Header**:
+The stored identity of a block: hash, parent, timestamp, receipts root, and logs bloom.
+_Avoid_: body, receipt, head
+
+**Header chain**:
+The checked sequence of headers from mainnet genesis, each header's parent being the previous hash.
+_Avoid_: corpus, chain state
+
+**Logs bloom**:
+The header field that can prove a block has no log for an address and a topic.
+_Avoid_: bloom hit, log filter
+
+**Log filter**:
+An address set and up to four topic positions. An empty position is a wildcard.
+_Avoid_: creation event, discovery hit
+
+**Bloom hit**:
+A block whose logs bloom can contain a log filter.
+_Avoid_: discovery hit, watch, proof
+
+**Receipt**:
+The result of one transaction, including its logs.
+_Avoid_: header, block body
+
+**Receipt bundle**:
+The receipts of one block, checked against that block's receipts root.
+_Avoid_: corpus, header
+
+**Corpus**:
+The stored receipt bundles for the blocks a receipt walk kept.
+_Avoid_: venue catalog, header chain, discovery store
+
+**Block body**:
+The transactions of a block. This project does not store block bodies.
+_Avoid_: receipt bundle, era1 file
+
+**Hole**:
+A block recorded as unserved.
+_Avoid_: empty snapshot, cursor
+
+**Cursor**:
+The next block or list index a walk has not committed.
+_Avoid_: generation, head, lease
+
+**Era1 file**:
+A pre-merge history object holding a header, a block body, receipts, and an index for each block of one epoch.
+_Avoid_: corpus, beacon era
+
+**Merge**:
+The boundary after which headers and receipts come from peers, and before which receipt history for a bloom hit comes from era1 files.
+_Avoid_: genesis, hard fork
+
+**Normalized log**:
+One log with its block, transaction, address, topics, and data, independent of the transport that returned it.
+_Avoid_: receipt, discovery hit
+
+### Peers
+
+**Peer**:
+An Ethereum execution-layer node this project dials outbound. This project does not serve that protocol.
+_Avoid_: peer service, bootnode
+
+**Session**:
+One outbound connection to a peer.
+_Avoid_: sighting, dial
+
+**History window**:
+The earliest and latest block a peer has advertised or has served.
+_Avoid_: cursor, corpus
+
+**Published node**:
+A node record from a public DNS discovery tree, before this project has dialed it.
+_Avoid_: summary, peer
+
+**Sighting**:
+One recorded contact with a peer: a status, a served block, an empty answer, a drop, a failed dial, or a full inbound table.
+_Avoid_: summary, session
+
+**Summary**:
+The dial hint derived from a peer's sightings: last endpoint, last window, and the blocks it has served.
+_Avoid_: sighting, published node
+
+**Dial**:
+One attempt to open a session.
+_Avoid_: sighting, fetch
+
+### Services and work
+
+**Venue catalog**:
+Pool identities, snapshots, tick pages, price curves, quote records, and watch marks.
+_Avoid_: catalog, corpus, peer directory
+
+**Discovery store**:
+List cursors, bloom hits, and the era1 receipt bytes kept so a hit is not fetched twice.
+_Avoid_: venue catalog, corpus
+
+**Work queue**:
+The leased jobs for pool state. Removing the queue drops leases, not pools.
+_Avoid_: cursor, state pipeline
+
+**Peer directory**:
+Published nodes, sightings, and summaries.
+_Avoid_: venue catalog, peer service
+
+**Database service**:
+The process that owns the header chain, the corpus, the discovery store, the venue catalog, and the work queue.
+_Avoid_: peer service, client
+
+**Peer service**:
+The process that owns dialing and the peer directory, and the only dialer.
+_Avoid_: peer, database service
+
+**Colocated pipeline**:
+A pipeline running inside the database service and reading the store in process.
+_Avoid_: client
+
+**Client**:
+A process that uses the database socket or the peer socket and does not open the files.
+_Avoid_: colocated pipeline, peer
+
+**Lens**:
+A read that sends contract creation code and takes the rows from the revert. Nothing is deployed.
+_Avoid_: quoter, view
+
+**Index lens**:
+The lens that reads a slice of a list.
+_Avoid_: creation event, detail lens
+
+**Detail lens**:
+The lens that reads a batch of snapshots, including tick bitmaps and not tick words.
+_Avoid_: tick lens, quoter
+
+**Tick lens**:
+The lens that reads tick words for ticks a tick bitmap has named.
+_Avoid_: detail lens, tick bitmap
+
+**Header sync**:
+The pipeline that appends headers.
+_Avoid_: receipt walk, state pipeline
+
+**Receipt walk**:
+The pipeline that stores receipt bundles for named block ranges.
+_Avoid_: header sync, venue enumeration
+
+**Venue enumeration**:
+The pipeline that writes pool identities from lists, from bloom hits, and from the corpus.
+_Avoid_: state pipeline, discovery hit
+
+**State pipeline**:
+The pipeline that writes snapshots, tick pages, and price curves for pool identities already stored.
+_Avoid_: venue enumeration, chain state
+
+**Watch**:
+The scan of receipt logs the peer service already holds, used to mark a pool dirty.
+_Avoid_: bloom hit, header sync
+
+**Dirty**:
+A mark that a pool's log is newer than its snapshot.
+_Avoid_: mismatch, lease, skipped curve
+
+**Head class**:
+A dirty mark that reserves or price moved.
+_Avoid_: head, mutable snapshot, tick class
+
+**Tick class**:
+A dirty mark that liquidity positions changed.
+_Avoid_: tick page, head class
+
+**Stage**:
+One leased step for a pool: immutable fields, the mutable snapshot, tick pages, or the price curve.
+_Avoid_: quote stage, phase
+
+**Lease**:
+A claim on one work-queue job that other workers leave alone until it expires.
+_Avoid_: cursor, lock
+
+**Live catalog**:
+The venue catalog of the full identity set.
+_Avoid_: sample catalog
+
+**Sample catalog**:
+A smaller copy of pool identities, used for a trial.
+_Avoid_: live catalog, quote record, grid
+
+**Spike**:
+A one-shot outbound session that reads one block, classifies its logs, and exits, keeping no peer directory.
+_Avoid_: peer service, venue enumeration
+
+## Relationships
+
+- A **Pool identity** has exactly one **Kind** and one **Pool id**, and it comes from one **Factory**, one **Singleton**, or one **Registry**
+- A **Kind** is not a **Shape**. A v2 fork is a kind whose shape is a constant-product pool
+- A **Settlement** is not a **Pool identity**
+- A **Pool identity** has at most one current **Snapshot**
+- A **Snapshot** has one **Generation**, one set of **Immutable fields**, and one **Mutable snapshot**
+- A **Mismatch** does not replace stored **Immutable fields**
+- An **Empty snapshot** keeps the **Pool identity** and has no **Price curve**
+- **Tick words** belong to a **Generation**. A **Tick bitmap** names which ticks exist and does not hold their liquidity
+- A **Price curve** belongs to one **Generation**. Each **Direction** has one **Formula**, or the record is a **Skipped curve**
+- A **Product formula** is determined by the two **Reserves** and the **Pool fee**
+- A **Ladder** is determined by the **Price**, the in-range **Liquidity**, and the **Tick words**
+- A **Hook** and a **Protocol fee** can sit on a concentrated **Snapshot**. They are not parameters of the **Ladder**
+- A **Stableswap** price curve is determined by **Curve coin** balances, **Amplification**, rates, and the **Pool fee**
+- A weighted **Balancer pool**'s price curve is determined by the two balances, the two **Weights**, and the **Pool fee**
+- A stable **Balancer pool**'s price curve is determined by the balances, **Amplification**, and the **Pool fee**
+- A **Metric pool**'s structural formula is its current **Bin**
+- A **Crypto pool**'s **Local quote** is a spot line through its price scales, not the crypto invariant
+- **Selection** scores formulas against **Labels**. A label whose source is a **Local quote** is not a **Chain quote**
+- A **Grid** is the series of quotes used to sample a **Price curve**. A **Knot** is a grid point a **Sample formula** is drawn through. A **Holdout** is a grid point that is not a knot
+- A **Quote record** stores **Chain quotes** for checking a price curve. Building a **Price curve** does not read a quote record
+- An **Estimate** is read from the stored **Price curve**. A **Local quote** is read from the **Snapshot**
+- A **Canonical pool** is a shape whose **Structural formula** is determined by the snapshot. A **Metric pool**, a **Crypto pool**, and a **Failed read** are not canonical pools
+- A **Bloom hit** becomes pool identities only after the **Receipt bundle** is read and a **Creation event** matches
+- The **Corpus** is a partial set of **Receipt bundles**. It does not replace a **List** or a bloom walk
+- A **Hole** does not move a **Cursor**, and a hole is not a gap in the **Header chain**
+- Before the **Merge**, receipt history for a bloom hit comes from an **Era1 file**. After the **Merge**, it comes from a **Peer**. The **Block body** is not stored on either path
+- A **Published node** becomes a **Summary** only through **Sightings**. A served block outranks an advertised **History window**
+- The **Database service** owns the **Header chain**, the **Corpus**, the **Discovery store**, the **Venue catalog**, and the **Work queue**
+- The **Peer service** owns the **Peer directory** and is the only dialer
+- A **Client** does not open those files. A **Colocated pipeline** calls the store in process
+- The **State pipeline** runs on identities **Venue enumeration** already wrote. The **Watch** is another producer of **Dirty** marks
+- A **Head class** with an unchanged **Tick bitmap** keeps **Tick pages**. A **Tick class**, or a changed bitmap, reads **Tick words** again. Tick class replaces head class
+- A new **Generation** drops the **Price curve**. The **Quote record** stays until the **Pool identity** is deleted
+- A **Stage** is one of: immutable fields, the mutable snapshot, tick pages, the price curve. There is no live stage for chain quotes
+- A **Sample catalog** is a copy of identities for a trial. It is not the **Live catalog**
+
+## Example dialogue
+
+> **Dev:** "When we build a price curve, do we call the quoter at a few sizes?"
+> **Domain expert:** "No. A **Price curve** comes from the **Snapshot**. A **Local quote** is an output computed from those fields. **Selection** may score formulas on a **Grid** of local quotes. A **Chain quote** is a **Quote record**, kept for checking, and it is not an input to the price curve."
+
+> **Dev:** "So the product formula is the reserves and the fee?"
+> **Domain expert:** "The **Product formula** is the formula of a **Constant-product pool**. That formula is determined by the two **Reserves** and the **Pool fee**. The reserves are inputs. They are not the formula."
+
+> **Dev:** "And a concentrated pool?"
+> **Domain expert:** "The **Ladder** is determined by the **Price**, the in-range **Liquidity**, and the **Tick words**. The **Tick bitmap** only names which ticks exist. A **Hook** and the **Protocol fee** can be on the snapshot, and they are not parameters of the ladder."
+
+> **Dev:** "What is the grid?"
+> **Domain expert:** "The **Grid** is the series of quotes used to sample the **Price curve**. Each point is a fraction of the **Sampling ceiling**. A **Holdout**, at one quarter or four fifths of that ceiling, is scored and is not used to choose parameters. A **Knot** is a grid point a **Sample formula** is drawn through."
+
+> **Dev:** "What about a pool with nothing to price?"
+> **Domain expert:** "An **Empty snapshot** keeps the **Pool identity** and stores no **Price curve**. A **Skipped curve** is a stored price curve that names no **Formula**. A **Failed read** means the fields did not come back."
+
+## Example dialogue: finding a pool
+
+> **Dev:** "How does a pool get an identity?"
+> **Domain expert:** "If the **Factory** keeps a **List**, the **Index lens** reads it. If the factory keeps no list, a **Bloom hit** names a block and the **Creation event** in the **Receipt bundle** is the identity. A **Registry** covers Curve pools no factory event named."
+
+> **Dev:** "Is a CoW auction a list of pools?"
+> **Domain expert:** "No. That file is a **Settlement**. It is a hint about which venues trade. It is not a **Pool identity** and it is not a **List**."
+
+> **Dev:** "The corpus already has Uniswap v3 logs. Is that the census?"
+> **Domain expert:** "The **Corpus** is a partial set of **Receipt bundles**. **Venue enumeration** can fold those creation events in. The census is the **Live catalog**."
+
+> **Dev:** "People say hit for three different things."
+> **Domain expert:** "A **Bloom hit** is a block that might contain a log. A **Discovery hit** is an **Asset** or a **Pool identity** read from a log that was there. The **Watch** marks a pool **Dirty** when a log is newer than its **Snapshot**."
+
+## Example dialogue: history and a refresh
+
+> **Dev:** "Do we sync chain state?"
+> **Domain expert:** "No. **Chain state** stays on the node. We store a **Header chain**, **Receipt bundles** for some blocks, and a **Snapshot** of the fields a pool quotes from."
+
+> **Dev:** "Where do old receipts come from?"
+> **Domain expert:** "Before the **Merge**, from an **Era1 file**. After the **Merge**, from a **Peer**. A **Block body** is not stored. A **Hole** means that block was not served, and the **Cursor** stays where it was."
+
+> **Dev:** "A swap landed. What is dirty?"
+> **Domain expert:** "The **Watch** reads logs the **Peer service** already has. A swap or a sync is a **Head class**. A mint or a burn is a **Tick class**. Tick class replaces head class."
+
+> **Dev:** "Does that reload ticks and throw away quotes?"
+> **Domain expert:** "A head class with the same **Tick bitmap** keeps the **Tick pages**. A tick class reads tick words again. The new **Generation** drops the **Price curve**. The **Quote record** stays."
+
+## Flagged ambiguities
+
+- **"Curve"** is a **Curve pool** or, loosely, a **Price curve**. Say one of those. "Curve" alone is not a term.
+- **"Quote"** is a **Local quote**, a **Chain quote**, a **Quote record**, or the verb. Name the object. A **Label** is what **Selection** scores, and the label names its source. An amount computed from the snapshot is a **Local quote** even when a stored field is still called chain output.
+- **"Catalog"** is the **Venue catalog**, the **Sample catalog**, or the **Peer directory**. Say which.
+- **"Generation"** identifies one **Mutable snapshot**. A version identifies the schema of a **Price curve** or a **Quote record**. A generation is not a version.
+- **"Head"** is the newest block a **Peer** reports, the **Mutable snapshot**, or a **Head class**. Say which.
+- **"Hit"** is a **Bloom hit**, a **Discovery hit**, or a **Watch** mark.
+- **"Sample"** is a **Sample catalog**, a **Chain quote**, or one point of a **Grid**.
+- **"Body"** is a **Block body**, which is not stored, or the era1 receipt bytes in the **Discovery store**. The corpus object is a **Receipt bundle**.
+- **"Peer"** is a node. The **Peer service** is the process. The **Peer directory** is the sightings and summaries.
+- **"Index"** is a **List** or a position in a **Tick bitmap**. A list names pools. A bitmap names ticks.
+- **"Canonical"** is a **Canonical factory** or a **Canonical pool**. The factory is an emitter we accept. The pool is a shape whose structural formula is determined by the snapshot.
+- **"State"** is **Chain state**, a **Snapshot**, or the **State pipeline**. The state pipeline writes snapshots and price curves. It does not sync a node.
+- **"Fit"** is not a noun. The stored object is a **Price curve**. The choice among formulas is **Selection**.
+- **"The function"** is not a name for a **Price curve** or a **Formula**.
+- **Quote stage.** Older work named a stage that fetched chain quotes. That stage is not claimed. Chain quotes already stored remain **Quote records**.
+- **Unequal-weight Balancer.** The local quote and the stored weighted formula are both determined by balances, weights, and the pool fee, and they are different evaluations. Selection can store a **Sample formula** instead. Do not treat the local quote and the stored formula as one object.
+- **Crypto pool.** Its local quote is a spot line on the price scales. That line is not the crypto invariant and not a chain quote.
+- **Kind and shape.** Kind is the family on the pool identity. Shape is the quoting rule on the snapshot.
