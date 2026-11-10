@@ -10,8 +10,9 @@
 //! An empty snapshot stays in the catalog and gets no tick or curve job.
 //! The state pipeline does not call the quoter. Chain samples already stored
 //! stay in the quote table for validation. A new snapshot does not delete
-//! them. Curves are derived locally, and an existing sample is used only when
-//! it still matches the snapshot generation.
+//! them, and a curve is never fit to them. The curve is chosen from local
+//! quotes of the ingested snapshot: reserves, tick words, balances, and the
+//! other fields that pool uses when it quotes.
 //! Tick words still load when the bitmap lists them and those pages are not
 //! stored, because the ladder's `max_in` is only known once the words are in.
 //! Claim order is a rank index: a watch hit, then a larger `max_in`.
@@ -54,7 +55,9 @@ const DIRTY_BAND: u64 = 1 << 63;
 
 const WATCH_KEY: &str = "watch_through";
 /// Fit-document generation stored on a curve. A bump rebuilds every curve.
-pub const CURVE_VERSION: u32 = 2;
+/// Payload schema. A version 3 curve is chosen from local quotes of the
+/// ingested snapshot. Older rows were fit to quoter samples or left empty.
+pub const CURVE_VERSION: u32 = 3;
 /// Sampling scheme stored on a quote row. A bump re-reads every quoter.
 pub const QUOTE_VERSION: u32 = 1;
 pub const TICK_PAGE: u32 = 512;
@@ -1738,8 +1741,15 @@ async fn drive_details<S: EntityStore>(
             book_ready,
         });
         if plan.derive {
-            if let Ok(curve) = derive_curve(&detail, stored.generation) {
-                if store.put_curve(&curve).await.is_err() {
+            match curve_for_snapshot(&detail, stored.generation) {
+                Ok(curve) => {
+                    if store.put_curve(&curve).await.is_err() {
+                        let mut job = curve_job(row.kind, row.id, stored.generation);
+                        job.priority = plan.priority;
+                        follow.push(job);
+                    }
+                }
+                Err(_) => {
                     let mut job = curve_job(row.kind, row.id, stored.generation);
                     job.priority = plan.priority;
                     follow.push(job);
@@ -1914,17 +1924,14 @@ async fn drive_ticks<S: EntityStore>(
     Ok(())
 }
 
+/// Choose a curve from local quotes of `detail`. Quoter samples are not read.
 pub(crate) fn curve_for_snapshot(
     detail: &PoolDetail,
-    quotes: Option<&QuoteRecord>,
     generation: u64,
 ) -> Result<CurveRecord, String> {
-    if let Some(quotes) = quotes {
-        if let Some(curve) = crate::fit::fitted_curve(detail, &quotes.payload, generation)? {
-            return Ok(curve);
-        }
-    }
-    derive_curve(detail, generation)
+    let mut curve = derive_curve(detail, generation)?;
+    curve.payload = crate::fit::local_curve_payload(detail)?;
+    Ok(curve)
 }
 
 async fn drive_curves<S: EntityStore>(
@@ -1961,11 +1968,7 @@ async fn drive_curves<S: EntityStore>(
             done.push((job.stage, job.kind, job.id));
             continue;
         }
-        let quotes = state
-            .quotes
-            .as_ref()
-            .filter(|quote| quote_is_current(Some(quote), &mutable));
-        let curve = match curve_for_snapshot(&detail, quotes, mutable.generation) {
+        let curve = match curve_for_snapshot(&detail, mutable.generation) {
             Ok(curve) => curve,
             Err(err) => {
                 keep_or_drop(job, err, give_up_after, &mut done, &mut failed, notes);
@@ -2481,11 +2484,7 @@ async fn after_book<S: EntityStore>(store: &S, job: &WorkJob) -> eyre::Result<Op
         return Ok(None);
     }
     let priority = priority_of((job.priority & DIRTY_BAND) != 0, cap.top);
-    let quotes = state
-        .quotes
-        .as_ref()
-        .filter(|quote| quote_is_current(Some(quote), &mutable));
-    match curve_for_snapshot(&detail, quotes, mutable.generation) {
+    match curve_for_snapshot(&detail, mutable.generation) {
         Ok(curve) => {
             if store.put_curve(&curve).await.is_err() {
                 let mut next = curve_job(job.kind, job.id, mutable.generation);

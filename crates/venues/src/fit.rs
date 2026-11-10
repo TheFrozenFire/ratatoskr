@@ -1,10 +1,11 @@
 //! On-chain quote samples and the curve-fit extract.
 //!
 //! Stored chain samples sit next to the snapshot for validation. The state
-//! pipeline does not request new ones. This module copies the stored samples
-//! into a JSONL file and can load a file written by an older export back into
-//! the catalog. `drive_quotes` remains for that validation path and is not
-//! called by the pipeline.
+//! pipeline does not request new ones, and it does not fit curves to them.
+//! A stored curve is chosen from local quotes of the ingested snapshot.
+//! This module copies the stored samples into a JSONL file and can load a
+//! file written by an older export back into the catalog. `drive_quotes`
+//! remains for that validation path and is not called by the pipeline.
 //!
 //! The fit domain is a fraction of the largest input that still has a price.
 //! Constant-product pools have no hard maximum, so the top of the domain is
@@ -28,7 +29,7 @@ use crate::detail::{product_fee_pips, PoolDetail, Quote};
 use crate::fit_formula::{decode_fit, encode_fit, Formula, StoredFit};
 use crate::fit_select::{choose, labels_of};
 use crate::state::{
-    curve_is_current, curve_job, derive_curve, is_canonical, join_detail, keep_or_drop,
+    curve_is_current, curve_job, is_canonical, join_detail, keep_or_drop,
     quote_is_current, unix_now, CurveRecord, PoolState, QuoteRecord, WorkJob, CURVE_VERSION,
     QUOTE_VERSION,
 };
@@ -533,7 +534,7 @@ fn header_value() -> Value {
         "curve_version": CURVE_VERSION,
         "fits": "Each pool carries fits: the closed form stored for that direction. score is the all-label worst basis points. formula.kind is the stored formula. A direction with no fit is absent. Skip reasons are not formulas.",
         "units": "Raw token amounts. Decimals are not stored. Do not assume 18.",
-        "ground_truth": "chain_out is a protocol quoter sample stored for validation. The state pipeline does not fetch new samples. local_out is recomputed from the stored snapshot when this file is written and is not ground truth.",
+        "ground_truth": "chain_out is a protocol quoter sample stored for validation. The state pipeline does not fetch new samples and does not fit curves to them. A stored curve is chosen from local quotes of the ingested snapshot. local_out is recomputed from that snapshot when this file is written.",
         "domain": "max_in is the top of the fit domain. cp_99 buys 99% of the output reserve. ladder is the last step of the concentrated book. balance_search bisects the local quote toward 99% of the output balance, capped at 1000x the input balance. balance is the input balance when that search cannot run. uninitialized and empty_book and none have no samples.",
         "grid": "Fractions of max_in: 0.0001, 0.001, 0.01, 0.05, 0.1, 0.25, 0.5, 0.8, 0.95, 1. A fraction that rounds to 0 is omitted. Two fractions that land on the same amount keep the larger fraction.",
         "chain_max": "If the fraction-1 quote reverts, an 8-step bisection records the largest accepted input. larger_input_reverted is then true. If fraction 1 is accepted, chain_max_in equals that input and larger_input_reverted is false: the domain top worked, and a constant-product pool still has no hard maximum.",
@@ -2436,42 +2437,61 @@ fn sample_json(sample: &Sample) -> Value {
     })
 }
 
-/// Fit each labeled direction. The stored curve is those formulas.
+/// Choose each direction from local quotes of `detail`.
 ///
-/// A payload with no `directions` array is not a quote grid. A grid whose
-/// directions do not choose a formula stores an empty fit.
-pub(crate) fn fitted_curve(
-    detail: &PoolDetail,
-    quote_payload: &[u8],
-    generation: u64,
-) -> Result<Option<CurveRecord>, String> {
-    let Ok(value) = serde_json::from_slice::<Value>(quote_payload) else {
-        return Err("quote payload".into());
-    };
-    let Some(directions) = value.get("directions").and_then(Value::as_array) else {
-        return Ok(None);
-    };
+/// The selector's label field is named `chain_out`. The amounts written there
+/// are `PoolDetail::quote` results. A stored quoter sample is not read. When
+/// no direction has a positive local quote, the payload is the structural
+/// product formula or a skip reason.
+pub(crate) fn local_curve_payload(detail: &PoolDetail) -> Result<Vec<u8>, String> {
     let state = state_json(detail);
+    let (_, pairs) = pairs_of(detail);
     let mut fits = Vec::new();
-    for direction in directions {
-        let rows = labels_of(direction)?;
+    for (token_in, token_out) in pairs {
+        let built = direction_of(detail, token_in, token_out);
+        let direction = selector_direction(&built);
+        let rows = labels_of(&direction)?;
         if rows.is_empty() {
             continue;
         }
-        let Some(chosen) = choose(&state, direction, &rows)? else {
+        let Some(chosen) = choose(&state, &direction, &rows)? else {
             continue;
         };
         fits.push(StoredFit {
-            token_in: parse_address(direction.get("token_in"))?,
-            token_out: parse_address(direction.get("token_out"))?,
+            token_in,
+            token_out,
             score: chosen.score,
             name: chosen.name.to_string(),
             formula: chosen.formula,
         });
     }
-    let mut curve = derive_curve(detail, generation)?;
-    curve.payload = encode_fit(0, &fits);
-    Ok(Some(curve))
+    if fits.is_empty() {
+        return Ok(curve_payload(detail));
+    }
+    Ok(encode_fit(0, &fits))
+}
+
+/// One direction, with local quote amounts in the selector's label field.
+fn selector_direction(direction: &Direction) -> Value {
+    let samples = direction
+        .samples
+        .iter()
+        .filter_map(|sample| {
+            let out = sample.local_out.filter(|out| !out.is_zero())?;
+            Some(json!({
+                "role": sample.role,
+                "fraction": sample.fraction,
+                "amount_in": sample.amount_in.to_string(),
+                "chain_out": out.to_string(),
+            }))
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "token_in": addr(direction.token_in),
+        "token_out": addr(direction.token_out),
+        "max_in": direction.max_in.to_string(),
+        "samples": samples,
+    })
 }
 
 /// Replace every stored curve with the current fitter.
@@ -2500,11 +2520,7 @@ pub fn refit_curves(catalog: &Catalog) -> eyre::Result<u64> {
                         Ok(detail) => detail,
                         Err(_) => continue,
                     };
-                let curve = crate::state::curve_for_snapshot(
-                    &detail,
-                    state.quotes.as_ref(),
-                    mutable.generation,
-                )
+                let curve = crate::state::curve_for_snapshot(&detail, mutable.generation)
                 .map_err(|err| eyre::eyre!(err))?;
                 curves.push(curve);
             }
@@ -2862,7 +2878,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fitted_product_quotes_off_the_grid() {
+    fn a_local_product_curve_quotes_off_the_grid() {
         let token0 = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         let token1 = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
         let detail = PoolDetail::ConstantProduct(ConstantProduct {
@@ -2877,45 +2893,69 @@ mod tests {
             timestamp: 1,
             flags: 0,
         });
-        let left = U256::from(1_000u64);
-        let right = U256::from(4_000u64);
-        let left_quote = detail.quote(token0, token1, left).unwrap();
-        let right_quote = detail.quote(token0, token1, right).unwrap();
-        let payload = json!({
-            "directions": [{
-                "token_in": format!("{token0}"),
-                "token_out": format!("{token1}"),
-                "samples": [
-                    {
-                        "amount_in": left.to_string(),
-                        "chain_out": left_quote.amount_out.to_string(),
-                        "fraction": "0.1",
-                    },
-                    {
-                        "amount_in": right.to_string(),
-                        "chain_out": right_quote.amount_out.to_string(),
-                        "fraction": "0.5",
-                    },
-                ],
-            }],
-        });
-        let bytes = serde_json::to_vec(&payload).unwrap();
-        assert!(fitted_curve(&detail, b"{}", 7).unwrap().is_none());
-        let curve = fitted_curve(&detail, &bytes, 7).unwrap().expect("fit");
+        let curve = crate::state::curve_for_snapshot(&detail, 7).unwrap();
         assert_eq!(curve.version, CURVE_VERSION);
         assert_eq!(curve.generation, 7);
         assert_eq!(curve.payload[0], 1);
         assert_eq!(curve.payload[1], 0);
         let off = U256::from(2_500u64);
-        let fitted = crate::state::estimate(&curve, 7, token0, token1, off).unwrap();
-        let direct = detail.quote(token0, token1, off).unwrap();
-        assert_eq!(fitted.amount_out, direct.amount_out);
-        assert_eq!(fitted.fee_paid, direct.fee_paid);
-        assert!(!fitted.exhausted);
+        for (token_in, token_out) in [(token0, token1), (token1, token0)] {
+            let fitted = crate::state::estimate(&curve, 7, token_in, token_out, off).unwrap();
+            let direct = detail.quote(token_in, token_out, off).unwrap();
+            assert_eq!(fitted.amount_out, direct.amount_out);
+            assert_eq!(fitted.fee_paid, direct.fee_paid);
+            assert!(!fitted.exhausted);
+        }
         let zero = crate::state::estimate(&curve, 7, token0, token1, U256::ZERO).unwrap();
         assert_eq!(zero.amount_out, U256::ZERO);
         assert_eq!(zero.fee_paid, U256::ZERO);
-        assert!(crate::state::estimate(&curve, 7, token1, token0, off).is_err());
+    }
+
+    #[test]
+    fn a_local_concentrated_curve_quotes_off_the_grid() {
+        let token0 = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let token1 = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        let liquidity = 1_000_000_i128;
+        let detail = PoolDetail::Concentrated(crate::detail::Concentrated {
+            kind: UNI_V3,
+            id: B256::ZERO,
+            home: Address::ZERO,
+            hooks: Address::ZERO,
+            token0,
+            token1,
+            fee_pips: Some(3000),
+            protocol_fee: 0,
+            tick_spacing: 60,
+            sqrt_price_x96: U256::from(1u8) << 96,
+            tick: 0,
+            liquidity: liquidity as u128,
+            next_scan: None,
+            bitmaps: Vec::new(),
+            ticks: vec![
+                crate::detail::TickWord {
+                    tick: -60,
+                    liquidity_gross: liquidity as u128,
+                    liquidity_net: liquidity,
+                },
+                crate::detail::TickWord {
+                    tick: 60,
+                    liquidity_gross: liquidity as u128,
+                    liquidity_net: -liquidity,
+                },
+            ],
+            flags: 0,
+        });
+        let curve = crate::state::curve_for_snapshot(&detail, 4).unwrap();
+        let fit = crate::fit_formula::decode_fit(&curve.payload).unwrap();
+        assert_eq!(fit.reason, 0);
+        assert!(fit.directions.iter().all(|direction| direction.name == "ladder"));
+        assert_eq!(fit.directions.len(), 2);
+        let off = U256::from(1_000u64);
+        for (token_in, token_out) in [(token0, token1), (token1, token0)] {
+            let fitted = crate::state::estimate(&curve, 4, token_in, token_out, off).unwrap();
+            let direct = detail.quote(token_in, token_out, off).unwrap();
+            assert_eq!(fitted.amount_out, direct.amount_out);
+        }
     }
 
     #[test]
