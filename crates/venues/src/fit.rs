@@ -420,7 +420,9 @@ pub(crate) async fn drive_quotes<S: EntityStore>(
         }
         if quote_is_current(state.quotes.as_ref(), &mutable) {
             if !curve_is_current(state.curve.as_ref(), mutable.generation) {
-                follow.push(curve_job(job.kind, job.id, mutable.generation));
+                let mut next = curve_job(job.kind, job.id, mutable.generation);
+                next.priority = job.priority;
+                follow.push(next);
             }
             done.push((job.stage, job.kind, job.id));
             continue;
@@ -509,7 +511,9 @@ pub(crate) async fn drive_quotes<S: EntityStore>(
         for (index, generation, curve, _) in records {
             let job = &jobs[index];
             if !curve_is_current(curve.as_ref(), generation) {
-                follow.push(curve_job(job.kind, job.id, generation));
+                let mut next = curve_job(job.kind, job.id, generation);
+                next.priority = job.priority;
+                follow.push(next);
             }
             done.push((job.stage, job.kind, job.id));
         }
@@ -555,6 +559,42 @@ fn header_value() -> Value {
             "multicall3": addr(MULTICALL3)
         }
     })
+}
+
+/// Smallest grid knot is `1/10_000` of `max_in`. A smaller domain rounds to 0.
+pub(crate) const SAMPLE_FLOOR: u64 = 10_000;
+
+/// How much of the quote grid this snapshot can fill.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TradeCapacity {
+    pub any_positive: bool,
+    pub fills_sample: bool,
+    pub top: U256,
+}
+
+/// Largest priced input on the snapshot, without building quote samples.
+pub(crate) fn trade_capacity(detail: &PoolDetail) -> TradeCapacity {
+    let mut out = TradeCapacity {
+        any_positive: false,
+        fills_sample: false,
+        top: U256::ZERO,
+    };
+    let floor = U256::from(SAMPLE_FLOOR);
+    let (_, pairs) = pairs_of(detail);
+    for (token_in, token_out) in pairs {
+        let (max_in, _) = domain_max(detail, token_in, token_out);
+        if max_in.is_zero() {
+            continue;
+        }
+        out.any_positive = true;
+        if max_in >= floor {
+            out.fills_sample = true;
+        }
+        if max_in > out.top {
+            out.top = max_in;
+        }
+    }
+    out
 }
 
 /// A snapshot can price a positive input.

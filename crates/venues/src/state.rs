@@ -7,6 +7,12 @@
 //! its dirty flag in the same transaction, and only when no newer event arrived
 //! during the read. A new snapshot drops quotes and the curve. Quotes are taken
 //! at the snapshot block before the curve is fit.
+//!
+//! An empty snapshot stays in the catalog and gets no tick, quote, or curve
+//! job. A pool that cannot fill the smallest quote sample skips the quoter.
+//! Tick words still load when the bitmap lists them and those pages are not
+//! stored, because the ladder's `max_in` is only known once the words are in.
+//! Claim order is a rank index: a watch hit, then a larger `max_in`.
 
 use crate::catalog::{entity_key, AERO, BALANCER_V2, BALANCER_V3, CURVE, METRIC, UNI_V4, VENUES};
 use crate::detail::{
@@ -39,6 +45,10 @@ const DIRTY: TableDefinition<&[u8], &[u8]> = TableDefinition::new("dirty");
 const MISMATCH: TableDefinition<&[u8], &[u8]> = TableDefinition::new("immutable_mismatch");
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 const JOBS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("jobs");
+/// Claim order for one stage. The identity key stays on `JOBS`.
+const JOB_RANK: TableDefinition<&[u8], &[u8]> = TableDefinition::new("job_rank");
+/// Watch hits sort ahead of every quiet pool. The low 63 bits are `max_in`.
+const DIRTY_BAND: u64 = 1 << 63;
 
 const WATCH_KEY: &str = "watch_through";
 /// Fit-document generation stored on a curve. A bump rebuilds every curve.
@@ -187,6 +197,8 @@ pub struct WorkJob {
     pub generation: u64,
     pub tick_cursor: i32,
     pub class: u8,
+    /// Higher is claimed first. Bit 63 is a watch hit. The low bits grow with `max_in`.
+    pub priority: u64,
     pub error: String,
 }
 
@@ -649,7 +661,7 @@ impl Catalog {
         }
         let mut write = self.entities.begin_write()?;
         write.set_durability(Durability::Immediate);
-        {
+        let bumped = {
             let mut dirty_table = write.open_table(DIRTY)?;
             let mutable_table = write.open_table(MUTABLE)?;
             let mut meta = write.open_table(META)?;
@@ -664,6 +676,7 @@ impl Catalog {
                     entry.1 = CLASS_TICKS;
                 }
             }
+            let mut bumped = Vec::with_capacity(merged.len());
             for ((kind, id), (block, class)) in merged {
                 let key = entity_key(kind, &id);
                 let (seen, stored_class) = match dirty_table.get(key.as_slice())? {
@@ -677,10 +690,13 @@ impl Catalog {
                 };
                 let bytes = encode_dirty(seen.max(block), class);
                 dirty_table.insert(key.as_slice(), bytes.as_slice())?;
+                bumped.push((kind, id, class));
             }
             meta.insert(WATCH_KEY, through)?;
-        }
+            bumped
+        };
         write.commit()?;
+        self.enqueue_bumped(&bumped)?;
         Ok(())
     }
 
@@ -1014,10 +1030,10 @@ impl Catalog {
             work.set_durability(Durability::Immediate);
             {
                 let mut jobs = work.open_table(JOBS)?;
+                let mut ranks = work.open_table(JOB_RANK)?;
                 for (kind, id) in chunk {
                     for stage in STAGE_IMMUTABLE..=STAGE_QUOTE {
-                        let key = job_key(stage, *kind, id);
-                        jobs.remove(key.as_slice())?;
+                        clear_job(&mut jobs, &mut ranks, stage, *kind, id)?;
                     }
                 }
             }
@@ -1096,6 +1112,7 @@ impl Catalog {
                 }
             }
         }
+        self.index_ranks()?;
         Ok(inserted)
     }
 
@@ -1113,25 +1130,58 @@ impl Catalog {
         write.set_durability(Durability::Immediate);
         let jobs = {
             let mut table = write.open_table(JOBS)?;
+            let mut ranks = write.open_table(JOB_RANK)?;
             let mut picked = Vec::new();
-            let start = job_key(stage, 0, &B256::ZERO);
-            let end = job_key(stage.saturating_add(1), 0, &B256::ZERO);
-            for item in table.range::<&[u8]>(start.as_slice()..end.as_slice())? {
+            let mut stale = Vec::new();
+            let start = rank_key(stage, u64::MAX, 0, &B256::ZERO);
+            let end = rank_key(stage.saturating_add(1), u64::MAX, 0, &B256::ZERO);
+            let mut saw_rank = false;
+            for item in ranks.range::<&[u8]>(start.as_slice()..end.as_slice())? {
+                saw_rank = true;
                 if picked.len() == limit as usize {
                     break;
                 }
-                let (key, value) = item?;
-                let mut job = decode_job(key.value(), value.value())?;
-                if job.lease_until > now || job.not_before > now {
+                let (key, _) = item?;
+                let Some((rank_stage, priority, kind, id)) = decode_rank(key.value()) else {
+                    continue;
+                };
+                let identity = job_key(rank_stage, kind, &id);
+                let Some(stored) = table.get(identity.as_slice())? else {
+                    stale.push(key.value().to_vec());
+                    continue;
+                };
+                let mut job = decode_job(identity.as_slice(), stored.value())?;
+                drop(stored);
+                if job.priority != priority {
+                    stale.push(key.value().to_vec());
                     continue;
                 }
-                job.lease_until = now.saturating_add(lease_for);
-                job.attempt = job.attempt.saturating_add(1);
-                let bytes = encode_job(&job);
-                picked.push((key.value().to_vec(), job, bytes));
+                if !lease_job(&mut job, now, lease_for) {
+                    continue;
+                }
+                picked.push((identity.to_vec(), job));
+            }
+            if !saw_rank {
+                let start = job_key(stage, 0, &B256::ZERO);
+                let end = job_key(stage.saturating_add(1), 0, &B256::ZERO);
+                for item in table.range::<&[u8]>(start.as_slice()..end.as_slice())? {
+                    if picked.len() == limit as usize {
+                        break;
+                    }
+                    let (key, value) = item?;
+                    let mut job = decode_job(key.value(), value.value())?;
+                    if !lease_job(&mut job, now, lease_for) {
+                        continue;
+                    }
+                    picked.push((key.value().to_vec(), job));
+                }
+            }
+            for key in stale {
+                ranks.remove(key.as_slice())?;
             }
             let mut jobs = Vec::with_capacity(picked.len());
-            for (key, job, bytes) in picked {
+            for (key, job) in picked {
+                let bytes = encode_job(&job);
                 table.insert(key.as_slice(), bytes.as_slice())?;
                 jobs.push(job);
             }
@@ -1145,23 +1195,7 @@ impl Catalog {
         if jobs.is_empty() {
             return Ok(());
         }
-        let mut write = self.work.begin_write()?;
-        write.set_durability(Durability::Immediate);
-        {
-            let mut table = write.open_table(JOBS)?;
-            for job in jobs {
-                let key = job_key(job.stage, job.kind, &job.id);
-                if let Some(stored) = table.get(key.as_slice())? {
-                    let existing = decode_job(key.as_slice(), stored.value())?;
-                    if existing.lease_until > now {
-                        continue;
-                    }
-                }
-                let bytes = encode_job(job);
-                table.insert(key.as_slice(), bytes.as_slice())?;
-            }
-        }
-        write.commit()?;
+        self.sync_jobs(&[], jobs, now)?;
         Ok(())
     }
 
@@ -1170,9 +1204,9 @@ impl Catalog {
         write.set_durability(Durability::Immediate);
         {
             let mut table = write.open_table(JOBS)?;
+            let mut ranks = write.open_table(JOB_RANK)?;
             for (stage, kind, id) in done {
-                let key = job_key(*stage, *kind, id);
-                table.remove(key.as_slice())?;
+                clear_job(&mut table, &mut ranks, *stage, *kind, id)?;
             }
             for fail in failed {
                 let key = job_key(fail.stage, fail.kind, &fail.id);
@@ -1184,8 +1218,7 @@ impl Catalog {
                 job.lease_until = 0;
                 job.not_before = fail.not_before;
                 job.error = clip_error(&fail.error);
-                let bytes = encode_job(&job);
-                table.insert(key.as_slice(), bytes.as_slice())?;
+                put_job(&mut table, &mut ranks, &job)?;
             }
         }
         write.commit()?;
@@ -1194,50 +1227,215 @@ impl Catalog {
 
     fn reconcile_rows(&self, rows: &[VenueRow], now: u64) -> eyre::Result<u64> {
         let mut jobs = Vec::new();
+        let mut drop = Vec::new();
         for row in rows {
             let state = self.read_state(row.kind, row.id)?;
-            if state.immutable.is_none() {
-                jobs.push(blank_job(STAGE_IMMUTABLE, row.kind, row.id));
-                continue;
-            }
-            let Some(mutable) = state.mutable else {
-                jobs.push(blank_job(STAGE_MUTABLE, row.kind, row.id));
-                continue;
-            };
-            if state.dirty.is_some() || mutable.truncated {
-                let mut job = blank_job(STAGE_MUTABLE, row.kind, row.id);
-                job.generation = mutable.generation;
-                job.class = state.dirty.map(|dirty| dirty.class).unwrap_or(CLASS_NONE);
-                jobs.push(job);
-                continue;
-            }
-            if needs_ticks(row.kind, &mutable) {
-                let cursor = first_missing_page(&self.entities, row.kind, row.id, &mutable)?;
-                let pages = mutable.tick_count.div_ceil(TICK_PAGE);
-                if cursor < pages {
-                    let mut job = blank_job(STAGE_TICKS, row.kind, row.id);
-                    job.generation = mutable.generation;
-                    job.tick_cursor = i32::try_from(cursor).unwrap_or(i32::MAX);
-                    jobs.push(job);
+            let desired = self.desired_job(row, &state)?;
+            for stage in STAGE_IMMUTABLE..=STAGE_QUOTE {
+                if desired.as_ref().is_some_and(|job| job.stage == stage) {
                     continue;
                 }
+                drop.push((stage, row.kind, row.id));
             }
-            if !quote_is_current(state.quotes.as_ref(), &mutable) {
-                let mut job = blank_job(STAGE_QUOTE, row.kind, row.id);
-                job.generation = mutable.generation;
-                jobs.push(job);
-                continue;
-            }
-            if !curve_is_current(state.curve.as_ref(), mutable.generation) {
-                let mut job = blank_job(STAGE_CURVE, row.kind, row.id);
-                job.generation = mutable.generation;
+            if let Some(job) = desired {
                 jobs.push(job);
             }
         }
-        let before = count_jobs(&self.work)?;
-        self.enqueue_work(&jobs, now)?;
-        let after = count_jobs(&self.work)?;
-        Ok(after.saturating_sub(before))
+        self.sync_jobs(&drop, &jobs, now)
+    }
+
+    /// One mutable job per pool the watch just marked, at the dirty priority.
+    ///
+    /// The entity commit has already landed. A leased job is left alone.
+    fn enqueue_bumped(&self, bumped: &[(u8, B256, u8)]) -> eyre::Result<()> {
+        if bumped.is_empty() {
+            return Ok(());
+        }
+        let mut jobs = Vec::with_capacity(bumped.len());
+        for (kind, id, class) in bumped {
+            let state = self.read_state(*kind, *id)?;
+            let top = stored_capacity(*kind, *id, &state)
+                .map(|cap| cap.top)
+                .unwrap_or(U256::ZERO);
+            let mut job = blank_job(STAGE_MUTABLE, *kind, *id);
+            job.class = *class;
+            job.priority = priority_of(true, top);
+            if let Some(mutable) = &state.mutable {
+                job.generation = mutable.generation;
+            }
+            jobs.push(job);
+        }
+        self.enqueue_work(&jobs, unix_now())
+    }
+
+    fn desired_job(&self, row: &VenueRow, state: &PoolState) -> eyre::Result<Option<WorkJob>> {
+        if state.immutable.is_none() {
+            return Ok(Some(blank_job(STAGE_IMMUTABLE, row.kind, row.id)));
+        }
+        let Some(mutable) = &state.mutable else {
+            return Ok(Some(blank_job(STAGE_MUTABLE, row.kind, row.id)));
+        };
+        if state.dirty.is_some() || mutable.truncated {
+            let top = stored_capacity(row.kind, row.id, state)
+                .map(|cap| cap.top)
+                .unwrap_or(U256::ZERO);
+            let mut job = blank_job(STAGE_MUTABLE, row.kind, row.id);
+            job.generation = mutable.generation;
+            job.class = state
+                .dirty
+                .as_ref()
+                .map(|dirty| dirty.class)
+                .unwrap_or(CLASS_NONE);
+            job.priority = priority_of(state.dirty.is_some(), top);
+            return Ok(Some(job));
+        }
+        let top = match stored_capacity(row.kind, row.id, state) {
+            Some(cap) => {
+                if needs_ticks(row.kind, mutable) {
+                    let cursor = first_missing_page(&self.entities, row.kind, row.id, mutable)?;
+                    let pages = mutable.tick_count.div_ceil(TICK_PAGE);
+                    if cursor < pages {
+                        let mut job = blank_job(STAGE_TICKS, row.kind, row.id);
+                        job.generation = mutable.generation;
+                        job.tick_cursor = i32::try_from(cursor).unwrap_or(i32::MAX);
+                        job.priority = priority_of(false, cap.top);
+                        return Ok(Some(job));
+                    }
+                }
+                if !cap.any_positive {
+                    return Ok(None);
+                }
+                if !cap.fills_sample {
+                    if curve_is_current(state.curve.as_ref(), mutable.generation) {
+                        return Ok(None);
+                    }
+                    let mut job = curve_job(row.kind, row.id, mutable.generation);
+                    job.priority = priority_of(false, cap.top);
+                    return Ok(Some(job));
+                }
+                cap.top
+            }
+            None => return self.structural_job(row, mutable, state, 0),
+        };
+        self.structural_job(row, mutable, state, priority_of(false, top))
+    }
+
+    /// Tick, quote, or curve, in that order, for a snapshot the filter accepts.
+    fn structural_job(
+        &self,
+        row: &VenueRow,
+        mutable: &MutableView,
+        state: &PoolState,
+        priority: u64,
+    ) -> eyre::Result<Option<WorkJob>> {
+        if needs_ticks(row.kind, mutable) {
+            let cursor = first_missing_page(&self.entities, row.kind, row.id, mutable)?;
+            let pages = mutable.tick_count.div_ceil(TICK_PAGE);
+            if cursor < pages {
+                let mut job = blank_job(STAGE_TICKS, row.kind, row.id);
+                job.generation = mutable.generation;
+                job.tick_cursor = i32::try_from(cursor).unwrap_or(i32::MAX);
+                job.priority = priority;
+                return Ok(Some(job));
+            }
+        }
+        if !quote_is_current(state.quotes.as_ref(), mutable) {
+            let mut job = quote_job(row.kind, row.id, mutable.generation);
+            job.priority = priority;
+            return Ok(Some(job));
+        }
+        if !curve_is_current(state.curve.as_ref(), mutable.generation) {
+            let mut job = curve_job(row.kind, row.id, mutable.generation);
+            job.priority = priority;
+            return Ok(Some(job));
+        }
+        Ok(None)
+    }
+
+    fn sync_jobs(
+        &self,
+        drop: &[(u8, u8, B256)],
+        jobs: &[WorkJob],
+        now: u64,
+    ) -> eyre::Result<u64> {
+        let mut write = self.work.begin_write()?;
+        write.set_durability(Durability::Immediate);
+        let written = {
+            let mut table = write.open_table(JOBS)?;
+            let mut ranks = write.open_table(JOB_RANK)?;
+            for (stage, kind, id) in drop {
+                let Some(existing) = load_job(&table, *stage, *kind, id)? else {
+                    continue;
+                };
+                if existing.lease_until > now {
+                    ensure_rank(&mut ranks, &existing)?;
+                    continue;
+                }
+                clear_job(&mut table, &mut ranks, *stage, *kind, id)?;
+            }
+            let mut written = 0_u64;
+            for job in jobs {
+                if let Some(existing) = load_job(&table, job.stage, job.kind, &job.id)? {
+                    if existing.lease_until > now {
+                        ensure_rank(&mut ranks, &existing)?;
+                        continue;
+                    }
+                    if existing.priority != job.priority {
+                        remove_rank(&mut ranks, &existing)?;
+                    }
+                }
+                put_job(&mut table, &mut ranks, job)?;
+                written += 1;
+            }
+            written
+        };
+        write.commit()?;
+        Ok(written)
+    }
+
+    /// Give every stored job a rank key. Startup finds leased rows the venue
+    /// walk did not rewrite.
+    fn index_ranks(&self) -> eyre::Result<()> {
+        let read = self.work.begin_read()?;
+        let jobs = match read.open_table(JOBS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(()),
+            Err(err) => return Err(err.into()),
+        };
+        let ranks = match read.open_table(JOB_RANK) {
+            Ok(table) => Some(table),
+            Err(redb::TableError::TableDoesNotExist(_)) => None,
+            Err(err) => return Err(err.into()),
+        };
+        let mut missing = Vec::new();
+        for item in jobs.iter()? {
+            let (key, value) = item?;
+            let job = decode_job(key.value(), value.value())?;
+            let rank = rank_key(job.stage, job.priority, job.kind, &job.id);
+            let present = match &ranks {
+                Some(table) => table.get(rank.as_slice())?.is_some(),
+                None => false,
+            };
+            if !present {
+                missing.push(rank);
+            }
+        }
+        drop(jobs);
+        drop(ranks);
+        drop(read);
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let mut write = self.work.begin_write()?;
+        write.set_durability(Durability::Immediate);
+        {
+            let mut ranks = write.open_table(JOB_RANK)?;
+            for key in &missing {
+                ranks.insert(key.as_slice(), &[][..])?;
+            }
+        }
+        write.commit()?;
+        Ok(())
     }
 }
 
@@ -1540,27 +1738,38 @@ async fn drive_details<S: EntityStore>(
             mutable.class = state.dirty.map(|dirty| dirty.class).unwrap_or(CLASS_HEAD);
         }
         let stored = store.put_mutable(&mutable).await?;
-        let canonical = is_canonical(&detail);
-        let plan = plan_follow_up(
-            mutable.class,
-            stored.bitmap_changed && !stored.kept_ticks,
-            mutable.truncated,
-            mutable.tick_count,
-            canonical,
-        );
-        if plan.retry_mutable {
-            follow.push(blank_job(STAGE_MUTABLE, row.kind, row.id));
-        } else if let Some(next) = plan.stage {
-            let mut job = blank_job(next, row.kind, row.id);
-            job.generation = stored.generation;
-            follow.push(job);
-            if next == STAGE_CURVE && !canonical {
-                if let Ok(curve) = derive_curve(&detail, stored.generation) {
-                    if store.put_curve(&curve).await.is_ok() {
-                        follow.pop();
-                    }
+        let mut detail = detail;
+        let mut book_ready = mutable.tick_count == 0 || !concentrated_kind(row.kind);
+        if stored.kept_ticks {
+            let fresh = store.read_state(row.kind, row.id).await?;
+            if let PoolDetail::Concentrated(pool) = &mut detail {
+                pool.ticks = fresh.ticks;
+            }
+            book_ready = true;
+        }
+        let plan = follow_for_detail(&FollowInput {
+            kind: row.kind,
+            id: row.id,
+            detail: &detail,
+            class: mutable.class,
+            bitmap_changed: stored.bitmap_changed && !stored.kept_ticks,
+            truncated: mutable.truncated,
+            tick_count: mutable.tick_count,
+            generation: stored.generation,
+            watched: stage == STAGE_MUTABLE,
+            book_ready,
+        });
+        if plan.derive {
+            if let Ok(curve) = derive_curve(&detail, stored.generation) {
+                if store.put_curve(&curve).await.is_err() {
+                    let mut job = curve_job(row.kind, row.id, stored.generation);
+                    job.priority = plan.priority;
+                    follow.push(job);
                 }
             }
+        }
+        if let Some(job) = plan.job {
+            follow.push(job);
         }
         done.push((stage, row.kind, row.id));
     }
@@ -1605,7 +1814,9 @@ async fn drive_ticks<S: EntityStore>(
             }
         };
         let PoolDetail::Concentrated(pool) = detail else {
-            follow.push(quote_job(job.kind, job.id, mutable.generation));
+            if let Some(next) = after_book(store, job).await? {
+                follow.push(next);
+            }
             done.push((job.stage, job.kind, job.id));
             continue;
         };
@@ -1613,7 +1824,9 @@ async fn drive_ticks<S: EntityStore>(
         let page = u32::try_from(job.tick_cursor.max(0)).unwrap_or(0);
         let start = page.saturating_mul(TICK_PAGE) as usize;
         if start >= ticks.len() {
-            follow.push(quote_job(job.kind, job.id, mutable.generation));
+            if let Some(next) = after_book(store, job).await? {
+                follow.push(next);
+            }
             done.push((job.stage, job.kind, job.id));
             continue;
         }
@@ -1712,8 +1925,8 @@ async fn drive_ticks<S: EntityStore>(
             again.tick_cursor = page.saturating_add(1) as i32;
             again.generation = generation;
             follow.push(again);
-        } else {
-            follow.push(quote_job(job.kind, job.id, generation));
+        } else if let Some(next) = after_book(store, &job).await? {
+            follow.push(next);
         }
         done.push((job.stage, job.kind, job.id));
     }
@@ -1755,11 +1968,6 @@ async fn drive_curves<S: EntityStore>(
             done.push((job.stage, job.kind, job.id));
             continue;
         }
-        if !quote_is_current(state.quotes.as_ref(), &mutable) {
-            follow.push(quote_job(job.kind, job.id, mutable.generation));
-            done.push((job.stage, job.kind, job.id));
-            continue;
-        }
         let detail = match join_detail(&immutable, &mutable.body, &state.ticks, job.kind, job.id) {
             Ok(detail) => detail,
             Err(err) => {
@@ -1767,6 +1975,40 @@ async fn drive_curves<S: EntityStore>(
                 continue;
             }
         };
+        let cap = crate::fit::trade_capacity(&detail);
+        let priority = priority_of((job.priority & DIRTY_BAND) != 0, cap.top);
+        if !cap.fills_sample {
+            if cap.any_positive && !curve_is_current(state.curve.as_ref(), mutable.generation) {
+                match derive_curve(&detail, mutable.generation) {
+                    Ok(curve) => {
+                        if let Err(err) = store.put_curve(&curve).await {
+                            keep_or_drop(
+                                job,
+                                err.to_string(),
+                                give_up_after,
+                                &mut done,
+                                &mut failed,
+                                notes,
+                            );
+                            continue;
+                        }
+                    }
+                    Err(err) => {
+                        keep_or_drop(job, err, give_up_after, &mut done, &mut failed, notes);
+                        continue;
+                    }
+                }
+            }
+            done.push((job.stage, job.kind, job.id));
+            continue;
+        }
+        if !quote_is_current(state.quotes.as_ref(), &mutable) {
+            let mut next = quote_job(job.kind, job.id, mutable.generation);
+            next.priority = priority;
+            follow.push(next);
+            done.push((job.stage, job.kind, job.id));
+            continue;
+        }
         let curve = match curve_for_snapshot(&detail, state.quotes.as_ref(), mutable.generation) {
             Ok(curve) => curve,
             Err(err) => {
@@ -1964,6 +2206,7 @@ fn blank_job(stage: u8, kind: u8, id: B256) -> WorkJob {
         generation: 0,
         tick_cursor: 0,
         class: CLASS_NONE,
+        priority: 0,
         error: String::new(),
     }
 }
@@ -2039,21 +2282,6 @@ fn count_bytes(db: &redb::Database, def: TableDefinition<&[u8], &[u8]>) -> eyre:
     Ok(n)
 }
 
-fn count_jobs(db: &redb::Database) -> eyre::Result<u64> {
-    let read = db.begin_read()?;
-    let table = match read.open_table(JOBS) {
-        Ok(table) => table,
-        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(0),
-        Err(err) => return Err(err.into()),
-    };
-    let mut n = 0_u64;
-    for item in table.iter()? {
-        item?;
-        n += 1;
-    }
-    Ok(n)
-}
-
 pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2067,6 +2295,262 @@ fn job_key(stage: u8, kind: u8, id: &B256) -> [u8; 34] {
     out[1] = kind;
     out[2..].copy_from_slice(id.as_slice());
     out
+}
+
+fn rank_key(stage: u8, priority: u64, kind: u8, id: &B256) -> [u8; 42] {
+    let mut out = [0u8; 42];
+    out[0] = stage;
+    let inverted = u64::MAX - priority;
+    out[1..9].copy_from_slice(&inverted.to_be_bytes());
+    out[9] = kind;
+    out[10..].copy_from_slice(id.as_slice());
+    out
+}
+
+fn decode_rank(key: &[u8]) -> Option<(u8, u64, u8, B256)> {
+    if key.len() != 42 {
+        return None;
+    }
+    let inverted = u64::from_be_bytes(key[1..9].try_into().ok()?);
+    Some((
+        key[0],
+        u64::MAX - inverted,
+        key[9],
+        B256::from_slice(&key[10..]),
+    ))
+}
+
+fn priority_of(dirty: bool, top: U256) -> u64 {
+    let mag = magnitude(top);
+    if dirty { DIRTY_BAND | mag } else { mag }
+}
+
+/// Bit length in the high bits, so a longer `max_in` sorts first, then its top bits.
+fn magnitude(value: U256) -> u64 {
+    let bits = u256_bit_len(&value);
+    if bits == 0 {
+        return 0;
+    }
+    let shift = bits.saturating_sub(54);
+    let shifted = if shift == 0 { value } else { value >> shift };
+    let bytes = shifted.to_be_bytes::<32>();
+    let mant = u64::from_be_bytes(bytes[24..32].try_into().unwrap());
+    let mant = mant & ((1_u64 << 54) - 1);
+    ((bits as u64) << 54) | mant
+}
+
+fn u256_bit_len(value: &U256) -> u32 {
+    let bytes = value.to_be_bytes::<32>();
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte != 0 {
+            return (32 - index as u32) * 8 - byte.leading_zeros();
+        }
+    }
+    0
+}
+
+fn lease_job(job: &mut WorkJob, now: u64, lease_for: u64) -> bool {
+    if job.lease_until > now || job.not_before > now {
+        return false;
+    }
+    job.lease_until = now.saturating_add(lease_for);
+    job.attempt = job.attempt.saturating_add(1);
+    true
+}
+
+fn load_job(
+    table: &redb::Table<'_, &[u8], &[u8]>,
+    stage: u8,
+    kind: u8,
+    id: &B256,
+) -> eyre::Result<Option<WorkJob>> {
+    let key = job_key(stage, kind, id);
+    let Some(stored) = table.get(key.as_slice())? else {
+        return Ok(None);
+    };
+    Ok(Some(decode_job(key.as_slice(), stored.value())?))
+}
+
+fn put_job(
+    jobs: &mut redb::Table<'_, &[u8], &[u8]>,
+    ranks: &mut redb::Table<'_, &[u8], &[u8]>,
+    job: &WorkJob,
+) -> eyre::Result<()> {
+    let key = job_key(job.stage, job.kind, &job.id);
+    let bytes = encode_job(job);
+    jobs.insert(key.as_slice(), bytes.as_slice())?;
+    let rank = rank_key(job.stage, job.priority, job.kind, &job.id);
+    ranks.insert(rank.as_slice(), &[][..])?;
+    Ok(())
+}
+
+fn remove_rank(ranks: &mut redb::Table<'_, &[u8], &[u8]>, job: &WorkJob) -> eyre::Result<()> {
+    let rank = rank_key(job.stage, job.priority, job.kind, &job.id);
+    ranks.remove(rank.as_slice())?;
+    Ok(())
+}
+
+fn ensure_rank(ranks: &mut redb::Table<'_, &[u8], &[u8]>, job: &WorkJob) -> eyre::Result<()> {
+    let rank = rank_key(job.stage, job.priority, job.kind, &job.id);
+    if ranks.get(rank.as_slice())?.is_none() {
+        ranks.insert(rank.as_slice(), &[][..])?;
+    }
+    Ok(())
+}
+
+fn clear_job(
+    jobs: &mut redb::Table<'_, &[u8], &[u8]>,
+    ranks: &mut redb::Table<'_, &[u8], &[u8]>,
+    stage: u8,
+    kind: u8,
+    id: &B256,
+) -> eyre::Result<()> {
+    let key = job_key(stage, kind, id);
+    let Some(stored) = jobs.remove(key.as_slice())? else {
+        return Ok(());
+    };
+    if let Ok(job) = decode_job(key.as_slice(), stored.value()) {
+        remove_rank(ranks, &job)?;
+    }
+    Ok(())
+}
+
+fn stored_capacity(kind: u8, id: B256, state: &PoolState) -> Option<crate::fit::TradeCapacity> {
+    let immutable = state.immutable.as_ref()?;
+    let mutable = state.mutable.as_ref()?;
+    let detail = join_detail(immutable, &mutable.body, &state.ticks, kind, id).ok()?;
+    Some(crate::fit::trade_capacity(&detail))
+}
+
+struct FollowPlan {
+    job: Option<WorkJob>,
+    derive: bool,
+    priority: u64,
+}
+
+struct FollowInput<'a> {
+    kind: u8,
+    id: B256,
+    detail: &'a PoolDetail,
+    class: u8,
+    bitmap_changed: bool,
+    truncated: bool,
+    tick_count: u32,
+    generation: u64,
+    watched: bool,
+    book_ready: bool,
+}
+
+/// What to enqueue after the detail lens returns.
+///
+/// Outstanding tick pages are still walked. `max_in` for a concentrated book
+/// is the ladder, and that ladder needs the tick words the bitmap only names.
+fn follow_for_detail(input: &FollowInput<'_>) -> FollowPlan {
+    let cap = crate::fit::trade_capacity(input.detail);
+    let priority = priority_of(input.watched, cap.top);
+    if input.truncated {
+        let mut job = blank_job(STAGE_MUTABLE, input.kind, input.id);
+        job.priority = priority;
+        job.class = input.class;
+        return FollowPlan {
+            job: Some(job),
+            derive: false,
+            priority,
+        };
+    }
+    let outstanding =
+        !input.book_ready && concentrated_kind(input.kind) && input.tick_count > 0;
+    if outstanding || cap.fills_sample {
+        let plan = plan_follow_up(
+            input.class,
+            input.bitmap_changed,
+            false,
+            input.tick_count,
+            true,
+        );
+        if plan.retry_mutable {
+            let mut job = blank_job(STAGE_MUTABLE, input.kind, input.id);
+            job.priority = priority;
+            job.class = input.class;
+            return FollowPlan {
+                job: Some(job),
+                derive: false,
+                priority,
+            };
+        }
+        let Some(stage) = plan.stage else {
+            return FollowPlan {
+                job: None,
+                derive: false,
+                priority,
+            };
+        };
+        let mut job = blank_job(stage, input.kind, input.id);
+        job.generation = input.generation;
+        job.priority = priority;
+        job.class = input.class;
+        return FollowPlan {
+            job: Some(job),
+            derive: false,
+            priority,
+        };
+    }
+    if !cap.any_positive {
+        return FollowPlan {
+            job: None,
+            derive: false,
+            priority,
+        };
+    }
+    FollowPlan {
+        job: None,
+        derive: true,
+        priority,
+    }
+}
+
+/// Quote, local curve, or nothing once the tick words for this generation are stored.
+async fn after_book<S: EntityStore>(store: &S, job: &WorkJob) -> eyre::Result<Option<WorkJob>> {
+    let state = store.read_state(job.kind, job.id).await?;
+    let Some(mutable) = state.mutable else {
+        return Ok(Some(blank_job(STAGE_MUTABLE, job.kind, job.id)));
+    };
+    let Some(immutable) = state.immutable else {
+        return Ok(None);
+    };
+    let detail = match join_detail(&immutable, &mutable.body, &state.ticks, job.kind, job.id) {
+        Ok(detail) => detail,
+        Err(_) => {
+            let mut next = quote_job(job.kind, job.id, mutable.generation);
+            next.priority = job.priority;
+            return Ok(Some(next));
+        }
+    };
+    let cap = crate::fit::trade_capacity(&detail);
+    let priority = priority_of((job.priority & DIRTY_BAND) != 0, cap.top);
+    if !cap.fills_sample {
+        if cap.any_positive && !curve_is_current(state.curve.as_ref(), mutable.generation) {
+            if let Ok(curve) = derive_curve(&detail, mutable.generation) {
+                if store.put_curve(&curve).await.is_err() {
+                    let mut next = curve_job(job.kind, job.id, mutable.generation);
+                    next.priority = priority;
+                    return Ok(Some(next));
+                }
+            }
+        }
+        return Ok(None);
+    }
+    if !quote_is_current(state.quotes.as_ref(), &mutable) {
+        let mut next = quote_job(job.kind, job.id, mutable.generation);
+        next.priority = priority;
+        return Ok(Some(next));
+    }
+    if !curve_is_current(state.curve.as_ref(), mutable.generation) {
+        let mut next = curve_job(job.kind, job.id, mutable.generation);
+        next.priority = priority;
+        return Ok(Some(next));
+    }
+    Ok(None)
 }
 
 fn tick_key(kind: u8, id: B256, page: u32) -> [u8; 37] {
@@ -2861,13 +3345,14 @@ fn decode_curve_record(kind: u8, id: B256, bytes: &[u8]) -> eyre::Result<CurveRe
 
 fn encode_job(job: &WorkJob) -> Vec<u8> {
     let error = clip_error(&job.error);
-    let mut out = vec![1];
+    let mut out = vec![2];
     push_u64(&mut out, job.lease_until);
     push_u32(&mut out, job.attempt);
     push_u64(&mut out, job.not_before);
     push_u64(&mut out, job.generation);
     push_i32(&mut out, job.tick_cursor);
     push_u8(&mut out, job.class);
+    push_u64(&mut out, job.priority);
     let bytes = error.as_bytes();
     let len = u16::try_from(bytes.len()).unwrap_or(u16::MAX);
     out.extend_from_slice(&len.to_le_bytes());
@@ -2880,7 +3365,8 @@ fn decode_job(key: &[u8], bytes: &[u8]) -> eyre::Result<WorkJob> {
         return Err(eyre::eyre!("work key"));
     }
     let mut reader = Reader::new(bytes);
-    if reader.u8().map_err(|err| eyre::eyre!(err))? != 1 {
+    let tag = reader.u8().map_err(|err| eyre::eyre!(err))?;
+    if tag != 1 && tag != 2 {
         return Err(eyre::eyre!("work"));
     }
     let lease_until = reader.u64().map_err(|err| eyre::eyre!(err))?;
@@ -2889,6 +3375,11 @@ fn decode_job(key: &[u8], bytes: &[u8]) -> eyre::Result<WorkJob> {
     let generation = reader.u64().map_err(|err| eyre::eyre!(err))?;
     let tick_cursor = reader.i32().map_err(|err| eyre::eyre!(err))?;
     let class = reader.u8().map_err(|err| eyre::eyre!(err))?;
+    let priority = if tag == 2 {
+        reader.u64().map_err(|err| eyre::eyre!(err))?
+    } else {
+        0
+    };
     let len = reader.u16().map_err(|err| eyre::eyre!(err))? as usize;
     let error = reader.take(len).map_err(|err| eyre::eyre!(err))?.to_vec();
     reader.finish().map_err(|err| eyre::eyre!(err))?;
@@ -2902,6 +3393,7 @@ fn decode_job(key: &[u8], bytes: &[u8]) -> eyre::Result<WorkJob> {
         generation,
         tick_cursor,
         class,
+        priority,
         error: String::from_utf8_lossy(&error).into_owned(),
     })
 }
@@ -3615,5 +4107,250 @@ mod tests {
         assert_eq!(curve.kind, UNI_V3);
         assert_eq!(curve.id, row(1).id);
         assert_eq!(curve.payload, vec![1, 5, 0, 0, 0, 0]);
+    }
+
+    fn with_reserves(id: u8, reserve: u64) -> (VenueRow, PoolDetail) {
+        let venue = row(id);
+        let mut detail = product();
+        let PoolDetail::ConstantProduct(pool) = &mut detail else {
+            unreachable!();
+        };
+        pool.id = venue.id;
+        pool.reserve0 = U256::from(reserve);
+        pool.reserve1 = U256::from(reserve);
+        (venue, detail)
+    }
+
+    #[test]
+    fn priority_orders_dirty_ahead_of_a_larger_pool() {
+        assert!(priority_of(false, U256::from(1u64)) < priority_of(false, U256::from(10_000u64)));
+        assert!(
+            priority_of(false, U256::from(10_000u64)) < priority_of(false, U256::from(u64::MAX))
+        );
+        assert!(priority_of(false, U256::from(u64::MAX)) < priority_of(true, U256::from(1u64)));
+    }
+
+    #[test]
+    fn a_tag1_job_decodes_with_priority_zero() {
+        let mut key = [0u8; 34];
+        key[0] = STAGE_QUOTE;
+        key[1] = UNI_V2;
+        let mut bytes = vec![1];
+        push_u64(&mut bytes, 0);
+        push_u32(&mut bytes, 1);
+        push_u64(&mut bytes, 0);
+        push_u64(&mut bytes, 4);
+        push_i32(&mut bytes, 0);
+        push_u8(&mut bytes, 0);
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        let job = decode_job(&key, &bytes).unwrap();
+        assert_eq!(job.priority, 0);
+        assert_eq!(job.attempt, 1);
+        assert_eq!(job.generation, 4);
+        assert_eq!(job.stage, STAGE_QUOTE);
+    }
+
+    #[test]
+    fn an_empty_snapshot_drops_follow_up_and_keeps_the_identity() {
+        let (_dir, catalog) = open();
+        let (venue, detail) = with_reserves(3, 0);
+        store_detail(&catalog, &venue, &detail);
+        let mut seeded = quote_job(venue.kind, venue.id, 1);
+        seeded.priority = 50;
+        catalog.enqueue_work(std::slice::from_ref(&seeded), 1).unwrap();
+        catalog.reconcile(1).unwrap();
+        assert!(catalog
+            .claim_work(STAGE_QUOTE, 4, 1, 10)
+            .unwrap()
+            .is_empty());
+        assert!(catalog
+            .claim_work(STAGE_TICKS, 4, 1, 10)
+            .unwrap()
+            .is_empty());
+        assert!(catalog
+            .claim_work(STAGE_CURVE, 4, 1, 10)
+            .unwrap()
+            .is_empty());
+        assert!(catalog.read_venue(venue.kind, venue.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_one_wei_pool_derives_locally_and_skips_the_quoter() {
+        let (_dir, catalog) = open();
+        let (venue, detail) = with_reserves(2, 1);
+        store_detail(&catalog, &venue, &detail);
+        catalog.reconcile(1).unwrap();
+        assert!(catalog
+            .claim_work(STAGE_QUOTE, 4, 1, 10)
+            .unwrap()
+            .is_empty());
+        let curves = catalog.claim_work(STAGE_CURVE, 4, 1, 10).unwrap();
+        assert_eq!(curves.len(), 1);
+        assert!(curves[0].priority > 0);
+        assert!(curves[0].priority < DIRTY_BAND);
+        assert!(catalog.read_venue(venue.kind, venue.id).unwrap().is_some());
+        let plan = follow_for_detail(&FollowInput {
+            kind: venue.kind,
+            id: venue.id,
+            detail: &detail,
+            class: CLASS_NONE,
+            bitmap_changed: false,
+            truncated: false,
+            tick_count: 0,
+            generation: 1,
+            watched: false,
+            book_ready: true,
+        });
+        assert!(plan.job.is_none());
+        assert!(plan.derive);
+    }
+
+    #[test]
+    fn a_larger_pool_is_claimed_before_a_smaller_one() {
+        let (_dir, catalog) = open();
+        let (small, small_detail) = with_reserves(1, 200);
+        let (big, big_detail) = with_reserves(9, 2_000_000);
+        store_detail(&catalog, &small, &small_detail);
+        store_detail(&catalog, &big, &big_detail);
+        catalog.reconcile(1).unwrap();
+        let first = catalog.claim_work(STAGE_QUOTE, 1, 1, 10).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].id, big.id);
+        let second = catalog.claim_work(STAGE_QUOTE, 1, 1, 10).unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].id, small.id);
+        assert!(first[0].priority > second[0].priority);
+        assert!(first[0].priority < DIRTY_BAND);
+    }
+
+    #[test]
+    fn a_dirty_job_is_claimed_before_a_large_quiet_pool() {
+        let (_dir, catalog) = open();
+        let mut quiet = quote_job(UNI_V2, row(1).id, 1);
+        quiet.priority = priority_of(false, U256::from(u64::MAX));
+        let mut dirty = quote_job(UNI_V2, row(9).id, 1);
+        dirty.priority = priority_of(true, U256::from(1u64));
+        catalog
+            .enqueue_work(&[quiet, dirty], 1)
+            .unwrap();
+        let claimed = catalog.claim_work(STAGE_QUOTE, 1, 1, 10).unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].id, row(9).id);
+        assert!(claimed[0].priority >= DIRTY_BAND);
+    }
+
+    #[test]
+    fn a_leased_job_is_not_replaced() {
+        let (_dir, catalog) = open();
+        let mut job = quote_job(UNI_V2, row(1).id, 1);
+        job.priority = 1;
+        catalog.enqueue_work(std::slice::from_ref(&job), 1).unwrap();
+        assert_eq!(catalog.claim_work(STAGE_QUOTE, 1, 1, 100).unwrap().len(), 1);
+        let mut hotter = job;
+        hotter.priority = 99;
+        hotter.lease_until = 0;
+        catalog
+            .enqueue_work(std::slice::from_ref(&hotter), 1)
+            .unwrap();
+        assert!(catalog.claim_work(STAGE_QUOTE, 1, 1, 10).unwrap().is_empty());
+        let later = catalog.claim_work(STAGE_QUOTE, 1, 101, 10).unwrap();
+        assert_eq!(later.len(), 1);
+        assert_eq!(later[0].priority, 1);
+    }
+
+    #[test]
+    fn a_watch_hit_requeues_the_mutable_refresh_first() {
+        let (_dir, catalog) = open();
+        let (venue, detail) = with_reserves(5, 1_000_000);
+        store_detail(&catalog, &venue, &detail);
+        catalog
+            .apply_watch(
+                12,
+                &[WatchHit {
+                    kind: venue.kind,
+                    id: venue.id,
+                    block: 11,
+                    class: CLASS_HEAD,
+                }],
+            )
+            .unwrap();
+        let jobs = catalog
+            .claim_work(STAGE_MUTABLE, 4, unix_now(), 10)
+            .unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].id, venue.id);
+        assert!(jobs[0].priority >= DIRTY_BAND);
+    }
+
+    #[test]
+    fn an_unmeasured_bitmap_still_queues_ticks() {
+        let (_dir, catalog) = open();
+        let mut venue = row(4);
+        venue.kind = UNI_V3;
+        let detail = PoolDetail::Concentrated(crate::detail::Concentrated {
+            kind: UNI_V3,
+            id: venue.id,
+            home: Address::ZERO,
+            hooks: Address::ZERO,
+            token0: address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            token1: address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+            fee_pips: Some(3000),
+            protocol_fee: 0,
+            tick_spacing: 60,
+            sqrt_price_x96: U256::from(1u64),
+            tick: 0,
+            liquidity: 0,
+            next_scan: None,
+            bitmaps: vec![BitmapWord {
+                word_pos: 0,
+                bits: U256::from(1u64),
+            }],
+            ticks: Vec::new(),
+            flags: 0,
+        });
+        store_detail(&catalog, &venue, &detail);
+        catalog.reconcile(1).unwrap();
+        assert_eq!(catalog.claim_work(STAGE_TICKS, 4, 1, 10).unwrap().len(), 1);
+        assert!(catalog
+            .claim_work(STAGE_QUOTE, 4, 1, 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_full_sample_is_a_quote_and_dust_is_local() {
+        let (_dir, _catalog) = open();
+        let (venue, detail) = with_reserves(1, 1_000_000);
+        let quote = follow_for_detail(&FollowInput {
+            kind: venue.kind,
+            id: venue.id,
+            detail: &detail,
+            class: CLASS_NONE,
+            bitmap_changed: false,
+            truncated: false,
+            tick_count: 0,
+            generation: 3,
+            watched: false,
+            book_ready: true,
+        });
+        let job = quote.job.expect("quote");
+        assert_eq!(job.stage, STAGE_QUOTE);
+        assert!(job.priority < DIRTY_BAND);
+        assert!(!quote.derive);
+        let (venue, detail) = with_reserves(1, 0);
+        let empty = follow_for_detail(&FollowInput {
+            kind: venue.kind,
+            id: venue.id,
+            detail: &detail,
+            class: CLASS_NONE,
+            bitmap_changed: false,
+            truncated: false,
+            tick_count: 0,
+            generation: 3,
+            watched: true,
+            book_ready: true,
+        });
+        assert!(empty.job.is_none());
+        assert!(!empty.derive);
     }
 }

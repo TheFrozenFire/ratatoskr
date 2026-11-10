@@ -363,6 +363,7 @@ fn job_value(job: &WorkJob) -> Value {
         "generation": job.generation,
         "tick_cursor": job.tick_cursor,
         "class": job.class,
+        "priority": job.priority,
         "error": job.error,
     })
 }
@@ -378,6 +379,7 @@ fn job_from(value: &Value) -> eyre::Result<WorkJob> {
         generation: field_u64(value, "generation")?,
         tick_cursor: field_i32(value, "tick_cursor")?,
         class: field_u8(value, "class")?,
+        priority: value.get("priority").and_then(Value::as_u64).unwrap_or(0),
         error: field_str(value, "error")?,
     })
 }
@@ -710,6 +712,7 @@ mod tests {
                 generation: 7,
                 tick_cursor: -1,
                 class: 1,
+                priority: 99,
                 error: "later".into(),
             }],
         };
