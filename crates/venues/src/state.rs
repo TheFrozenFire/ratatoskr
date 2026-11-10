@@ -5,11 +5,13 @@
 //! remembers leases. A deleted work file is rebuilt by scanning entities. The
 //! watch cursor and the dirty flags commit together. A mutable snapshot clears
 //! its dirty flag in the same transaction, and only when no newer event arrived
-//! during the read. A new snapshot drops quotes and the curve. Quotes are taken
-//! at the snapshot block before the curve is fit.
+//! during the read. A new snapshot drops the curve. Stored quote samples stay.
 //!
-//! An empty snapshot stays in the catalog and gets no tick, quote, or curve
-//! job. A pool that cannot fill the smallest quote sample skips the quoter.
+//! An empty snapshot stays in the catalog and gets no tick or curve job.
+//! The state pipeline does not call the quoter. Chain samples already stored
+//! stay in the quote table for validation. A new snapshot does not delete
+//! them. Curves are derived locally, and an existing sample is used only when
+//! it still matches the snapshot generation.
 //! Tick words still load when the bitmap lists them and those pages are not
 //! stored, because the ladder's `max_in` is only known once the words are in.
 //! Claim order is a rank index: a watch hit, then a larger `max_in`.
@@ -60,14 +62,12 @@ pub const STAGE_IMMUTABLE: u8 = 1;
 pub const STAGE_MUTABLE: u8 = 2;
 pub const STAGE_TICKS: u8 = 3;
 pub const STAGE_CURVE: u8 = 4;
-/// On-chain quote samples. Runs after the snapshot is complete and before the curve.
+/// Retained so older work rows can be dropped. The pipeline does not claim this stage.
 pub const STAGE_QUOTE: u8 = 5;
 pub const CLASS_NONE: u8 = 0;
 pub const CLASS_HEAD: u8 = 1;
 pub const CLASS_TICKS: u8 = 2;
 const DETAIL_BATCH: u32 = 16;
-/// Pools quoted in one pass. A wider page fills the parallel multicalls.
-const QUOTE_BATCH: u32 = 64;
 const LEASE_SECS: u64 = 120;
 const RETRY_SECS: u64 = 30;
 
@@ -245,10 +245,9 @@ pub struct Plan {
 
 /// What to enqueue after a mutable snapshot commits.
 ///
-/// A head refresh with the same bitmap keeps tick pages. The next read is the
-/// on-chain quote grid, and the curve is fit after those samples are stored.
+/// A head refresh with the same bitmap keeps tick pages and derives a curve.
 /// A mint or a changed bitmap has to read ticks again. A truncated bitmap
-/// stays on the mutable stage.
+/// stays on the mutable stage. The quoter is not a stage.
 pub fn plan_follow_up(
     class: u8,
     bitmap_changed: bool,
@@ -271,7 +270,7 @@ pub fn plan_follow_up(
     }
     Plan {
         retry_mutable: false,
-        stage: Some(STAGE_QUOTE),
+        stage: Some(STAGE_CURVE),
     }
 }
 
@@ -753,6 +752,8 @@ impl Catalog {
     /// Write one mutable snapshot. Tick pages from an older bitmap, or from a
     /// mint, are deleted here. A head refresh with the same bitmap keeps the
     /// pages and stamps the new generation on them. The curve is always dropped.
+    /// Stored chain samples stay. They are validation data for the snapshot
+    /// that produced them, and a later generation does not treat them as current.
     /// The dirty flag is removed only when it does not name a newer block.
     pub fn put_mutable(&self, row: &MutableWrite) -> eyre::Result<MutableStored> {
         let mut write = self.entities.begin_write()?;
@@ -761,7 +762,6 @@ impl Catalog {
             let mut mutable_table = write.open_table(MUTABLE)?;
             let mut ticks = write.open_table(TICK_PAGES)?;
             let mut curves = write.open_table(CURVES)?;
-            let mut quotes = write.open_table(QUOTES)?;
             let mut dirty_table = write.open_table(DIRTY)?;
             let key = entity_key(row.kind, &row.id);
             let previous = match mutable_table.get(key.as_slice())? {
@@ -783,7 +783,6 @@ impl Catalog {
                 delete_prefix(&mut ticks, &key)?;
             }
             let _ = curves.remove(key.as_slice())?;
-            let _ = quotes.remove(key.as_slice())?;
             let bytes = encode_mutable(row, generation);
             mutable_table.insert(key.as_slice(), bytes.as_slice())?;
             let seen = match dirty_table.get(key.as_slice())? {
@@ -1320,7 +1319,7 @@ impl Catalog {
         self.structural_job(row, mutable, state, priority_of(false, top))
     }
 
-    /// Tick, quote, or curve, in that order, for a snapshot the filter accepts.
+    /// Tick, then a local curve. Chain samples are not requested.
     fn structural_job(
         &self,
         row: &VenueRow,
@@ -1338,11 +1337,6 @@ impl Catalog {
                 job.priority = priority;
                 return Ok(Some(job));
             }
-        }
-        if !quote_is_current(state.quotes.as_ref(), mutable) {
-            let mut job = quote_job(row.kind, row.id, mutable.generation);
-            job.priority = priority;
-            return Ok(Some(job));
         }
         if !curve_is_current(state.curve.as_ref(), mutable.generation) {
             let mut job = curve_job(row.kind, row.id, mutable.generation);
@@ -1442,8 +1436,7 @@ impl Catalog {
 /// One pass of the state pipeline. The caller loops until shutdown.
 ///
 /// A pass reconciles only when asked. Each pass runs every stage that has
-/// work ready. A pool's ticks, quotes, and curve are not held behind the
-/// rest of an earlier stage.
+/// work ready. Ticks and the curve are not held behind an earlier stage.
 pub async fn run<S, P>(
     store: &S,
     peer: Option<&P>,
@@ -1555,20 +1548,8 @@ where
     S: EntityStore + Clone + 'static,
 {
     let mut claimed = Vec::new();
-    for stage in [
-        STAGE_IMMUTABLE,
-        STAGE_MUTABLE,
-        STAGE_TICKS,
-        STAGE_QUOTE,
-        STAGE_CURVE,
-    ] {
-        let lease = if stage == STAGE_QUOTE { 600 } else { LEASE_SECS };
-        let limit = if stage == STAGE_QUOTE {
-            QUOTE_BATCH
-        } else {
-            DETAIL_BATCH
-        };
-        let jobs = store.claim_work(stage, limit, now, lease).await?;
+    for stage in [STAGE_IMMUTABLE, STAGE_MUTABLE, STAGE_TICKS, STAGE_CURVE] {
+        let jobs = store.claim_work(stage, DETAIL_BATCH, now, LEASE_SECS).await?;
         if !jobs.is_empty() {
             claimed.push((stage, jobs));
         }
@@ -1631,9 +1612,6 @@ async fn run_stage<S: EntityStore>(
             drive_details(&store, &rpc, block, stage, &jobs, give_up_after, &mut notes).await
         }
         STAGE_TICKS => drive_ticks(&store, &rpc, &jobs, now, give_up_after, &mut notes).await,
-        STAGE_QUOTE => {
-            crate::fit::drive_quotes(&store, &rpc, &jobs, give_up_after, &mut notes).await
-        }
         STAGE_CURVE => drive_curves(&store, &jobs, give_up_after, &mut notes).await,
         _ => Ok(()),
     };
@@ -1957,7 +1935,6 @@ async fn drive_curves<S: EntityStore>(
 ) -> eyre::Result<()> {
     let mut done = Vec::new();
     let mut failed = Vec::new();
-    let mut follow = Vec::new();
     for job in jobs {
         let state = store.read_state(job.kind, job.id).await?;
         let (Some(immutable), Some(mutable)) = (state.immutable, state.mutable) else {
@@ -1976,40 +1953,19 @@ async fn drive_curves<S: EntityStore>(
             }
         };
         let cap = crate::fit::trade_capacity(&detail);
-        let priority = priority_of((job.priority & DIRTY_BAND) != 0, cap.top);
-        if !cap.fills_sample {
-            if cap.any_positive && !curve_is_current(state.curve.as_ref(), mutable.generation) {
-                match derive_curve(&detail, mutable.generation) {
-                    Ok(curve) => {
-                        if let Err(err) = store.put_curve(&curve).await {
-                            keep_or_drop(
-                                job,
-                                err.to_string(),
-                                give_up_after,
-                                &mut done,
-                                &mut failed,
-                                notes,
-                            );
-                            continue;
-                        }
-                    }
-                    Err(err) => {
-                        keep_or_drop(job, err, give_up_after, &mut done, &mut failed, notes);
-                        continue;
-                    }
-                }
-            }
+        if !cap.any_positive {
             done.push((job.stage, job.kind, job.id));
             continue;
         }
-        if !quote_is_current(state.quotes.as_ref(), &mutable) {
-            let mut next = quote_job(job.kind, job.id, mutable.generation);
-            next.priority = priority;
-            follow.push(next);
+        if curve_is_current(state.curve.as_ref(), mutable.generation) {
             done.push((job.stage, job.kind, job.id));
             continue;
         }
-        let curve = match curve_for_snapshot(&detail, state.quotes.as_ref(), mutable.generation) {
+        let quotes = state
+            .quotes
+            .as_ref()
+            .filter(|quote| quote_is_current(Some(quote), &mutable));
+        let curve = match curve_for_snapshot(&detail, quotes, mutable.generation) {
             Ok(curve) => curve,
             Err(err) => {
                 keep_or_drop(job, err, give_up_after, &mut done, &mut failed, notes);
@@ -2030,7 +1986,6 @@ async fn drive_curves<S: EntityStore>(
         done.push((job.stage, job.kind, job.id));
     }
     store.finish_work(&done, &failed).await?;
-    store.enqueue_work(&follow, unix_now()).await?;
     Ok(())
 }
 
@@ -2217,6 +2172,8 @@ pub(crate) fn curve_job(kind: u8, id: B256, generation: u64) -> WorkJob {
     job
 }
 
+/// A quote-stage key. The pipeline no longer enqueues these.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn quote_job(kind: u8, id: B256, generation: u64) -> WorkJob {
     let mut job = blank_job(STAGE_QUOTE, kind, id);
     job.generation = generation;
@@ -2460,7 +2417,7 @@ fn follow_for_detail(input: &FollowInput<'_>) -> FollowPlan {
     }
     let outstanding =
         !input.book_ready && concentrated_kind(input.kind) && input.tick_count > 0;
-    if outstanding || cap.fills_sample {
+    if outstanding {
         let plan = plan_follow_up(
             input.class,
             input.bitmap_changed,
@@ -2468,20 +2425,10 @@ fn follow_for_detail(input: &FollowInput<'_>) -> FollowPlan {
             input.tick_count,
             true,
         );
-        if plan.retry_mutable {
-            let mut job = blank_job(STAGE_MUTABLE, input.kind, input.id);
-            job.priority = priority;
-            job.class = input.class;
-            return FollowPlan {
-                job: Some(job),
-                derive: false,
-                priority,
-            };
-        }
-        let Some(stage) = plan.stage else {
+        let Some(stage) = plan.stage.filter(|stage| *stage == STAGE_TICKS) else {
             return FollowPlan {
                 job: None,
-                derive: false,
+                derive: cap.any_positive,
                 priority,
             };
         };
@@ -2509,7 +2456,7 @@ fn follow_for_detail(input: &FollowInput<'_>) -> FollowPlan {
     }
 }
 
-/// Quote, local curve, or nothing once the tick words for this generation are stored.
+/// Local curve once the tick words for this generation are stored.
 async fn after_book<S: EntityStore>(store: &S, job: &WorkJob) -> eyre::Result<Option<WorkJob>> {
     let state = store.read_state(job.kind, job.id).await?;
     let Some(mutable) = state.mutable else {
@@ -2521,36 +2468,38 @@ async fn after_book<S: EntityStore>(store: &S, job: &WorkJob) -> eyre::Result<Op
     let detail = match join_detail(&immutable, &mutable.body, &state.ticks, job.kind, job.id) {
         Ok(detail) => detail,
         Err(_) => {
-            let mut next = quote_job(job.kind, job.id, mutable.generation);
+            if curve_is_current(state.curve.as_ref(), mutable.generation) {
+                return Ok(None);
+            }
+            let mut next = curve_job(job.kind, job.id, mutable.generation);
             next.priority = job.priority;
             return Ok(Some(next));
         }
     };
     let cap = crate::fit::trade_capacity(&detail);
-    let priority = priority_of((job.priority & DIRTY_BAND) != 0, cap.top);
-    if !cap.fills_sample {
-        if cap.any_positive && !curve_is_current(state.curve.as_ref(), mutable.generation) {
-            if let Ok(curve) = derive_curve(&detail, mutable.generation) {
-                if store.put_curve(&curve).await.is_err() {
-                    let mut next = curve_job(job.kind, job.id, mutable.generation);
-                    next.priority = priority;
-                    return Ok(Some(next));
-                }
-            }
-        }
+    if !cap.any_positive || curve_is_current(state.curve.as_ref(), mutable.generation) {
         return Ok(None);
     }
-    if !quote_is_current(state.quotes.as_ref(), &mutable) {
-        let mut next = quote_job(job.kind, job.id, mutable.generation);
-        next.priority = priority;
-        return Ok(Some(next));
+    let priority = priority_of((job.priority & DIRTY_BAND) != 0, cap.top);
+    let quotes = state
+        .quotes
+        .as_ref()
+        .filter(|quote| quote_is_current(Some(quote), &mutable));
+    match curve_for_snapshot(&detail, quotes, mutable.generation) {
+        Ok(curve) => {
+            if store.put_curve(&curve).await.is_err() {
+                let mut next = curve_job(job.kind, job.id, mutable.generation);
+                next.priority = priority;
+                return Ok(Some(next));
+            }
+            Ok(None)
+        }
+        Err(_) => {
+            let mut next = curve_job(job.kind, job.id, mutable.generation);
+            next.priority = priority;
+            Ok(Some(next))
+        }
     }
-    if !curve_is_current(state.curve.as_ref(), mutable.generation) {
-        let mut next = curve_job(job.kind, job.id, mutable.generation);
-        next.priority = priority;
-        return Ok(Some(next));
-    }
-    Ok(None)
 }
 
 fn tick_key(kind: u8, id: B256, page: u32) -> [u8; 37] {
@@ -3897,40 +3846,16 @@ mod tests {
         mutable.block = 9;
         mutable.class = CLASS_HEAD;
         catalog.put_mutable(&mutable).unwrap();
-        assert!(catalog
-            .read_state(sample.kind, sample.id)
-            .unwrap()
-            .quotes
-            .is_none());
+        let kept = catalog.read_state(sample.kind, sample.id).unwrap();
+        assert!(kept.quotes.is_some());
+        assert!(kept.curve.is_none());
         assert_eq!(catalog.claim_work(STAGE_QUOTE, 4, 1, 10).unwrap().len(), 0);
         assert!(catalog.reconcile(1).unwrap() >= 1);
-        let quoted = catalog.claim_work(STAGE_QUOTE, 4, 1, 10).unwrap();
-        assert_eq!(quoted.len(), 1);
+        assert_eq!(catalog.claim_work(STAGE_CURVE, 4, 1, 10).unwrap().len(), 1);
         assert!(catalog
-            .claim_work(STAGE_CURVE, 4, 1, 10)
+            .claim_work(STAGE_QUOTE, 4, 1, 10)
             .unwrap()
             .is_empty());
-        let generation = catalog
-            .read_state(sample.kind, sample.id)
-            .unwrap()
-            .mutable
-            .unwrap()
-            .generation;
-        catalog
-            .put_quote(&QuoteRecord {
-                kind: sample.kind,
-                id: sample.id,
-                generation,
-                version: QUOTE_VERSION,
-                block: 9,
-                payload: b"{}".to_vec(),
-            })
-            .unwrap();
-        catalog
-            .finish_work(&[(STAGE_QUOTE, sample.kind, sample.id)], &[])
-            .unwrap();
-        assert!(catalog.reconcile(2).unwrap() >= 1);
-        assert_eq!(catalog.claim_work(STAGE_CURVE, 4, 2, 10).unwrap().len(), 1);
     }
 
     #[test]
@@ -3983,7 +3908,11 @@ mod tests {
             .claim_work(STAGE_TICKS, 4, 2, 10)
             .unwrap()
             .is_empty());
-        assert_eq!(catalog.claim_work(STAGE_QUOTE, 4, 2, 10).unwrap().len(), 1);
+        assert_eq!(catalog.claim_work(STAGE_CURVE, 4, 2, 10).unwrap().len(), 1);
+        assert!(catalog
+            .claim_work(STAGE_QUOTE, 4, 2, 10)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -4040,7 +3969,7 @@ mod tests {
     #[test]
     fn plan_isolates_head_from_ticks() {
         let head = plan_follow_up(CLASS_HEAD, false, false, 10, true);
-        assert_eq!(head.stage, Some(STAGE_QUOTE));
+        assert_eq!(head.stage, Some(STAGE_CURVE));
         let changed = plan_follow_up(CLASS_HEAD, true, false, 10, true);
         assert_eq!(changed.stage, Some(STAGE_TICKS));
         let mint = plan_follow_up(CLASS_TICKS, false, false, 10, true);
@@ -4213,10 +4142,10 @@ mod tests {
         store_detail(&catalog, &small, &small_detail);
         store_detail(&catalog, &big, &big_detail);
         catalog.reconcile(1).unwrap();
-        let first = catalog.claim_work(STAGE_QUOTE, 1, 1, 10).unwrap();
+        let first = catalog.claim_work(STAGE_CURVE, 1, 1, 10).unwrap();
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].id, big.id);
-        let second = catalog.claim_work(STAGE_QUOTE, 1, 1, 10).unwrap();
+        let second = catalog.claim_work(STAGE_CURVE, 1, 1, 10).unwrap();
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].id, small.id);
         assert!(first[0].priority > second[0].priority);
@@ -4333,10 +4262,9 @@ mod tests {
             watched: false,
             book_ready: true,
         });
-        let job = quote.job.expect("quote");
-        assert_eq!(job.stage, STAGE_QUOTE);
-        assert!(job.priority < DIRTY_BAND);
-        assert!(!quote.derive);
+        assert!(quote.job.is_none());
+        assert!(quote.derive);
+        assert!(quote.priority < DIRTY_BAND);
         let (venue, detail) = with_reserves(1, 0);
         let empty = follow_for_detail(&FollowInput {
             kind: venue.kind,

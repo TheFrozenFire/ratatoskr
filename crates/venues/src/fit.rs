@@ -1,9 +1,10 @@
 //! On-chain quote samples and the curve-fit extract.
 //!
-//! The state pipeline calls the protocol quoter and stores the samples next to
-//! the snapshot. The curve stage runs after that. This module also copies the
-//! stored samples into a JSONL file and can load a file written by an older
-//! export back into the catalog.
+//! Stored chain samples sit next to the snapshot for validation. The state
+//! pipeline does not request new ones. This module copies the stored samples
+//! into a JSONL file and can load a file written by an older export back into
+//! the catalog. `drive_quotes` remains for that validation path and is not
+//! called by the pipeline.
 //!
 //! The fit domain is a fraction of the largest input that still has a price.
 //! Constant-product pools have no hard maximum, so the top of the domain is
@@ -396,6 +397,8 @@ pub fn import_curve_fit(catalog: &Catalog, path: &Path) -> eyre::Result<FitRepor
     Ok(report)
 }
 
+/// Fetch chain samples and store them. The state pipeline does not call this.
+#[allow(dead_code)]
 pub(crate) async fn drive_quotes<S: EntityStore>(
     store: &S,
     rpc: &Rpc,
@@ -530,12 +533,12 @@ fn header_value() -> Value {
         "curve_version": CURVE_VERSION,
         "fits": "Each pool carries fits: the closed form stored for that direction. score is the all-label worst basis points. formula.kind is the stored formula. A direction with no fit is absent. Skip reasons are not formulas.",
         "units": "Raw token amounts. Decimals are not stored. Do not assume 18.",
-        "ground_truth": "chain_out is the protocol quoter at block, stored by the state pipeline before the curve is fit. local_out is recomputed from the stored snapshot when this file is written and is not ground truth.",
+        "ground_truth": "chain_out is a protocol quoter sample stored for validation. The state pipeline does not fetch new samples. local_out is recomputed from the stored snapshot when this file is written and is not ground truth.",
         "domain": "max_in is the top of the fit domain. cp_99 buys 99% of the output reserve. ladder is the last step of the concentrated book. balance_search bisects the local quote toward 99% of the output balance, capped at 1000x the input balance. balance is the input balance when that search cannot run. uninitialized and empty_book and none have no samples.",
         "grid": "Fractions of max_in: 0.0001, 0.001, 0.01, 0.05, 0.1, 0.25, 0.5, 0.8, 0.95, 1. A fraction that rounds to 0 is omitted. Two fractions that land on the same amount keep the larger fraction.",
         "chain_max": "If the fraction-1 quote reverts, an 8-step bisection records the largest accepted input. larger_input_reverted is then true. If fraction 1 is accepted, chain_max_in equals that input and larger_input_reverted is false: the domain top worked, and a constant-product pool still has no hard maximum.",
         "pairs": "Every ordered pair when the pool has at most 4 tokens. A larger pool keeps the first 4 and sets pairs_capped.",
-        "resume": "The state pipeline is the source of the chain samples. This file is rewritten from the catalog. A repeated pool id is a torn line; keep the last copy.",
+        "resume": "Stored chain samples are copied out of the catalog. The state pipeline does not fetch new ones. A repeated pool id is a torn line; keep the last copy.",
         "gaps": {
             "v2_fork": "DXswap (factory 0xd34971bab6e5e356fd250715f5de0492bb070452) quotes through router 0xb9960d9bca016e9748be75dd52f02188b9d0829f. Other v2 forks have no confirmed router. The Uniswap router hardcodes a 0.3% fee and the canonical factory.",
             "v3_fork": "Lista V3 (factory 0x956920f97690bdd76a6a10c7ba931dec14f61169) quotes through QuoterV2 0xe043af034c0c920994f8e3ee9afa1173fe8403db. The other v3 fork factories have no confirmed quoter.",
