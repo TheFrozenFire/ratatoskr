@@ -580,8 +580,8 @@ _Avoid_: peer service, discovery
 - **"Index"** is a **List** or a position in a **Tick bitmap**. A list names pools. A bitmap names ticks.
 - **"Canonical"** is a **Canonical factory** or a **Canonical pool**. The factory is an emitter we accept. The pool is a shape whose structural formula is determined by the quote inputs.
 - **"State"** is **Chain state**, **Quoting state**, or the **State pipeline**. The quoting state is one record. The state pipeline is the work that writes configuration, quoting state, the tick book, and the price curve.
-- **"Snapshot"** is not a record. The joined inputs are the **Quote inputs**. Say **Configuration**, **Quoting state**, or **Tick book** when only one of those is meant.
-- **"Details"** is the detail read. That read writes **Configuration** and **Quoting state** together. It does not write the **Tick book**.
+- The joined inputs a local quote reads are the **Quote inputs**. **Configuration**, **Quoting state**, and **Tick book** name the individual records.
+- **"Details"** is the detail read. That read writes **Configuration** and **Quoting state** together. The **Tick book** is the following read.
 - **"Sync"** is a refresh of **Quoting state**, or the read of the **Tick book**. Say which record.
 - **Discovery** is the pipeline that writes pool identities. A **Discovery hit** is one log's asset or pool identity.
 - **"Fit"** is the stage that stores a **Price curve**. The choice among formulas inside that stage is **Selection**.
