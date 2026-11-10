@@ -224,9 +224,9 @@ async fn walk_dns_tree(link: &str) -> eyre::Result<Vec<NodeRecord>> {
     Ok(found)
 }
 
-/// A short DNS walk for the persistent process. The spike asks for many more.
+/// A short DNS walk for the peer service.
 pub async fn dns_candidates(limit: usize) -> eyre::Result<Vec<NodeRecord>> {
-    // A few hundred records takes longer than the spike's short walk. Cap the
+    // A few hundred records takes longer than a short walk. Cap the
     // wait so a stalled resolver cannot sit on the dial loop.
     let budget = Duration::from_secs(u64::try_from(12 + limit / 10).unwrap_or(75).min(75));
     let mut found = collect_dns(limit, budget).await?;

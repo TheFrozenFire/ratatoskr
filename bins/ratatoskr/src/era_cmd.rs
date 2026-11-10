@@ -1,27 +1,24 @@
-//! Enumerate pre-merge logs, or the headers that select them, from era1 mirrors.
+//! Read pre-merge headers or logs from era1 files.
 //!
-//! Reads use HTTP range requests. Headers share one pooled connection. Receipts
-//! are fetched only for blocks whose logs bloom can contain the requested
-//! addresses and topics. Block bodies are skipped.
+//! This command does not open the venue catalog and does not dial.
 
 use alloy_primitives::Address;
 use clap::{Parser, Subcommand};
-use eyre::{eyre, WrapErr};
 use era::{enumerate_headers, enumerate_logs, EraHttp};
+use eyre::{eyre, WrapErr};
 use filter::LogFilter;
 use std::time::Instant;
 
 const DEFAULT_MIRROR: &str = "https://data.ethpandaops.io/era1/mainnet/";
 
 #[derive(Debug, Parser)]
-#[command(name = "ratatoskr-era")]
-struct Args {
+pub struct EraArgs {
     #[command(subcommand)]
-    command: Command,
+    pub command: EraCommand,
 }
 
 #[derive(Debug, Subcommand)]
-enum Command {
+pub enum EraCommand {
     /// Header identity for a block range: hash, parent, bloom, receipt root.
     Headers(RangeArgs),
     /// Logs in a block range. Blooms skip blocks that cannot match.
@@ -29,73 +26,56 @@ enum Command {
 }
 
 #[derive(Debug, clap::Args)]
-struct RangeArgs {
+pub struct RangeArgs {
     /// First block, inclusive.
     #[arg(long)]
-    from: u64,
+    pub from: u64,
     /// Last block, inclusive.
     #[arg(long)]
-    to: u64,
+    pub to: u64,
     /// Era1 directory. File names are taken from its listing.
     #[arg(long, default_value = DEFAULT_MIRROR)]
-    mirror: String,
+    pub mirror: String,
     /// Filename prefix and epoch width. Mainnet epochs are 8192 blocks.
     #[arg(long, default_value = "mainnet")]
-    network: String,
+    pub network: String,
     /// Concurrent range reads on the pooled connection.
     #[arg(long, default_value_t = 128)]
-    inflight: usize,
+    pub inflight: usize,
     /// Bytes to read at each header. Omit to measure a few headers and fit
     /// a window that includes the following body tag.
     #[arg(long)]
-    window: Option<u64>,
+    pub window: Option<u64>,
 }
 
 #[derive(Debug, clap::Args)]
-struct LogsArgs {
+pub struct LogsArgs {
     #[command(flatten)]
-    range: RangeArgs,
+    pub range: RangeArgs,
     /// Emitter. Repeat to accept any of the addresses.
     #[arg(long)]
-    address: Vec<Address>,
+    pub address: Vec<Address>,
     /// Event signature, or a 0x topic hash. Repeat to accept any as topic0.
-    /// Example: PoolCreated(address,address,uint24,int24,address)
     #[arg(long)]
-    event: Vec<String>,
+    pub event: Vec<String>,
     /// Required topic at position 0. Repeat for alternatives. Combined with --event.
     #[arg(long)]
-    topic0: Vec<String>,
+    pub topic0: Vec<String>,
     /// Required topic at position 1. Repeat for alternatives.
     #[arg(long)]
-    topic1: Vec<String>,
+    pub topic1: Vec<String>,
     /// Required topic at position 2. Repeat for alternatives.
     #[arg(long)]
-    topic2: Vec<String>,
+    pub topic2: Vec<String>,
     /// Required topic at position 3. Repeat for alternatives.
     #[arg(long)]
-    topic3: Vec<String>,
+    pub topic3: Vec<String>,
 }
 
-fn main() -> eyre::Result<()> {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .wrap_err("runtime")?
-        .block_on(run())
-}
-
-async fn run() -> eyre::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "era=info".into()),
-        )
-        .with_writer(std::io::stderr)
-        .init();
-    let args = Args::parse();
+pub async fn run(args: EraArgs) -> eyre::Result<()> {
     match args.command {
-        Command::Headers(range) => headers(range).await,
-        Command::Logs(logs) => logs_cmd(logs).await,
+        EraCommand::Headers(range) => headers(range).await,
+        EraCommand::Logs(logs) => logs_cmd(logs).await,
     }
 }
 
@@ -124,7 +104,13 @@ async fn logs_cmd(args: LogsArgs) -> eyre::Result<()> {
     check_range(&args.range)?;
     let mut topic0 = args.event;
     topic0.extend(args.topic0);
-    let filter = LogFilter::from_parts(args.address, &topic0, &args.topic1, &args.topic2, &args.topic3)?;
+    let filter = LogFilter::from_parts(
+        args.address,
+        &topic0,
+        &args.topic1,
+        &args.topic2,
+        &args.topic3,
+    )?;
     let http = EraHttp::new(args.range.inflight)?;
     let started = Instant::now();
     let logs = enumerate_logs(
@@ -141,18 +127,26 @@ async fn logs_cmd(args: LogsArgs) -> eyre::Result<()> {
     for log in &logs {
         println!("{}", serde_json::to_string(log).wrap_err("encode log")?);
     }
-    report(&http, args.range.to - args.range.from + 1, logs.len(), started.elapsed());
+    report(
+        &http,
+        args.range.to - args.range.from + 1,
+        logs.len(),
+        started.elapsed(),
+    );
     Ok(())
 }
 
-fn check_range(range: &RangeArgs) -> eyre::Result<()> {
+pub fn check_range(range: &RangeArgs) -> eyre::Result<()> {
     if range.from > range.to {
         return Err(eyre!("--from {} is after --to {}", range.from, range.to));
     }
     if range.inflight == 0 || range.inflight > 1024 {
         return Err(eyre!("--inflight must be 1..=1024"));
     }
-    if range.window.is_some_and(|window| window < 8 || window > 65_536) {
+    if range
+        .window
+        .is_some_and(|window| !(8..=65_536).contains(&window))
+    {
         return Err(eyre!("--window must be 8..=65536 bytes"));
     }
     Ok(())
@@ -173,4 +167,55 @@ fn report(http: &EraHttp, blocks: u64, logs: usize, elapsed: std::time::Duration
         seconds = elapsed.as_secs_f64(),
         "era1 range read"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn range(from: u64, to: u64) -> RangeArgs {
+        RangeArgs {
+            from,
+            to,
+            mirror: DEFAULT_MIRROR.into(),
+            network: "mainnet".into(),
+            inflight: 128,
+            window: None,
+        }
+    }
+
+    #[test]
+    fn a_range_starts_at_or_before_its_end() {
+        assert!(check_range(&range(1, 2)).is_ok());
+        let err = check_range(&range(3, 1)).unwrap_err();
+        assert!(err.to_string().contains("after"), "{err}");
+    }
+
+    #[test]
+    fn inflight_and_window_stay_inside_the_read_bounds() {
+        let mut wide = range(1, 1);
+        wide.inflight = 0;
+        assert!(check_range(&wide)
+            .unwrap_err()
+            .to_string()
+            .contains("inflight"));
+        wide.inflight = 1025;
+        assert!(check_range(&wide)
+            .unwrap_err()
+            .to_string()
+            .contains("inflight"));
+        wide.inflight = 1;
+        wide.window = Some(7);
+        assert!(check_range(&wide)
+            .unwrap_err()
+            .to_string()
+            .contains("window"));
+        wide.window = Some(65_537);
+        assert!(check_range(&wide)
+            .unwrap_err()
+            .to_string()
+            .contains("window"));
+        wide.window = Some(8);
+        assert!(check_range(&wide).is_ok());
+    }
 }

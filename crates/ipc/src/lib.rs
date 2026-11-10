@@ -1,4 +1,4 @@
-//! Client for the `ratatoskr-peer` unix socket.
+//! Client for the peer service unix socket.
 //!
 //! One request per connection. `status` and `fetch` answer with one JSON line.
 //! `chunk` and `headers` answer with a JSON line and then a raw body whose

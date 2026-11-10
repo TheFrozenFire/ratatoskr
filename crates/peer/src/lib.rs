@@ -1,6 +1,6 @@
 //! Hold a small set of outbound mainnet sessions and serve blocks on a local socket.
 //!
-//! `ratatoskr-peer` keeps the peer table. Other programs ask it for a block and exit.
+//! The peer service keeps the peer directory. A client asks it for a block and exits.
 //! The node key in `~/.config/ratatoskr/node.key` stays the same across restarts.
 //! Peers we have dialed are remembered in the peer catalog: each status change and
 //! each newly covered block is a sighting, and the summary of that history picks
@@ -55,7 +55,7 @@ const DIRECTORY_SIZE: usize = 2500;
 /// out while the previous receipts are still arriving.
 const CHUNKS_PER_PEER: usize = 2;
 
-/// What `ratatoskr-peer` passes into [`serve`].
+/// What the supervisor passes into [`serve`].
 pub struct PeerConfig {
     /// How many outbound sessions to keep.
     pub peers: usize,
@@ -123,7 +123,7 @@ pub fn prepare(opened: OpenedPeer, config: &PeerConfig) -> eyre::Result<Prepared
         socket = %config.socket.display(),
         catalog = %config.catalog.display(),
         egress = ?config.egress,
-        "peer process starting"
+        "peer service starting"
     );
     let listener = bind_socket(&config.socket)?;
     Ok(PreparedPeer {
@@ -139,7 +139,7 @@ pub fn prepare(opened: OpenedPeer, config: &PeerConfig) -> eyre::Result<Prepared
 /// Open `peers.redb`, bind the socket, and dial until the process stops.
 ///
 /// The catalog is opened before the socket file is touched. `Database already
-/// open` leaves the existing peer process and its socket alone.
+/// open` leaves the running peer service and its socket alone.
 pub async fn serve(config: PeerConfig) -> eyre::Result<()> {
     let opened = open(&config.catalog)?;
     let prepared = prepare(opened, &config)?;

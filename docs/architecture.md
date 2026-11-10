@@ -2,13 +2,13 @@
 
 The ingestion pipeline, from discovery through fit, is described in [ARCHITECTURE.md](../ARCHITECTURE.md). This file is the process and file layout.
 
-By default one `ratatoskr` process owns both file sets (`--services db,peer`). `ratatoskr-db` and `ratatoskr-peer` are the split. The router is a library inside `ratatoskr`, not a third process and not a file owner.
+One `ratatoskr` process owns both file sets (`--services db,peer` by default). The router is a library inside that process, not a file owner.
 
 ## File owners
 
-The database side owns `headers.redb`, `corpus.redb`, `discovery.redb`, `entities.redb`, and `work.redb`. That is `ratatoskr` with `--services db`, or `ratatoskr-db`. A path ending in `venues.redb` still names that directory. On open, a lone `venues.redb` is renamed to `entities.redb` and its crawl tables move into `discovery.redb`. An `entities.redb` that is already present leaves a sibling `venues.redb` closed.
+The database service owns `headers.redb`, `corpus.redb`, `discovery.redb`, `entities.redb`, and `work.redb`. That is `ratatoskr` with `--services db`. A path ending in `venues.redb` still names that directory. On open, a lone `venues.redb` is renamed to `entities.redb` and its crawl tables move into `discovery.redb`. An `entities.redb` that is already present leaves a sibling `venues.redb` closed.
 
-The peer side owns `peers.redb` and is the only dialer. That is `ratatoskr` with `--services peer`, or `ratatoskr-peer`.
+The peer service owns `peers.redb` and is the only dialer. That is `ratatoskr` with `--services peer`.
 
 ## Flock
 
@@ -18,11 +18,13 @@ The peer side owns `peers.redb` and is the only dialer. That is `ratatoskr` with
 
 ## Sockets
 
-Sockets are for other processes. Colocated pipelines call `LocalStore` and `LocalPeer` in process.
+Colocated pipelines call `LocalStore` and `LocalPeer` in process. The sockets stay so a second invocation can ask the running service without opening the files.
 
-`ratatoskr-headers`, `ratatoskr-ingest`, and `ratatoskr-venues` are remote clients of `db.sock` and `peer.sock`.
+`ratatoskr peer status`, `ratatoskr peer fetch`, and `ratatoskr peer census` ask the peer service. They do not dial and they do not open `peers.redb`.
 
-`ratatoskr-univ3` reads `UNI_V3` rows through that socket. It does not open `corpus.redb` and it does not write `univ3-pools.redb`. That old file is left on disk, unopened.
+`ratatoskr univ3` prints the fee histogram of stored v3 pool identities. It reads the database socket when the database service is up, and otherwise opens the venue catalog in this process. It does not write `univ3-pools.redb`.
+
+`ratatoskr era headers` and `ratatoskr era logs` read era1 files. They do not open the catalog and they do not dial.
 
 ## Cursor
 
@@ -34,7 +36,7 @@ Venue job cursors move inside `commit_chunk`. `VenueSource` does not await `Sink
 
 ## Pipelines
 
-Default pipelines are header sync and venue enumeration. The 10 GiB receipt walk is `--pipeline receipts` and is off by default. Pool state is `--pipeline state` and is off by default. It is not part of `RunPhase::All`. `state` requires `--data-dir` and does not open the live catalog. `--copy-from` copies a stratified identity sample into that directory first. Spike is not started by the supervisor.
+Default pipelines are header sync and discovery. The 10 GiB receipt walk is `--pipeline receipts` and is off by default. Pool state is `--pipeline state` and is off by default. It is not part of `RunPhase::All`. `state` requires `--data-dir` and does not open the live catalog. `--copy-from` copies a stratified identity sample into that directory first. The peer service is the only dialer.
 
 ## Venue rows
 

@@ -1,6 +1,6 @@
 //! Own the selected databases and run pipelines in-process.
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use eth_p2p::Egress;
 use eyre::WrapErr;
 use peer::LocalPeer;
@@ -13,8 +13,11 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 use venues::{RunOpts, RunPhase};
 
+mod era_cmd;
 mod export;
+mod peer_cmd;
 mod status;
+mod univ3_cmd;
 
 const DEFAULT_TARGET_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 const DEFAULT_LOG: &str =
@@ -23,8 +26,26 @@ const DEFAULT_LOG: &str =
 #[derive(Debug, Parser)]
 #[command(
     name = "ratatoskr",
-    about = "Run the selected file owners and pipelines. ratatoskr-spike must not be run while this peer service is up."
+    about = "Own the selected files and run the pipelines in one process."
 )]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+    #[command(flatten)]
+    args: Args,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Read headers or logs from an era1 file. This does not open the catalog and does not dial.
+    Era(era_cmd::EraArgs),
+    /// Print fees for stored v3 pool identities in the venue catalog.
+    Univ3(univ3_cmd::Univ3Args),
+    /// Ask the running peer service. This does not dial.
+    Peer(peer_cmd::PeerArgs),
+}
+
+#[derive(Debug, clap::Args)]
 struct Args {
     /// Comma-separated file owners: `db`, `peer`. Default is `db,peer`.
     #[arg(long, default_value = "db,peer")]
@@ -104,6 +125,9 @@ struct Args {
     /// Bind IPv6 RLPx to this address.
     #[arg(long)]
     bind6: Option<Ipv6Addr>,
+    /// How many outbound sessions the peer service keeps.
+    #[arg(long, default_value_t = peer::TARGET_PEERS)]
+    peers: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -143,7 +167,13 @@ async fn main() -> eyre::Result<()> {
                 .unwrap_or_else(|_| DEFAULT_LOG.into()),
         )
         .init();
-    supervise(Args::parse()).await
+    let cli = Cli::parse();
+    match cli.command {
+        Some(Command::Era(cmd)) => era_cmd::run(cmd).await,
+        Some(Command::Univ3(cmd)) => univ3_cmd::run(cmd).await,
+        Some(Command::Peer(cmd)) => peer_cmd::run(cmd).await,
+        None => supervise(cli.args).await,
+    }
 }
 
 async fn supervise(args: Args) -> eyre::Result<()> {
@@ -332,7 +362,7 @@ async fn supervise(args: Args) -> eyre::Result<()> {
         Some(opened) => Some(peer::prepare(
             opened,
             &peer::PeerConfig {
-                peers: peer::TARGET_PEERS,
+                peers: args.peers,
                 socket: paths.peer_socket.clone(),
                 catalog: paths.peers.clone(),
                 egress,
@@ -875,19 +905,20 @@ mod tests {
 
     #[test]
     fn default_services_are_db_and_peer() {
-        let args = Args::try_parse_from(["ratatoskr"]).unwrap();
+        let args = Cli::try_parse_from(["ratatoskr"]).unwrap().args;
         assert_eq!(parse_services(&args.services).unwrap(), both());
+        assert_eq!(args.peers, peer::TARGET_PEERS);
     }
 
     #[test]
     fn default_pipelines_are_headers_and_venues() {
-        let args = Args::try_parse_from(["ratatoskr"]).unwrap();
+        let args = Cli::try_parse_from(["ratatoskr"]).unwrap().args;
         assert_eq!(parse_pipelines(&args.pipeline).unwrap(), headers_venues());
     }
 
     #[test]
     fn receipts_run_only_when_named() {
-        let args = Args::try_parse_from(["ratatoskr"]).unwrap();
+        let args = Cli::try_parse_from(["ratatoskr"]).unwrap().args;
         assert!(!parse_pipelines(&args.pipeline).unwrap().receipts);
         assert!(parse_pipelines("receipts").unwrap().receipts);
         assert!(!parse_pipelines("headers,venues").unwrap().receipts);
@@ -927,21 +958,51 @@ mod tests {
     }
 
     #[test]
-    fn spike_is_not_a_pipeline() {
-        let err = parse_pipelines("spike").unwrap_err();
-        assert!(err.to_string().contains("spike"), "{err}");
+    fn the_state_pipeline_invocation_has_no_subcommand() {
+        let cli = Cli::try_parse_from([
+            "ratatoskr",
+            "--data-dir",
+            "data/ratatoskr",
+            "--services",
+            "db",
+            "--pipeline",
+            "state",
+            "--until-idle",
+        ])
+        .unwrap();
+        assert!(cli.command.is_none());
+        assert!(cli.args.until_idle);
+        assert_eq!(cli.args.services, "db");
+        assert_eq!(cli.args.pipeline, "state");
     }
 
     #[test]
-    fn help_says_not_to_run_spike_beside_the_peer_service() {
-        let mut cmd = Args::command();
+    fn era_headers_parse_as_a_subcommand() {
+        let cli = Cli::try_parse_from(["ratatoskr", "era", "headers", "--from", "1", "--to", "2"])
+            .unwrap();
+        match cli.command {
+            Some(Command::Era(args)) => match args.command {
+                era_cmd::EraCommand::Headers(range) => {
+                    assert_eq!(range.from, 1);
+                    assert_eq!(range.to, 2);
+                }
+                other => panic!("headers command, got {other:?}"),
+            },
+            other => panic!("era command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn help_names_one_entrypoint() {
+        let mut cmd = Cli::command();
         let mut buf = Vec::new();
         cmd.write_long_help(&mut buf).unwrap();
         let text = String::from_utf8(buf).unwrap();
-        assert!(
-            text.contains("ratatoskr-spike must not be run while this peer service is up"),
-            "{text}"
-        );
+        assert!(text.contains("era"), "{text}");
+        assert!(text.contains("univ3"), "{text}");
+        assert!(text.contains("peer"), "{text}");
+        assert!(!text.contains("spike"), "{text}");
+        assert!(!text.contains("ratatoskr-"), "{text}");
     }
 
     #[test]

@@ -395,11 +395,11 @@ Published nodes, sightings, and summaries.
 _Avoid_: venue catalog, peer service
 
 **Database service**:
-The process that owns the header chain, the corpus, the discovery store, the venue catalog, and the work queue.
+The service that owns the header chain, the corpus, the discovery store, the venue catalog, and the work queue.
 _Avoid_: peer service, client
 
 **Peer service**:
-The process that owns dialing and the peer directory, and the only dialer.
+The service that owns dialing and the peer directory, and the only dialer.
 _Avoid_: peer, database service
 
 **Colocated pipeline**:
@@ -477,10 +477,6 @@ _Avoid_: sample catalog
 **Sample catalog**:
 A smaller copy of pool identities, used for a trial.
 _Avoid_: live catalog, quote record, grid
-
-**Spike**:
-A one-shot outbound session that reads one block, classifies its logs, and exits, keeping no peer directory.
-_Avoid_: peer service, discovery
 
 ## Relationships
 

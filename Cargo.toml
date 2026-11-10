@@ -16,15 +16,7 @@ members = [
     "crates/univ3",
     "crates/venues",
     "crates/peer",
-    "crates/spike",
-    "crates/ingest",
-    "crates/headers",
-    "crates/peers",
-    "bins/db",
-    "bins/era",
     "bins/ratatoskr",
-    "bins/univ3",
-    "bins/venues",
 ]
 
 [workspace.package]

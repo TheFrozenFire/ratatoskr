@@ -56,11 +56,11 @@ The dirty mark clears in the same write as the quoting state when the newest wat
 
 ## Processes and files
 
-One process owns both file sets by default. The database service owns the header chain, the corpus, the discovery store, the venue catalog, and the work queue. The peer service owns the peer directory and is the only dialer. A colocated pipeline calls the store in process. A client reaches the files through the database socket or the peer socket.
+One process owns both file sets. The database service owns the header chain, the corpus, the discovery store, the venue catalog, and the work queue. The peer service owns the peer directory and is the only dialer. A colocated pipeline calls the store in process. A client reaches a running service through its socket and does not open the files.
 
 The venue catalog holds identities, configuration, quoting state, tick books, price curves, quote records, and watch marks. The discovery store holds list cursors, bloom hits, and era1 receipt bytes. The work queue holds leases. Deleting the work queue drops the leases. The pools remain in the venue catalog.
 
-The database files take one exclusive open. A peer-only process opens the peer directory.
+The database files take one exclusive open. A run with only the peer service opens the peer directory.
 
 The state pipeline opens the data directory it is given. A sample catalog is a copy of identities for a trial. The live catalog is the venue catalog of the full identity set.
 

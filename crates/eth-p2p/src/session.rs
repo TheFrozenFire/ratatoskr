@@ -69,7 +69,7 @@ async fn dial(addr: SocketAddr, egress: Option<Egress>) -> eyre::Result<TcpStrea
         .wrap_err("dial failed")
 }
 
-/// Eth versions this spike will speak. Highest shared version wins.
+/// Eth versions a session offers. Highest shared version wins.
 const OFFERED_ETH: [EthVersion; 5] = [
     EthVersion::Eth72,
     EthVersion::Eth71,

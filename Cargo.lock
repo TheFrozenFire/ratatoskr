@@ -1643,18 +1643,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
-name = "db-cli"
-version = "0.1.0"
-dependencies = [
- "clap",
- "eyre",
- "store",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "defmt"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1994,21 +1982,6 @@ dependencies = [
  "snap",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "era-cli"
-version = "0.1.0"
-dependencies = [
- "alloy-primitives",
- "clap",
- "era",
- "eyre",
- "filter",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -2444,20 +2417,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "824e001ac4f3012dd16a264bec811403a67ca9deb6c102fc5049b32c4574b35f"
 dependencies = [
  "hashbrown 0.16.1",
-]
-
-[[package]]
-name = "headers"
-version = "0.1.0"
-dependencies = [
- "clap",
- "eyre",
- "ipc",
- "pipeline",
- "store",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -2908,20 +2867,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "79cf5c93f93228cf8efb3ba362535fb11199ac548a09ce117c9b1adc3030d706"
 dependencies = [
  "rustversion",
-]
-
-[[package]]
-name = "ingest"
-version = "0.1.0"
-dependencies = [
- "clap",
- "eyre",
- "ipc",
- "pipeline",
- "store",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -3676,7 +3621,6 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 name = "peer"
 version = "0.1.0"
 dependencies = [
- "clap",
  "directory",
  "discover",
  "eth-p2p",
@@ -3690,20 +3634,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "peers"
-version = "0.1.0"
-dependencies = [
- "clap",
- "eyre",
- "ipc",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -4181,13 +4111,17 @@ dependencies = [
 name = "ratatoskr"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "chain",
  "clap",
  "corpus",
  "crossterm",
  "directory",
+ "era",
  "eth-p2p",
  "eyre",
+ "filter",
+ "ipc",
  "peer",
  "pipeline",
  "ratatui",
@@ -5336,23 +5270,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "spike"
-version = "0.1.0"
-dependencies = [
- "clap",
- "discover",
- "eth-p2p",
- "eyre",
- "futures",
- "model",
- "reth-network-peers",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "spki"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5962,21 +5879,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "univ3-cli"
-version = "0.1.0"
-dependencies = [
- "alloy-primitives",
- "clap",
- "eyre",
- "serde_json",
- "store",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "venues",
-]
-
-[[package]]
 name = "universal-hash"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6072,21 +5974,6 @@ dependencies = [
  "tokio",
  "tracing",
  "zstd",
-]
-
-[[package]]
-name = "venues-cli"
-version = "0.1.0"
-dependencies = [
- "clap",
- "eyre",
- "ipc",
- "pipeline",
- "store",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "venues",
 ]
 
 [[package]]
