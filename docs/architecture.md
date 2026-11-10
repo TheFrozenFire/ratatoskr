@@ -1,4 +1,6 @@
-# Architecture
+# Processes and files
+
+The ingestion pipeline, from discovery through fit, is described in [ARCHITECTURE.md](../ARCHITECTURE.md). This file is the process and file layout.
 
 By default one `ratatoskr` process owns both file sets (`--services db,peer`). `ratatoskr-db` and `ratatoskr-peer` are the split. The router is a library inside `ratatoskr`, not a third process and not a file owner.
 

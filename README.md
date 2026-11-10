@@ -41,4 +41,4 @@ cargo run -p venues-cli --release
 
 `ratatoskr-headers` asks the peer process for header ranges. The database server appends them. This binary does not open `headers.redb`. Each row is the block hash, parent hash, receipts root, and logs bloom. The chain has to link back to mainnet genesis. A restart continues from the saved cursor. Receipts are not downloaded.
 
-See [docs/architecture.md](docs/architecture.md) for the file owners and the cursor rule. See [docs/venues.md](docs/venues.md) for the mainnet venues in use and how each set of pools is listed.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the ingestion pipeline. See [docs/architecture.md](docs/architecture.md) for the file owners and the cursor rule. See [docs/venues.md](docs/venues.md) for the mainnet venues in use and how each set of pools is listed.
