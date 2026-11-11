@@ -24,7 +24,7 @@ Colocated pipelines call `LocalStore` and `LocalPeer` in process. The sockets st
 
 ## Cursor
 
-Header sync and the receipt walk both await `Sink::push`. `HeaderSource` moves its cursor only when the sink returns `Applied`. A rejected header push retries the same cursor. A rejected receipt push fails the run, and the supervisor stops the pipelines.
+Header sync awaits `Sink::push`. `HeaderSource` moves its cursor only when the sink returns `Applied`. A rejected header push retries the same cursor.
 
 Venue job cursors move inside `commit_chunk`. `VenueSource` does not await `Sink::push`.
 
@@ -32,7 +32,7 @@ Venue job cursors move inside `commit_chunk`. `VenueSource` does not await `Sink
 
 ## Pipelines
 
-The default pipelines are header sync, discovery, the receipt walk, and the state pipeline. The receipt walk stores peer receipt bundles for its named ranges and has no global byte cap. The state pipeline is a separate task from `RunPhase::All`. With no `--data-dir` it opens the live catalog. `--copy-from` copies a stratified identity sample into `--data-dir` first. The peer service is the only dialer.
+The default pipelines are header sync, discovery, and the state pipeline. The state pipeline is a separate task from `RunPhase::All`. With no `--data-dir` it opens the live catalog. `--copy-from` copies a stratified identity sample into `--data-dir` first. The peer service is the only dialer.
 
 ## Venue rows
 

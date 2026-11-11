@@ -319,7 +319,7 @@ The receipts of one block, checked against that block's receipts root.
 _Avoid_: corpus, header
 
 **Corpus**:
-The stored receipt bundles for the blocks a receipt walk kept.
+The stored receipt bundles. Discovery adds the bundle for a post-merge bloom hit.
 _Avoid_: venue catalog, header chain, discovery store
 
 **Block body**:
@@ -428,11 +428,7 @@ _Avoid_: detail lens, tick bitmap
 
 **Header sync**:
 The pipeline that appends headers.
-_Avoid_: receipt walk, state pipeline
-
-**Receipt walk**:
-The pipeline that stores receipt bundles for named block ranges.
-_Avoid_: header sync, discovery
+_Avoid_: discovery, state pipeline
 
 **Discovery**:
 The pipeline that writes pool identities from lists, from bloom hits, and from the corpus.

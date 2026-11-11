@@ -8,7 +8,7 @@ SHiNode is the reference for fetching Ethereum receipts over devp2p. Ratatoskr d
 
 ## One process
 
-`ratatoskr` owns the files and runs every pipeline in one process. The default is the database service and the peer service, with header sync, discovery, the receipt walk, and the state pipeline.
+`ratatoskr` owns the files and runs every pipeline in one process. The default is the database service and the peer service, with header sync, discovery, and the state pipeline.
 
 ```
 cargo run -p ratatoskr
@@ -24,8 +24,6 @@ cargo run -p ratatoskr -- peer census
 ```
 
 `peer fetch` reads one block from a session the peer service already holds and prints the discovery hits. `peer census` records the published mainnet DNS peer lists. Neither dials, and neither opens `peers.redb`.
-
-The receipt walk asks the peer service for receipt bundles and stores them in the corpus. It walks the Uniswap v3 launch week (block 12369621, up to 2 GiB) and the Uniswap v4 PoolManager launch (block 21688329, up to 3 GiB) when a connected peer still serves those heights, then a recent window of about 400,000 blocks.
 
 Discovery writes pool identities into the data directory. Identities live in `entities.redb`. List cursors, bloom hits, and era1 receipt bodies live in `discovery.redb`. `work.redb` is only leases and retries. Factories that expose an index are read with a lens: `eth_call` of the creation code in `contracts/lens/IndexLens.sol`, with no `to`. The constructor reverts the rows, so any mainnet client that runs a creation call can serve it. The state pipeline opens the live catalog when `--data-dir` is omitted. `--copy-from` copies a stratified identity sample into that directory first. The detail lens reads a batch of pools. The tick lens reads initialized tick words in a second call. Fit stores a price curve from local quotes of those quote inputs.
 

@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 use eth_p2p::Egress;
 use eyre::WrapErr;
 use peer::LocalPeer;
-use pipeline::{HeaderSource, ReceiptSource, Source, StoreSink, VenueSource};
+use pipeline::{HeaderSource, Source, StoreSink, VenueSource};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -43,9 +43,9 @@ struct Args {
     /// Comma-separated file owners: `db`, `peer`. Default is `db,peer`.
     #[arg(long, default_value = "db,peer")]
     services: String,
-    /// Comma-separated pipelines: `headers`, `venues`, `receipts`, `state`.
-    /// Default is all four. `state` reads the live catalog when `--data-dir` is omitted.
-    #[arg(long, default_value = "headers,venues,receipts,state")]
+    /// Comma-separated pipelines: `headers`, `venues`, `state`.
+    /// Default is all three. `state` reads the live catalog when `--data-dir` is omitted.
+    #[arg(long, default_value = "headers,venues,state")]
     pipeline: String,
     /// Catalog directory for this process. Default is the live catalog.
     #[arg(long)]
@@ -129,8 +129,7 @@ struct Services {
 struct Pipelines {
     headers: bool,
     venues: bool,
-    receipts: bool,
-    /// Pool details, ticks, curves, and the watch. Off unless named.
+    /// Pool details, ticks, curves, and the watch.
     state: bool,
 }
 
@@ -403,8 +402,7 @@ async fn supervise(args: Args) -> eyre::Result<()> {
             spawn_sampler(store);
         }
     }
-    let pipelines_started =
-        pipelines.headers || pipelines.venues || pipelines.receipts || pipelines.state;
+    let pipelines_started = pipelines.headers || pipelines.venues || pipelines.state;
     let mut peer_task = peer_task;
     let mut stop_rx = stop_rx;
     let mut failed = tokio::task::LocalSet::new()
@@ -489,15 +487,6 @@ fn spawn_pipelines(
         tasks.spawn_local(async move {
             let mut sink = StoreSink::new(store.clone());
             HeaderSource::new(peer, store).run(&mut sink, stop).await
-        });
-    }
-    if pipelines.receipts {
-        let peer = local.clone().expect("receipts needs both db and peer");
-        let store = store.clone().expect("receipts needs both db and peer");
-        let stop = stop.clone();
-        tasks.spawn_local(async move {
-            let mut sink = StoreSink::new(store.clone());
-            ReceiptSource::new(store, peer).run(&mut sink, stop).await
         });
     }
     if pipelines.venues {
@@ -674,7 +663,6 @@ fn parse_pipelines(text: &str) -> eyre::Result<Pipelines> {
         match part.trim() {
             "headers" => pipelines.headers = true,
             "venues" => pipelines.venues = true,
-            "receipts" => pipelines.receipts = true,
             "state" => pipelines.state = true,
             other => return Err(eyre::eyre!("unknown pipeline {other}")),
         }
@@ -685,9 +673,6 @@ fn parse_pipelines(text: &str) -> eyre::Result<Pipelines> {
 fn check_combination(services: &Services, pipelines: &Pipelines) -> eyre::Result<()> {
     if pipelines.headers && !(services.db && services.peer) {
         return Err(eyre::eyre!("headers needs both db and peer"));
-    }
-    if pipelines.receipts && !(services.db && services.peer) {
-        return Err(eyre::eyre!("receipts needs both db and peer"));
     }
     if pipelines.venues && !services.db {
         return Err(eyre::eyre!("venues needs db"));
@@ -860,7 +845,6 @@ mod tests {
         Pipelines {
             headers: true,
             venues: true,
-            receipts: true,
             state: true,
         }
     }
@@ -884,18 +868,21 @@ mod tests {
     }
 
     #[test]
-    fn default_pipelines_are_header_sync_discovery_receipts_and_state() {
+    fn default_pipelines_are_header_sync_discovery_and_state() {
         let args = Cli::try_parse_from(["ratatoskr"]).unwrap().args;
         assert_eq!(parse_pipelines(&args.pipeline).unwrap(), every_pipeline());
     }
 
     #[test]
     fn a_named_pipeline_list_selects_only_those_pipelines() {
-        assert!(!parse_pipelines("headers").unwrap().receipts);
-        assert!(!parse_pipelines("headers").unwrap().state);
-        assert!(parse_pipelines("receipts").unwrap().receipts);
+        let headers = parse_pipelines("headers").unwrap();
+        assert!(headers.headers);
+        assert!(!headers.venues);
+        assert!(!headers.state);
+        assert!(parse_pipelines("venues").unwrap().venues);
         assert!(parse_pipelines("state").unwrap().state);
         assert!(!parse_pipelines("headers,venues").unwrap().state);
+        assert!(parse_pipelines("receipts").is_err());
     }
 
     #[test]
@@ -920,7 +907,6 @@ mod tests {
             &Pipelines {
                 headers: false,
                 venues: false,
-                receipts: false,
                 state: true,
             },
             &paths,
@@ -973,27 +959,11 @@ mod tests {
             &Pipelines {
                 headers: true,
                 venues: false,
-                receipts: false,
                 state: false,
             },
             &paths,
         ));
         assert!(headers.to_string().contains("headers"), "{headers}");
-        assert_no_databases(&paths);
-        let receipts = must_err(open_owned(
-            &Services {
-                db: false,
-                peer: true,
-            },
-            &Pipelines {
-                headers: false,
-                venues: false,
-                receipts: true,
-                state: false,
-            },
-            &paths,
-        ));
-        assert!(receipts.to_string().contains("receipts"), "{receipts}");
         assert_no_databases(&paths);
         let venues = must_err(open_owned(
             &Services {
@@ -1003,7 +973,6 @@ mod tests {
             &Pipelines {
                 headers: false,
                 venues: true,
-                receipts: false,
                 state: false,
             },
             &paths,
@@ -1044,7 +1013,6 @@ mod tests {
             &Pipelines {
                 headers: false,
                 venues: true,
-                receipts: false,
                 state: false,
             },
             &paths,
@@ -1111,7 +1079,6 @@ mod tests {
             &Pipelines {
                 headers: false,
                 venues: false,
-                receipts: false,
                 state: false,
             },
             &paths,

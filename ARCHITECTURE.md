@@ -6,17 +6,15 @@ The entity flow is discovery, then a detail read, then the tick book where a poo
 
 ## Pipelines
 
-Four pipelines run under the database service. A bare `ratatoskr` starts all four: header sync, discovery, the receipt walk, and the state pipeline.
+Three pipelines run under the database service. A bare `ratatoskr` starts all three: header sync, discovery, and the state pipeline.
 
 **Header sync** appends the header chain from peers: hash, parent, timestamp, receipts root, and logs bloom. The cursor advances when the append is applied.
 
 **Discovery** writes pool identities. A factory that keeps a list is read by the index lens. A factory whose pools are named by a creation event is found by a bloom hit, then by that event in the receipt bundle. A registry covers Curve pools whose identity comes from the registry. The corpus can contribute creation events it already holds. A pool identity is a factory pool, a singleton pool, or a registry pool. A settlement records fills.
 
-**Receipt walk** stores receipt bundles for named block ranges. Discovery reads creation events out of those bundles and writes the identities.
-
 **State pipeline** runs on identities discovery has already written. For each pool it stores configuration, quoting state, the tick book, and a price curve. The work queue leases one stage at a time. The stages are configuration, quoting state, tick book, and fit.
 
-History for a bloom hit comes from an era1 file before the merge and from a peer after it. A hole records an unserved block, and the cursor stays on the last committed block. The stored history for a block is its header and, when a receipt walk kept it, its receipt bundle.
+History for a bloom hit comes from an era1 file before the merge and from a peer after it. A hole records an unserved block, and the cursor stays on the last committed block. The stored history for a block is its header and, for a post-merge bloom hit, its receipt bundle. Pre-merge receipt bytes for a bloom hit stay in the discovery store.
 
 ## Detail read
 
