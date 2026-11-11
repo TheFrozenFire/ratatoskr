@@ -3,9 +3,10 @@
 //! The implementation lives in `store`. The trait is here so those crates can
 //! take it without a dependency cycle.
 
-use alloy_primitives::B256;
+use alloy_primitives::{Address, B256};
 use model::{BlockRecord, HeaderRecord};
 
+use crate::conduit::{ConduitFail, ConduitJob};
 use crate::state::{
     CurveRecord, ImmutablePut, ImmutableRow, MutableStored, MutableWrite, PoolState, QuoteRecord,
     TickPage, WatchHit, WorkFail, WorkJob,
@@ -75,4 +76,32 @@ pub trait EntityStore: Send + Sync {
     async fn read_state(&self, kind: u8, id: B256) -> eyre::Result<PoolState>;
     async fn apply_watch(&self, through: u64, hits: &[WatchHit]) -> eyre::Result<()>;
     async fn watch_through(&self) -> eyre::Result<Option<u64>>;
+
+    /// Queue conduit jobs for ordered pairs whose stored merge is missing or stale.
+    async fn enqueue_conduit_fill(&self) -> eyre::Result<u64> {
+        Ok(0)
+    }
+
+    async fn claim_conduits(
+        &self,
+        _limit: u32,
+        _now: u64,
+        _lease_for: u64,
+    ) -> eyre::Result<Vec<ConduitJob>> {
+        Ok(Vec::new())
+    }
+
+    async fn finish_conduits(
+        &self,
+        _done: &[(Address, Address)],
+        _again: &[(Address, Address)],
+        _failed: &[ConduitFail],
+    ) -> eyre::Result<()> {
+        Ok(())
+    }
+
+    /// Merge one ordered pair. The bool asks for another pass.
+    async fn build_conduit(&self, _token_in: Address, _token_out: Address) -> eyre::Result<bool> {
+        Ok(false)
+    }
 }

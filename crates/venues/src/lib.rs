@@ -9,6 +9,7 @@
 //! stay in redb.
 
 mod catalog;
+mod conduit;
 mod decode;
 mod detail;
 mod entity;
@@ -37,6 +38,7 @@ pub use catalog::{
     fill_identities, kind_name, read_fill_ids, sample_identities, write_fill_ids, Catalog,
     FillReport, Put, ReceiptBody, SampleReport, VenueRow, PANCAKE_V3, SUSHI_V3, UNI_V3, V3_FORK,
 };
+pub use conduit::{ConduitFail, ConduitJob};
 pub use detail::{load_details, DetailQuery, PoolDetail, Quote};
 pub use entity::EntityStore;
 pub use fit::{drop_partial_quotes, export_curve_fit, import_curve_fit, refit_curves, FitReport};

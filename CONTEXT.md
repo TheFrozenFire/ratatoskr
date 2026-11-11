@@ -272,6 +272,18 @@ _Avoid_: lens, router
 The output amount a stored price curve assigns to an input on one direction.
 _Avoid_: local quote, chain quote
 
+**Pair conduit**:
+The stored quote of every direct action that spends one token and pays another, as the slope merge of those actions.
+_Avoid_: route, hop
+
+**Slope segment**:
+A positive input width and a nonnegative output on one action. A zero-output segment is not stored.
+_Avoid_: cap, hop, tick
+
+**Meta-action**:
+A stored edge built from other actions. A pool direction is not a meta-action.
+_Avoid_: route, pool direction, hop
+
 **Acceptance bar**:
 The worst relative error a stored formula is allowed on its labels: ten basis points.
 _Avoid_: score, tolerance
@@ -507,10 +519,12 @@ _Avoid_: live catalog, quote record, grid
 - The **Database service** owns the **Header chain**, the **Corpus**, the **Discovery store**, the **Venue catalog**, and the **Work queue**
 - The **Peer service** owns the **Peer directory** and is the only dialer
 - A **Client** does not open those files. A **Colocated pipeline** calls the store in process
-- **Discovery** writes **Pool identities**. The **State pipeline** then writes **Configuration**, **Quoting state**, the **Tick book**, and the **Price curve**. The **Watch** is another producer of **Dirty** marks
+- **Discovery** writes **Pool identities**. The **State pipeline** then writes **Configuration**, **Quoting state**, the **Tick book**, the **Price curve**, and the **Pair conduit**. The **Watch** is another producer of **Dirty** marks
 - A **Head class** with an unchanged **Tick bitmap** keeps the **Tick book**. A **Tick class**, or a changed bitmap, reads **Tick words** again. Tick class replaces head class
-- A new **Generation** drops the **Price curve**. The **Quote record** stays until the **Pool identity** is deleted
-- A **Stage** is configuration, quoting state, the tick book, or **Fit**. There is no live stage for chain quotes
+- A new **Generation** drops the **Price curve**. The **Quote record** stays until the **Pool identity** is deleted. Dropping the price curve queues the **Pair conduit** again
+- A **Pair conduit** merges the direct actions for one ordered pair of tokens. A path through a third token is a composition of pair conduits
+- A **Slope segment** is one step of that merge. A **Meta-action** is the stored edge. A pool direction is a member of a meta-action
+- A **Stage** is configuration, quoting state, the tick book, **Fit**, or the pair conduit. There is no live stage for chain quotes
 - A **Sample catalog** is a copy of identities for a trial. It is not the **Live catalog**
 
 ## Example dialogue
@@ -571,7 +585,7 @@ _Avoid_: live catalog, quote record, grid
 - **"Peer"** is a node. The **Peer service** is the process. The **Peer directory** is the sightings and summaries.
 - **"Index"** is a **List** or a position in a **Tick bitmap**. A list names pools. A bitmap names ticks.
 - **"Canonical"** is a **Canonical factory** or a **Canonical pool**. The factory is an emitter we accept. The pool is a shape whose structural formula is determined by the quote inputs.
-- **"State"** is **Chain state**, **Quoting state**, or the **State pipeline**. The quoting state is one record. The state pipeline is the work that writes configuration, quoting state, the tick book, and the price curve.
+- **"State"** is **Chain state**, **Quoting state**, or the **State pipeline**. The quoting state is one record. The state pipeline is the work that writes configuration, quoting state, the tick book, the price curve, and the pair conduit.
 - The joined inputs a local quote reads are the **Quote inputs**. **Configuration**, **Quoting state**, and **Tick book** name the individual records.
 - **"Details"** is the detail read. That read writes **Configuration** and **Quoting state** together. The **Tick book** is the following read.
 - **"Sync"** is a refresh of **Quoting state**, or the read of the **Tick book**. Say which record.
@@ -579,6 +593,7 @@ _Avoid_: live catalog, quote record, grid
 - **"Fit"** is the stage that stores a **Price curve**. The choice among formulas inside that stage is **Selection**.
 - **"The function"** is not a name for a **Price curve** or a **Formula**.
 - **Quote stage.** Older work named a stage that fetched chain quotes. That stage is not claimed. Chain quotes already stored remain **Quote records**.
+- **"Route"** and **"hop"** are not names for a **Pair conduit**. The conduit is one ordered pair of tokens. A path through a third token is a composition of pair conduits.
 - **Unequal-weight Balancer.** The local quote and the stored weighted formula are both determined by balances, weights, and the pool fee, and they are different evaluations. Selection can store a **Sample formula** instead. Do not treat the local quote and the stored formula as one object.
 - **Crypto pool.** Its local quote is a spot line on the price scales. That line is not the crypto invariant and not a chain quote.
 - **Kind and shape.** Kind is the family on the pool identity. Shape is the quoting rule of the pool.

@@ -16,7 +16,7 @@ Discovery commits through the store. List cursors and bloom cursors move inside 
 
 History for a bloom hit comes from an era1 file before the merge and from a peer after it. Pre-merge receipt bytes for that hit stay in the discovery store. A post-merge bloom hit reads its receipt bundle from the corpus when the bundle is already stored, and otherwise from a peer, then stores that bundle in the corpus. The creation events become pool identities in the same pass. An unserved span leaves the cursor on the last committed block. The stored history for a block is its header and, for a post-merge bloom hit, its receipt bundle.
 
-**State pipeline** runs on identities discovery has already written. For each pool it stores configuration, quoting state, the tick book, and a price curve. The work queue leases one stage at a time. The stages are configuration, quoting state, tick book, and fit. With no `--data-dir` it opens the live catalog. `--copy-from` copies a stratified identity sample into `--data-dir` first.
+**State pipeline** runs on identities discovery has already written. For each pool it stores configuration, quoting state, the tick book, and a price curve, then a pair conduit for each ordered pair those curves price. The work queue leases one stage at a time. The stages are configuration, quoting state, tick book, fit, and the pair conduit. With no `--data-dir` it opens the live catalog. `--copy-from` copies a stratified identity sample into `--data-dir` first.
 
 ## Detail read
 
@@ -42,9 +42,21 @@ A head-class refresh with an unchanged bitmap keeps the tick pages and marks the
 
 Fit stores the price curve for one generation. A local quote is computed from the quote inputs. Selection may score formulas against a grid of those local quotes. The stored price curve is the formula selection keeps, or a skipped curve.
 
-Fit reads local quotes of the quote inputs. Chain quotes already stored stay in the quote record, for checking a price curve later. The live stages are configuration, quoting state, the tick book, and fit. A new quoting state drops the price curve and leaves the quote record in place until the pool identity is deleted.
+Fit reads local quotes of the quote inputs. Chain quotes already stored stay in the quote record, for checking a price curve later. The live stages are configuration, quoting state, the tick book, fit, and the pair conduit. A new quoting state drops the price curve and leaves the quote record in place until the pool identity is deleted.
 
 An estimate is read from the stored price curve. A local quote is read from the quote inputs.
+
+## Pair conduit
+
+A pair conduit is the quote of every direct action that spends one token and pays another. At input `x` its value is the most those actions can pay together:
+
+```
+F(x) = max { sum f_i(x_i) | x_i >= 0, sum x_i <= x }
+```
+
+Each action is one direction of one pool. The stored row is the slope merge of those actions: the next input goes to the action whose marginal is currently highest. The two directions of one pool are members of opposite conduits. A path through a third token is a composition of pair conduits.
+
+The stage runs after fit. A curve write queues the ordered pairs of its priced directions. The first pass of a state run also queues pairs whose stored conduit is missing or behind the curves already in the catalog. The merge reads slope segments from `estimate` at the origin, the sampling ceiling, and the grid fractions of that ceiling. It does not hold a curve lease while it merges.
 
 ## Refresh
 
@@ -62,7 +74,7 @@ The database service owns `headers.redb` (the header chain), `corpus.redb` (the 
 
 The peer service owns `peers.redb`, the peer directory. That is `ratatoskr` with `--services peer`. A peer-only run opens the peer directory. The default supervisor opens that file before the entity files and stops if the open fails.
 
-The venue catalog holds identities, configuration, quoting state, tick books, price curves, quote records, and watch marks. The discovery store holds list cursors, bloom hits, and era1 receipt bytes. The work queue holds leases. Deleting the work queue drops the leases. The pools remain in the venue catalog.
+The venue catalog holds identities, configuration, quoting state, tick books, price curves, pair conduits, quote records, and watch marks. The discovery store holds list cursors, bloom hits, and era1 receipt bytes. The work queue holds leases. Deleting the work queue drops the leases. The pools remain in the venue catalog.
 
 The state pipeline opens the data directory it is given. A sample catalog is a copy of identities for a trial. The live catalog is the venue catalog of the full identity set.
 

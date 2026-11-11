@@ -29,9 +29,8 @@ use crate::detail::{product_fee_pips, PoolDetail, Quote};
 use crate::fit_formula::{decode_fit, encode_fit, Formula, StoredFit};
 use crate::fit_select::{choose, labels_of};
 use crate::state::{
-    curve_is_current, curve_job, is_canonical, join_detail, keep_or_drop,
-    quote_is_current, unix_now, CurveRecord, PoolState, QuoteRecord, WorkJob, CURVE_VERSION,
-    QUOTE_VERSION,
+    curve_is_current, curve_job, is_canonical, join_detail, keep_or_drop, quote_is_current,
+    unix_now, CurveRecord, PoolState, QuoteRecord, WorkJob, CURVE_VERSION, QUOTE_VERSION,
 };
 use crate::Catalog;
 use crate::EntityStore;
@@ -1028,6 +1027,30 @@ fn bisect_local(
         }
     }
     best
+}
+
+/// Knots `estimate` accepts on one direction: the origin, the sampling ceiling,
+/// and the grid fractions of that ceiling. A fraction `estimate` refuses is omitted.
+pub(crate) fn direction_knots(
+    detail: &PoolDetail,
+    curve: &crate::state::CurveRecord,
+    token_in: Address,
+    token_out: Address,
+) -> Vec<(BigInt, BigInt)> {
+    let mut knots = vec![(BigInt::from(0), BigInt::from(0))];
+    let (max_in, _) = domain_max(detail, token_in, token_out);
+    if max_in.is_zero() {
+        return knots;
+    }
+    for (_, amount) in grid_amounts(max_in) {
+        let Ok(quote) =
+            crate::state::estimate(curve, curve.generation, token_in, token_out, amount)
+        else {
+            continue;
+        };
+        knots.push((bigint_from_u256(amount), bigint_from_u256(quote.amount_out)));
+    }
+    knots
 }
 
 fn grid_amounts(max_in: U256) -> Vec<(&'static str, U256)> {
@@ -2521,7 +2544,7 @@ pub fn refit_curves(catalog: &Catalog) -> eyre::Result<u64> {
                         Err(_) => continue,
                     };
                 let curve = crate::state::curve_for_snapshot(&detail, mutable.generation)
-                .map_err(|err| eyre::eyre!(err))?;
+                    .map_err(|err| eyre::eyre!(err))?;
                 curves.push(curve);
             }
             let n = curves.len() as u64;
@@ -2948,7 +2971,10 @@ mod tests {
         let curve = crate::state::curve_for_snapshot(&detail, 4).unwrap();
         let fit = crate::fit_formula::decode_fit(&curve.payload).unwrap();
         assert_eq!(fit.reason, 0);
-        assert!(fit.directions.iter().all(|direction| direction.name == "ladder"));
+        assert!(fit
+            .directions
+            .iter()
+            .all(|direction| direction.name == "ladder"));
         assert_eq!(fit.directions.len(), 2);
         let off = U256::from(1_000u64);
         for (token_in, token_out) in [(token0, token1), (token1, token0)] {

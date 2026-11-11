@@ -324,6 +324,7 @@ async fn supervise(args: Args) -> eyre::Result<()> {
         println!("immutable {}", summary.immutable);
         println!("mutable {}", summary.mutable);
         println!("curves {}", summary.curves);
+        println!("conduits {}", summary.conduits);
         println!("quotes {}", summary.quotes);
         println!("tick_pages {}", summary.tick_pages);
         println!("mismatches {}", summary.mismatches);

@@ -4675,6 +4675,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "routing"
+version = "0.1.0"
+dependencies = [
+ "num-bigint",
+ "num-traits",
+]
+
+[[package]]
 name = "ruint"
 version = "1.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5967,6 +5975,7 @@ dependencies = [
  "num-traits",
  "redb",
  "reqwest 0.12.28",
+ "routing",
  "serde_json",
  "tokio",
  "tracing",

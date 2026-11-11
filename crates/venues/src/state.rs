@@ -16,12 +16,13 @@
 //! Tick words still load when the bitmap lists them and those pages are not
 //! stored, because the ladder's `max_in` is only known once the words are in.
 //! Claim order is a rank index: a watch hit, then a larger `max_in`.
+//! A curve write queues a pair conduit for each priced direction. That stage
+//! merges after the curve batch, and it does not hold a curve lease.
 
 use crate::catalog::{entity_key, AERO, BALANCER_V2, BALANCER_V3, CURVE, METRIC, UNI_V4, VENUES};
 use crate::detail::{
-    tick_request, BitmapWord, Concentrated, CurveCoin,
-    CurvePool, MetricBin, MetricPool, PoolDetail, Quote, TickWord, FLAG_CRYPTO, FLAG_FAILED,
-    FLAG_STABLE, FLAG_TRUNCATED,
+    tick_request, BitmapWord, Concentrated, CurveCoin, CurvePool, MetricBin, MetricPool,
+    PoolDetail, Quote, TickWord, FLAG_CRYPTO, FLAG_FAILED, FLAG_STABLE, FLAG_TRUNCATED,
 };
 use crate::rpc::Rpc;
 use crate::tick::{self, TickWordRead};
@@ -30,11 +31,11 @@ use crate::{
     V3_FORK,
 };
 use alloy_primitives::{keccak256, Address, B256, U256};
-use num_bigint::{BigInt, Sign};
-use num_traits::Zero;
 use eyre::WrapErr;
 use ipc::HistoryPeer;
 use model::{BlockRecord, NormalizedLog};
+use num_bigint::{BigInt, Sign};
+use num_traits::Zero;
 use redb::{Durability, ReadableTable, TableDefinition};
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -67,6 +68,8 @@ pub const STAGE_TICKS: u8 = 3;
 pub const STAGE_CURVE: u8 = 4;
 /// Retained so older work rows can be dropped. The pipeline does not claim this stage.
 pub const STAGE_QUOTE: u8 = 5;
+/// Pair conduit. Claimed after the curve batch, from `conduit_jobs`.
+pub const STAGE_CONDUIT: u8 = 6;
 pub const CLASS_NONE: u8 = 0;
 pub const CLASS_HEAD: u8 = 1;
 pub const CLASS_TICKS: u8 = 2;
@@ -221,6 +224,7 @@ pub struct StateSummary {
     pub immutable: u64,
     pub mutable: u64,
     pub curves: u64,
+    pub conduits: u64,
     pub quotes: u64,
     pub tick_pages: u64,
     pub mismatches: u64,
@@ -595,6 +599,7 @@ impl Catalog {
             immutable: count_bytes(&self.entities, IMMUTABLE)?,
             mutable: count_bytes(&self.entities, MUTABLE)?,
             curves: count_bytes(&self.entities, CURVES)?,
+            conduits: crate::conduit::count_conduits(&self.entities)?,
             quotes: count_bytes(&self.entities, QUOTES)?,
             tick_pages: count_bytes(&self.entities, TICK_PAGES)?,
             mismatches: count_bytes(&self.entities, MISMATCH)?,
@@ -614,6 +619,14 @@ impl Catalog {
             if !job.error.is_empty() {
                 *summary.errors.entry(job.error).or_default() += 1;
             }
+        }
+        let (conduit_jobs, conduit_errors) = crate::conduit::account_jobs(&self.work)?;
+        summary.jobs += conduit_jobs;
+        if conduit_jobs > 0 {
+            summary.jobs_by_stage.insert(STAGE_CONDUIT, conduit_jobs);
+        }
+        for (error, count) in conduit_errors {
+            *summary.errors.entry(error).or_default() += count;
         }
         Ok(summary)
     }
@@ -761,7 +774,7 @@ impl Catalog {
     pub fn put_mutable(&self, row: &MutableWrite) -> eyre::Result<MutableStored> {
         let mut write = self.entities.begin_write()?;
         write.set_durability(Durability::Immediate);
-        let stored = {
+        let (stored, previous_curve) = {
             let mut mutable_table = write.open_table(MUTABLE)?;
             let mut ticks = write.open_table(TICK_PAGES)?;
             let mut curves = write.open_table(CURVES)?;
@@ -769,6 +782,10 @@ impl Catalog {
             let key = entity_key(row.kind, &row.id);
             let previous = match mutable_table.get(key.as_slice())? {
                 Some(value) => Some(decode_mutable(value.value())?),
+                None => None,
+            };
+            let previous_curve = match curves.get(key.as_slice())? {
+                Some(value) => decode_curve_record(row.kind, row.id, value.value()).ok(),
                 None => None,
             };
             let generation = previous
@@ -799,14 +816,20 @@ impl Catalog {
                 }
                 _ => false,
             };
-            MutableStored {
-                generation,
-                dirty_cleared,
-                kept_ticks,
-                bitmap_changed,
-            }
+            (
+                MutableStored {
+                    generation,
+                    dirty_cleared,
+                    kept_ticks,
+                    bitmap_changed,
+                },
+                previous_curve,
+            )
         };
         write.commit()?;
+        if let Some(previous_curve) = previous_curve {
+            crate::conduit::retarget(self, row.kind, row.id, Some(&previous_curve), None)?;
+        }
         Ok(stored)
     }
 
@@ -842,7 +865,7 @@ impl Catalog {
     pub fn put_curve(&self, curve: &CurveRecord) -> eyre::Result<()> {
         let mut write = self.entities.begin_write()?;
         write.set_durability(Durability::Immediate);
-        {
+        let previous = {
             let mutable_table = write.open_table(MUTABLE)?;
             let mut curves = write.open_table(CURVES)?;
             let key = entity_key(curve.kind, &curve.id);
@@ -853,10 +876,16 @@ impl Catalog {
             if view.generation != curve.generation {
                 return Err(eyre::eyre!("curve generation"));
             }
+            let previous = match curves.get(key.as_slice())? {
+                Some(value) => decode_curve_record(curve.kind, curve.id, value.value()).ok(),
+                None => None,
+            };
             let bytes = encode_curve(curve);
             curves.insert(key.as_slice(), bytes.as_slice())?;
-        }
+            previous
+        };
         write.commit()?;
+        crate::conduit::retarget(self, curve.kind, curve.id, previous.as_ref(), Some(curve))?;
         Ok(())
     }
 
@@ -867,6 +896,7 @@ impl Catalog {
         }
         let mut write = self.entities.begin_write()?;
         write.set_durability(Durability::Immediate);
+        let mut replaced = Vec::with_capacity(curves.len());
         {
             let mutable_table = write.open_table(MUTABLE)?;
             let mut table = write.open_table(CURVES)?;
@@ -879,11 +909,19 @@ impl Catalog {
                 if view.generation != curve.generation {
                     return Err(eyre::eyre!("curve generation"));
                 }
+                let previous = match table.get(key.as_slice())? {
+                    Some(value) => decode_curve_record(curve.kind, curve.id, value.value()).ok(),
+                    None => None,
+                };
                 let bytes = encode_curve(curve);
                 table.insert(key.as_slice(), bytes.as_slice())?;
+                replaced.push(previous);
             }
         }
         write.commit()?;
+        for (previous, curve) in replaced.iter().zip(curves) {
+            crate::conduit::retarget(self, curve.kind, curve.id, previous.as_ref(), Some(curve))?;
+        }
         Ok(())
     }
 
@@ -1004,6 +1042,7 @@ impl Catalog {
         for chunk in ids.chunks(128) {
             let mut write = self.entities.begin_write()?;
             write.set_durability(Durability::Immediate);
+            let mut dropped_curves = Vec::new();
             {
                 let mut venues = write.open_table(VENUES)?;
                 let mut immutable = write.open_table(IMMUTABLE)?;
@@ -1018,6 +1057,11 @@ impl Catalog {
                     if venues.remove(key.as_slice())?.is_some() {
                         removed += 1;
                     }
+                    if let Some(value) = curves.get(key.as_slice())? {
+                        if let Ok(curve) = decode_curve_record(*kind, *id, value.value()) {
+                            dropped_curves.push(curve);
+                        }
+                    }
                     immutable.remove(key.as_slice())?;
                     mutable.remove(key.as_slice())?;
                     curves.remove(key.as_slice())?;
@@ -1028,6 +1072,9 @@ impl Catalog {
                 }
             }
             write.commit()?;
+            for curve in &dropped_curves {
+                crate::conduit::retarget(self, curve.kind, curve.id, Some(curve), None)?;
+            }
             let mut work = self.work.begin_write()?;
             work.set_durability(Durability::Immediate);
             {
@@ -1349,12 +1396,7 @@ impl Catalog {
         Ok(None)
     }
 
-    fn sync_jobs(
-        &self,
-        drop: &[(u8, u8, B256)],
-        jobs: &[WorkJob],
-        now: u64,
-    ) -> eyre::Result<u64> {
+    fn sync_jobs(&self, drop: &[(u8, u8, B256)], jobs: &[WorkJob], now: u64) -> eyre::Result<u64> {
         let mut write = self.work.begin_write()?;
         write.set_durability(Durability::Immediate);
         let written = {
@@ -1456,6 +1498,10 @@ where
     }
     let inserted = store.reconcile(unix_now()).await?;
     report.notes.push(format!("reconcile {inserted}"));
+    let queued = store.enqueue_conduit_fill().await?;
+    if queued > 0 {
+        report.notes.push(format!("conduit fill {queued}"));
+    }
     let urls = if opts.rpcs.is_empty() {
         crate::rpc::default_call_rpcs()
     } else {
@@ -1552,48 +1598,122 @@ where
 {
     let mut claimed = Vec::new();
     for stage in [STAGE_IMMUTABLE, STAGE_MUTABLE, STAGE_TICKS, STAGE_CURVE] {
-        let jobs = store.claim_work(stage, DETAIL_BATCH, now, LEASE_SECS).await?;
+        let jobs = store
+            .claim_work(stage, DETAIL_BATCH, now, LEASE_SECS)
+            .await?;
         if !jobs.is_empty() {
             claimed.push((stage, jobs));
         }
     }
-    if claimed.is_empty() {
+    let mut worked = false;
+    if !claimed.is_empty() {
+        let handle = tokio::runtime::Handle::current();
+        let mut threads = Vec::with_capacity(claimed.len());
+        for (stage, jobs) in claimed {
+            let store = store.clone();
+            let rpc = rpc.clone();
+            let handle = handle.clone();
+            threads.push(std::thread::spawn(move || {
+                handle.block_on(run_stage(
+                    store,
+                    rpc,
+                    stage,
+                    jobs,
+                    block,
+                    now,
+                    give_up_after,
+                ))
+            }));
+        }
+        let mut failed = None;
+        for thread in threads {
+            match thread.join() {
+                Ok(Ok(batch_notes)) => notes.extend(batch_notes),
+                Ok(Err(err)) if failed.is_none() => failed = Some(err),
+                Ok(Err(_)) => {}
+                Err(_) => {
+                    if failed.is_none() {
+                        failed = Some(eyre::eyre!("stage task panicked"));
+                    }
+                }
+            }
+        }
+        if let Some(err) = failed {
+            return Err(err);
+        }
+        worked = true;
+    }
+    if drive_conduits(store, now, give_up_after, notes).await? {
+        worked = true;
+    }
+    Ok(worked)
+}
+
+async fn drive_conduits<S>(
+    store: &S,
+    now: u64,
+    give_up_after: u32,
+    notes: &mut Vec<String>,
+) -> eyre::Result<bool>
+where
+    S: EntityStore,
+{
+    let jobs = store.claim_conduits(DETAIL_BATCH, now, LEASE_SECS).await?;
+    if jobs.is_empty() {
         return Ok(false);
     }
-    let handle = tokio::runtime::Handle::current();
-    let mut threads = Vec::with_capacity(claimed.len());
-    for (stage, jobs) in claimed {
-        let store = store.clone();
-        let rpc = rpc.clone();
-        let handle = handle.clone();
-        threads.push(std::thread::spawn(move || {
-            handle.block_on(run_stage(
-                store,
-                rpc,
-                stage,
-                jobs,
-                block,
-                now,
-                give_up_after,
-            ))
-        }));
-    }
-    let mut failed = None;
-    for thread in threads {
-        match thread.join() {
-            Ok(Ok(batch_notes)) => notes.extend(batch_notes),
-            Ok(Err(err)) if failed.is_none() => failed = Some(err),
-            Ok(Err(_)) => {}
-            Err(_) => {
-                if failed.is_none() {
-                    failed = Some(eyre::eyre!("stage task panicked"));
+    let count = jobs.len() as u64;
+    crate::metrics::begin_batch(STAGE_CONDUIT, count);
+    let started = std::time::Instant::now();
+    let mut done = Vec::new();
+    let mut again = Vec::new();
+    let mut failed = Vec::new();
+    for job in &jobs {
+        match store.build_conduit(job.token_in, job.token_out).await {
+            Ok(true) => {
+                again.push((job.token_in, job.token_out));
+                done.push((job.token_in, job.token_out));
+            }
+            Ok(false) => done.push((job.token_in, job.token_out)),
+            Err(err) => {
+                let error = crate::rpc::redact_secret(&err.to_string());
+                if give_up_after > 0 && job.attempt >= give_up_after {
+                    tracing::error!(
+                        stage = STAGE_CONDUIT,
+                        token_in = %job.token_in,
+                        token_out = %job.token_out,
+                        attempt = job.attempt,
+                        %error,
+                        "state gave up"
+                    );
+                    notes.push(format!(
+                        "gave up conduit {} {}: {error}",
+                        job.token_in, job.token_out
+                    ));
+                    done.push((job.token_in, job.token_out));
+                } else {
+                    tracing::warn!(
+                        stage = STAGE_CONDUIT,
+                        token_in = %job.token_in,
+                        token_out = %job.token_out,
+                        attempt = job.attempt,
+                        %error,
+                        "state job failed"
+                    );
+                    failed.push(crate::conduit::ConduitFail {
+                        token_in: job.token_in,
+                        token_out: job.token_out,
+                        not_before: unix_now().saturating_add(RETRY_SECS),
+                        error,
+                    });
                 }
             }
         }
     }
-    if let Some(err) = failed {
-        return Err(err);
-    }
+    store.finish_conduits(&done, &again, &failed).await?;
+    let ms = started.elapsed().as_millis() as u64;
+    crate::metrics::record_batch(STAGE_CONDUIT, count, ms);
+    tracing::info!(stage = STAGE_CONDUIT, jobs = count, ms, "state batch");
     Ok(true)
 }
 
@@ -2282,7 +2402,11 @@ fn decode_rank(key: &[u8]) -> Option<(u8, u64, u8, B256)> {
 
 fn priority_of(dirty: bool, top: U256) -> u64 {
     let mag = magnitude(top);
-    if dirty { DIRTY_BAND | mag } else { mag }
+    if dirty {
+        DIRTY_BAND | mag
+    } else {
+        mag
+    }
 }
 
 /// Bit length in the high bits, so a longer `max_in` sorts first, then its top bits.
@@ -2418,8 +2542,7 @@ fn follow_for_detail(input: &FollowInput<'_>) -> FollowPlan {
             priority,
         };
     }
-    let outstanding =
-        !input.book_ready && concentrated_kind(input.kind) && input.tick_count > 0;
+    let outstanding = !input.book_ready && concentrated_kind(input.kind) && input.tick_count > 0;
     if outstanding {
         let plan = plan_follow_up(
             input.class,
@@ -3273,7 +3396,7 @@ fn decode_quote_record(kind: u8, id: B256, bytes: &[u8]) -> eyre::Result<QuoteRe
     })
 }
 
-fn decode_curve_record(kind: u8, id: B256, bytes: &[u8]) -> eyre::Result<CurveRecord> {
+pub(crate) fn decode_curve_record(kind: u8, id: B256, bytes: &[u8]) -> eyre::Result<CurveRecord> {
     let mut reader = Reader::new(bytes);
     if reader.u8().map_err(|err| eyre::eyre!(err))? != 1 {
         return Err(eyre::eyre!("curve"));
@@ -4085,7 +4208,9 @@ mod tests {
         store_detail(&catalog, &venue, &detail);
         let mut seeded = quote_job(venue.kind, venue.id, 1);
         seeded.priority = 50;
-        catalog.enqueue_work(std::slice::from_ref(&seeded), 1).unwrap();
+        catalog
+            .enqueue_work(std::slice::from_ref(&seeded), 1)
+            .unwrap();
         catalog.reconcile(1).unwrap();
         assert!(catalog
             .claim_work(STAGE_QUOTE, 4, 1, 10)
@@ -4158,9 +4283,7 @@ mod tests {
         quiet.priority = priority_of(false, U256::from(u64::MAX));
         let mut dirty = quote_job(UNI_V2, row(9).id, 1);
         dirty.priority = priority_of(true, U256::from(1u64));
-        catalog
-            .enqueue_work(&[quiet, dirty], 1)
-            .unwrap();
+        catalog.enqueue_work(&[quiet, dirty], 1).unwrap();
         let claimed = catalog.claim_work(STAGE_QUOTE, 1, 1, 10).unwrap();
         assert_eq!(claimed.len(), 1);
         assert_eq!(claimed[0].id, row(9).id);
@@ -4180,7 +4303,10 @@ mod tests {
         catalog
             .enqueue_work(std::slice::from_ref(&hotter), 1)
             .unwrap();
-        assert!(catalog.claim_work(STAGE_QUOTE, 1, 1, 10).unwrap().is_empty());
+        assert!(catalog
+            .claim_work(STAGE_QUOTE, 1, 1, 10)
+            .unwrap()
+            .is_empty());
         let later = catalog.claim_work(STAGE_QUOTE, 1, 101, 10).unwrap();
         assert_eq!(later.len(), 1);
         assert_eq!(later[0].priority, 1);

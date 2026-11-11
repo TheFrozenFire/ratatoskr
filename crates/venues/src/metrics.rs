@@ -12,13 +12,14 @@ use std::time::Instant;
 
 const SAMPLE_LEN: usize = 48;
 
-/// Pipeline order. Quote is stage 5 and curve is stage 4.
-const STAGE_ORDER: [(u8, &str, &str); 5] = [
+/// Pipeline order. Quote is stage 5 and curve is stage 4. Conduit is stage 6.
+const STAGE_ORDER: [(u8, &str, &str); 6] = [
     (1, "immutable", "immutable"),
     (2, "mutable", "mutable"),
     (3, "ticks", "tick_pages"),
     (5, "quote", "quotes"),
     (4, "curve", "curves"),
+    (6, "conduit", "conduits"),
 ];
 
 struct StageMeters {
@@ -54,10 +55,11 @@ struct Metrics {
     tick_pages: AtomicU64,
     quotes: AtomicU64,
     curves: AtomicU64,
+    conduits: AtomicU64,
     mismatches: AtomicU64,
     jobs: AtomicU64,
     job_errors: AtomicU64,
-    stages: [StageMeters; 6],
+    stages: [StageMeters; 7],
     errors: Mutex<Vec<(String, u64)>>,
 }
 
@@ -72,10 +74,12 @@ impl Metrics {
             tick_pages: AtomicU64::new(0),
             quotes: AtomicU64::new(0),
             curves: AtomicU64::new(0),
+            conduits: AtomicU64::new(0),
             mismatches: AtomicU64::new(0),
             jobs: AtomicU64::new(0),
             job_errors: AtomicU64::new(0),
             stages: [
+                StageMeters::new(),
                 StageMeters::new(),
                 StageMeters::new(),
                 StageMeters::new(),
@@ -139,6 +143,7 @@ pub fn publish_summary(summary: &StateSummary) {
         .store(summary.tick_pages, Ordering::Relaxed);
     metrics.quotes.store(summary.quotes, Ordering::Relaxed);
     metrics.curves.store(summary.curves, Ordering::Relaxed);
+    metrics.conduits.store(summary.conduits, Ordering::Relaxed);
     metrics
         .mismatches
         .store(summary.mismatches, Ordering::Relaxed);
@@ -212,6 +217,7 @@ pub fn prometheus_text() -> String {
         ("tick_pages", "tick_pages"),
         ("quotes", "quotes"),
         ("curves", "curves"),
+        ("conduits", "conduits"),
         ("mismatches", "mismatches"),
         ("jobs", "jobs"),
     ] {
@@ -333,6 +339,7 @@ fn snapshot() -> Value {
         "tick_pages" => metrics.tick_pages.load(Ordering::Relaxed),
         "quotes" => metrics.quotes.load(Ordering::Relaxed),
         "curves" => metrics.curves.load(Ordering::Relaxed),
+        "conduits" => metrics.conduits.load(Ordering::Relaxed),
         _ => 0,
     };
     let stages = STAGE_ORDER
@@ -367,6 +374,7 @@ fn snapshot() -> Value {
         "tick_pages": metrics.tick_pages.load(Ordering::Relaxed),
         "quotes": metrics.quotes.load(Ordering::Relaxed),
         "curves": metrics.curves.load(Ordering::Relaxed),
+        "conduits": metrics.conduits.load(Ordering::Relaxed),
         "mismatches": metrics.mismatches.load(Ordering::Relaxed),
         "jobs": metrics.jobs.load(Ordering::Relaxed),
         "job_errors": metrics.job_errors.load(Ordering::Relaxed),
