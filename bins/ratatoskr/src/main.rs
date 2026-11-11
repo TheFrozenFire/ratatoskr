@@ -17,7 +17,6 @@ mod era_cmd;
 mod export;
 mod peer_cmd;
 mod status;
-mod univ3_cmd;
 
 const DEFAULT_TARGET_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 const DEFAULT_LOG: &str =
@@ -39,8 +38,6 @@ struct Cli {
 enum Command {
     /// Read headers or logs from an era1 file. This does not open the catalog and does not dial.
     Era(era_cmd::EraArgs),
-    /// Print fees for stored v3 pool identities in the venue catalog.
-    Univ3(univ3_cmd::Univ3Args),
     /// Ask the running peer service. This does not dial.
     Peer(peer_cmd::PeerArgs),
 }
@@ -170,7 +167,6 @@ async fn main() -> eyre::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Some(Command::Era(cmd)) => era_cmd::run(cmd).await,
-        Some(Command::Univ3(cmd)) => univ3_cmd::run(cmd).await,
         Some(Command::Peer(cmd)) => peer_cmd::run(cmd).await,
         None => supervise(cli.args).await,
     }
@@ -999,7 +995,7 @@ mod tests {
         cmd.write_long_help(&mut buf).unwrap();
         let text = String::from_utf8(buf).unwrap();
         assert!(text.contains("era"), "{text}");
-        assert!(text.contains("univ3"), "{text}");
+        assert!(!text.contains("univ3"), "{text}");
         assert!(text.contains("peer"), "{text}");
         assert!(!text.contains("spike"), "{text}");
         assert!(!text.contains("ratatoskr-"), "{text}");

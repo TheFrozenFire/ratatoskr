@@ -22,8 +22,6 @@ Colocated pipelines call `LocalStore` and `LocalPeer` in process. The sockets st
 
 `ratatoskr peer status`, `ratatoskr peer fetch`, and `ratatoskr peer census` ask the peer service. They do not dial and they do not open `peers.redb`.
 
-`ratatoskr univ3` prints the fee histogram of stored v3 pool identities. It reads the database socket when the database service is up, and otherwise opens the venue catalog in this process. It does not write `univ3-pools.redb`.
-
 `ratatoskr era headers` and `ratatoskr era logs` read era1 files. They do not open the catalog and they do not dial.
 
 ## Cursor
