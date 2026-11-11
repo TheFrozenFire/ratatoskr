@@ -461,6 +461,7 @@ struct Built {
 
 fn desired_members(db: &redb::Database) -> eyre::Result<HashMap<[u8; 73], u64>> {
     let mut desired = HashMap::new();
+    let mut curves = 0_u64;
     let read = db.begin_read()?;
     let table = match read.open_table(CURVES) {
         Ok(table) => table,
@@ -475,6 +476,10 @@ fn desired_members(db: &redb::Database) -> eyre::Result<HashMap<[u8; 73], u64>> 
         }
         let kind = key[0];
         let id = B256::from_slice(&key[1..]);
+        curves += 1;
+        if curves.is_multiple_of(100_000) {
+            tracing::info!(curves, "conduit fill scan");
+        }
         let Ok(curve) = decode_curve_record(kind, id, value.value()) else {
             tracing::warn!(kind, %id, "conduit fill skipped a curve row");
             continue;
@@ -484,6 +489,7 @@ fn desired_members(db: &redb::Database) -> eyre::Result<HashMap<[u8; 73], u64>> 
             desired.insert(member, curve.generation);
         }
     }
+    tracing::info!(curves, members = desired.len(), "conduit fill scanned");
     Ok(desired)
 }
 

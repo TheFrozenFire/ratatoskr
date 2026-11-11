@@ -1498,10 +1498,10 @@ where
     }
     let inserted = store.reconcile(unix_now()).await?;
     report.notes.push(format!("reconcile {inserted}"));
+    tracing::info!(inserted, "state reconcile");
     let queued = store.enqueue_conduit_fill().await?;
-    if queued > 0 {
-        report.notes.push(format!("conduit fill {queued}"));
-    }
+    report.notes.push(format!("conduit fill {queued}"));
+    tracing::info!(queued, "conduit fill");
     let urls = if opts.rpcs.is_empty() {
         crate::rpc::default_call_rpcs()
     } else {
