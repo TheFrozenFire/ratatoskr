@@ -4111,16 +4111,13 @@ dependencies = [
 name = "ratatoskr"
 version = "0.1.0"
 dependencies = [
- "alloy-primitives",
  "chain",
  "clap",
  "corpus",
  "crossterm",
  "directory",
- "era",
  "eth-p2p",
  "eyre",
- "filter",
  "ipc",
  "peer",
  "pipeline",

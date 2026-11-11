@@ -13,7 +13,6 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 use venues::{RunOpts, RunPhase};
 
-mod era_cmd;
 mod export;
 mod peer_cmd;
 mod status;
@@ -36,8 +35,6 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Read headers or logs from an era1 file. This does not open the catalog and does not dial.
-    Era(era_cmd::EraArgs),
     /// Ask the running peer service. This does not dial.
     Peer(peer_cmd::PeerArgs),
 }
@@ -166,7 +163,6 @@ async fn main() -> eyre::Result<()> {
         .init();
     let cli = Cli::parse();
     match cli.command {
-        Some(Command::Era(cmd)) => era_cmd::run(cmd).await,
         Some(Command::Peer(cmd)) => peer_cmd::run(cmd).await,
         None => supervise(cli.args).await,
     }
@@ -973,30 +969,14 @@ mod tests {
     }
 
     #[test]
-    fn era_headers_parse_as_a_subcommand() {
-        let cli = Cli::try_parse_from(["ratatoskr", "era", "headers", "--from", "1", "--to", "2"])
-            .unwrap();
-        match cli.command {
-            Some(Command::Era(args)) => match args.command {
-                era_cmd::EraCommand::Headers(range) => {
-                    assert_eq!(range.from, 1);
-                    assert_eq!(range.to, 2);
-                }
-                other => panic!("headers command, got {other:?}"),
-            },
-            other => panic!("era command, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn help_names_one_entrypoint() {
         let mut cmd = Cli::command();
         let mut buf = Vec::new();
         cmd.write_long_help(&mut buf).unwrap();
         let text = String::from_utf8(buf).unwrap();
-        assert!(text.contains("era"), "{text}");
-        assert!(!text.contains("univ3"), "{text}");
         assert!(text.contains("peer"), "{text}");
+        assert!(!text.contains("era"), "{text}");
+        assert!(!text.contains("univ3"), "{text}");
         assert!(!text.contains("spike"), "{text}");
         assert!(!text.contains("ratatoskr-"), "{text}");
     }

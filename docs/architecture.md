@@ -22,8 +22,6 @@ Colocated pipelines call `LocalStore` and `LocalPeer` in process. The sockets st
 
 `ratatoskr peer status`, `ratatoskr peer fetch`, and `ratatoskr peer census` ask the peer service. They do not dial and they do not open `peers.redb`.
 
-`ratatoskr era headers` and `ratatoskr era logs` read era1 files. They do not open the catalog and they do not dial.
-
 ## Cursor
 
 Header sync and the receipt walk both await `Sink::push`. `HeaderSource` moves its cursor only when the sink returns `Applied`. A rejected header push retries the same cursor. A rejected receipt push fails the run, and the supervisor stops the pipelines.

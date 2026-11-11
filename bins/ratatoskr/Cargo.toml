@@ -10,16 +10,13 @@ name = "ratatoskr"
 path = "src/main.rs"
 
 [dependencies]
-alloy-primitives.workspace = true
 chain.workspace = true
 clap.workspace = true
 crossterm = "0.28"
 corpus.workspace = true
 directory.workspace = true
-era.workspace = true
 eth-p2p.workspace = true
 eyre.workspace = true
-filter.workspace = true
 ipc.workspace = true
 peer.workspace = true
 pipeline.workspace = true
