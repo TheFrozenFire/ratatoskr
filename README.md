@@ -8,7 +8,7 @@ SHiNode is the reference for fetching Ethereum receipts over devp2p. Ratatoskr d
 
 ## One process
 
-`ratatoskr` owns the files and runs the pipelines. The default is the database service and the peer service, with header sync and discovery. The receipt walk and the state pipeline run only when named.
+`ratatoskr` owns the files and runs every pipeline in one process. The default is the database service and the peer service, with header sync, discovery, the receipt walk, and the state pipeline.
 
 ```
 cargo run -p ratatoskr
@@ -27,7 +27,7 @@ cargo run -p ratatoskr -- peer census
 
 The receipt walk is `--pipeline receipts`. It stores receipt bundles and stops around 10GiB. It walks the Uniswap v3 launch week (block 12369621) and the Uniswap v4 PoolManager launch (block 21688329) when a connected peer still serves those heights, then a recent window.
 
-Discovery writes pool identities into the data directory. Identities live in `entities.redb`. List cursors, bloom hits, and era1 receipt bodies live in `discovery.redb`. `work.redb` is only leases and retries. Factories that expose an index are read with a lens: `eth_call` of the creation code in `contracts/lens/IndexLens.sol`, with no `to`. The constructor reverts the rows, so any mainnet client that runs a creation call can serve it. Pool state is `--pipeline state`, and stays off unless it is named. It requires `--data-dir` and does not open the live catalog. `--copy-from` copies a stratified identity sample into that directory first. The detail lens reads a batch of pools. The tick lens reads initialized tick words in a second call. Fit stores a price curve from local quotes of those quote inputs.
+Discovery writes pool identities into the data directory. Identities live in `entities.redb`. List cursors, bloom hits, and era1 receipt bodies live in `discovery.redb`. `work.redb` is only leases and retries. Factories that expose an index are read with a lens: `eth_call` of the creation code in `contracts/lens/IndexLens.sol`, with no `to`. The constructor reverts the rows, so any mainnet client that runs a creation call can serve it. The state pipeline opens the live catalog when `--data-dir` is omitted. `--copy-from` copies a stratified identity sample into that directory first. The detail lens reads a batch of pools. The tick lens reads initialized tick words in a second call. Fit stores a price curve from local quotes of those quote inputs.
 
 The lenses are a Foundry project. `foundry.toml` pins solc 0.8.28, the optimizer at 200 runs, Cancun, and legacy codegen. `forge test` checks the creation-code size and the revert magic. The hex file beside each lens is what the Rust client sends. Factories with no index are found by testing logs blooms in the local header chain. The hit list is kept in `discovery.redb`. Receipts for those hits come from era1 range requests before the merge and from the peer service after it, and the downloaded receipt bytes are kept in redb so a resume does not fetch them again. The local receipt corpus is folded in when it is present.
 

@@ -32,7 +32,7 @@ Venue job cursors move inside `commit_chunk`. `VenueSource` does not await `Sink
 
 ## Pipelines
 
-Default pipelines are header sync and discovery. The 10 GiB receipt walk is `--pipeline receipts` and is off by default. Pool state is `--pipeline state` and is off by default. It is not part of `RunPhase::All`. `state` requires `--data-dir` and does not open the live catalog. `--copy-from` copies a stratified identity sample into that directory first. The peer service is the only dialer.
+The default pipelines are header sync, discovery, the receipt walk, and the state pipeline. The receipt walk stops around 10 GiB. The state pipeline is a separate task from `RunPhase::All`. With no `--data-dir` it opens the live catalog. `--copy-from` copies a stratified identity sample into `--data-dir` first. The peer service is the only dialer.
 
 ## Venue rows
 
@@ -40,7 +40,6 @@ Version 1 bytes stay valid. Version 2 appends `block_hash`, `tx_index`, and `log
 
 ## Non-goals
 
-- state sync only when `--pipeline state` is named
 - no Portal
 - no serving devp2p (outbound Hello port 0 only)
 - no second dialer

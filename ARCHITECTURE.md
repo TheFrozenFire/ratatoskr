@@ -6,7 +6,7 @@ The entity flow is discovery, then a detail read, then the tick book where a poo
 
 ## Pipelines
 
-Four pipelines run under the database service. Header sync and discovery are the default. The receipt walk and the state pipeline run when named.
+Four pipelines run under the database service. A bare `ratatoskr` starts all four: header sync, discovery, the receipt walk, and the state pipeline.
 
 **Header sync** appends the header chain from peers: hash, parent, timestamp, receipts root, and logs bloom. The cursor advances when the append is applied.
 

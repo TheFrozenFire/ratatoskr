@@ -45,11 +45,10 @@ struct Args {
     #[arg(long, default_value = "db,peer")]
     services: String,
     /// Comma-separated pipelines: `headers`, `venues`, `receipts`, `state`.
-    /// Default is `headers,venues`. `receipts` and `state` run only when named.
-    /// `state` requires `--data-dir` and does not open the live catalog.
-    #[arg(long, default_value = "headers,venues")]
+    /// Default is all four. `state` reads the live catalog when `--data-dir` is omitted.
+    #[arg(long, default_value = "headers,venues,receipts,state")]
     pipeline: String,
-    /// Catalog directory for this process. Required for `state`.
+    /// Catalog directory for this process. Default is the live catalog.
     #[arg(long)]
     data_dir: Option<PathBuf>,
     /// Copy a stratified identity sample from this redb file into `--data-dir`.
@@ -303,11 +302,6 @@ async fn supervise(args: Args) -> eyre::Result<()> {
         return Ok(());
     }
     check_combination(&services, &pipelines)?;
-    if pipelines.state && args.data_dir.is_none() {
-        return Err(eyre::eyre!(
-            "state needs --data-dir and does not open the live catalog"
-        ));
-    }
     if args.summarize && args.data_dir.is_none() {
         return Err(eyre::eyre!("--summarize needs --data-dir"));
     }
@@ -875,12 +869,12 @@ mod tests {
         }
     }
 
-    fn headers_venues() -> Pipelines {
+    fn every_pipeline() -> Pipelines {
         Pipelines {
             headers: true,
             venues: true,
-            receipts: false,
-            state: false,
+            receipts: true,
+            state: true,
         }
     }
 
@@ -903,19 +897,18 @@ mod tests {
     }
 
     #[test]
-    fn default_pipelines_are_headers_and_venues() {
+    fn default_pipelines_are_header_sync_discovery_receipts_and_state() {
         let args = Cli::try_parse_from(["ratatoskr"]).unwrap().args;
-        assert_eq!(parse_pipelines(&args.pipeline).unwrap(), headers_venues());
+        assert_eq!(parse_pipelines(&args.pipeline).unwrap(), every_pipeline());
     }
 
     #[test]
-    fn receipts_run_only_when_named() {
-        let args = Cli::try_parse_from(["ratatoskr"]).unwrap().args;
-        assert!(!parse_pipelines(&args.pipeline).unwrap().receipts);
+    fn a_named_pipeline_list_selects_only_those_pipelines() {
+        assert!(!parse_pipelines("headers").unwrap().receipts);
+        assert!(!parse_pipelines("headers").unwrap().state);
         assert!(parse_pipelines("receipts").unwrap().receipts);
-        assert!(!parse_pipelines("headers,venues").unwrap().receipts);
-        assert!(!parse_pipelines("headers,venues").unwrap().state);
         assert!(parse_pipelines("state").unwrap().state);
+        assert!(!parse_pipelines("headers,venues").unwrap().state);
     }
 
     #[test]
@@ -1087,7 +1080,7 @@ mod tests {
         std::fs::write(&paths.peer_socket, b"stale-peer").unwrap();
         std::fs::write(&paths.db_socket, b"stale-db").unwrap();
         let held = peer::open(&paths.peers).unwrap();
-        let err = must_err(open_owned(&both(), &headers_venues(), &paths));
+        let err = must_err(open_owned(&both(), &every_pipeline(), &paths));
         let text = format!("{err:#}");
         assert!(text.contains("already open"), "{text}");
         assert!(!paths.headers.exists());
@@ -1105,7 +1098,7 @@ mod tests {
         std::fs::write(&paths.peer_socket, b"stale-peer").unwrap();
         std::fs::write(&paths.db_socket, b"stale-db").unwrap();
         let held = LocalStore::open_headers(&paths.headers).unwrap();
-        let err = must_err(open_owned(&both(), &headers_venues(), &paths));
+        let err = must_err(open_owned(&both(), &every_pipeline(), &paths));
         let text = format!("{err:#}");
         assert!(text.contains("already open"), "{text}");
         assert!(!paths.corpus.exists());
