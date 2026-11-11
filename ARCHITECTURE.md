@@ -1,20 +1,22 @@
 # Architecture
 
-Ratatoskr finds mainnet pools, reads the on-chain fields those pools use to quote, and stores a price curve for each one. The stored history is the header chain and the receipt bundles used to find those pools. The stored pool data is the quote inputs and the price curve.
+Ratatoskr finds mainnet pools, reads the on-chain fields those pools use to quote, and stores a price curve for each one. The stored history is the header chain, the era1 receipt bytes of a pre-merge bloom hit, and the receipt bundle of a post-merge bloom hit. The stored pool data is the quote inputs and the price curve.
 
 The entity flow is discovery, then a detail read, then the tick book where a pool has one, then fit. The joined inputs a local quote reads are the quote inputs: the configuration, the quoting state, and the tick book.
 
 ## Pipelines
 
-Three pipelines run under the database service. A bare `ratatoskr` starts all three: header sync, discovery, and the state pipeline.
+Three pipelines run in one process. A bare `ratatoskr` starts the database service, the peer service, and all three: header sync, discovery, and the state pipeline. `--pipeline` selects a subset. The state pipeline is a separate task from `RunPhase::All`.
 
-**Header sync** appends the header chain from peers: hash, parent, timestamp, receipts root, and logs bloom. The cursor advances when the append is applied.
+**Header sync** appends the header chain from peers: hash, parent, timestamp, receipts root, and logs bloom. It awaits `Sink::push`. The cursor advances when the sink returns `Applied`. A rejected push retries the same cursor.
 
 **Discovery** writes pool identities. A factory that keeps a list is read by the index lens. A factory whose pools are named by a creation event is found by a bloom hit, then by that event in the receipt bundle. A registry covers Curve pools whose identity comes from the registry. The corpus can contribute creation events it already holds. A pool identity is a factory pool, a singleton pool, or a registry pool. A settlement records fills.
 
-**State pipeline** runs on identities discovery has already written. For each pool it stores configuration, quoting state, the tick book, and a price curve. The work queue leases one stage at a time. The stages are configuration, quoting state, tick book, and fit.
+Discovery commits through the store. List cursors and bloom cursors move inside `commit_chunk`.
 
-History for a bloom hit comes from an era1 file before the merge and from a peer after it. A hole records an unserved block, and the cursor stays on the last committed block. The stored history for a block is its header and, for a post-merge bloom hit, its receipt bundle. Pre-merge receipt bytes for a bloom hit stay in the discovery store.
+History for a bloom hit comes from an era1 file before the merge and from a peer after it. Pre-merge receipt bytes for that hit stay in the discovery store. A post-merge bloom hit reads its receipt bundle from the corpus when the bundle is already stored, and otherwise from a peer, then stores that bundle in the corpus. The creation events become pool identities in the same pass. An unserved span leaves the cursor on the last committed block. The stored history for a block is its header and, for a post-merge bloom hit, its receipt bundle.
+
+**State pipeline** runs on identities discovery has already written. For each pool it stores configuration, quoting state, the tick book, and a price curve. The work queue leases one stage at a time. The stages are configuration, quoting state, tick book, and fit. With no `--data-dir` it opens the live catalog. `--copy-from` copies a stratified identity sample into `--data-dir` first.
 
 ## Detail read
 
@@ -54,12 +56,34 @@ The dirty mark clears in the same write as the quoting state when the newest wat
 
 ## Processes and files
 
-One process owns both file sets. The database service owns the header chain, the corpus, the discovery store, the venue catalog, and the work queue. The peer service owns the peer directory and is the only dialer. A colocated pipeline calls the store in process. A client reaches a running service through its socket and does not open the files.
+One `ratatoskr` process owns both file sets (`--services db,peer` by default). The peer service is the only dialer.
+
+The database service owns `headers.redb` (the header chain), `corpus.redb` (the corpus), `discovery.redb` (the discovery store), `entities.redb` (the venue catalog), and `work.redb` (the work queue). That is `ratatoskr` with `--services db`. A path ending in `venues.redb` still names that directory. On open, a lone `venues.redb` is renamed to `entities.redb` and its crawl tables move into `discovery.redb`. An `entities.redb` that is already present leaves a sibling `venues.redb` closed.
+
+The peer service owns `peers.redb`, the peer directory. That is `ratatoskr` with `--services peer`. A peer-only run opens the peer directory. The default supervisor opens that file before the entity files and stops if the open fails.
 
 The venue catalog holds identities, configuration, quoting state, tick books, price curves, quote records, and watch marks. The discovery store holds list cursors, bloom hits, and era1 receipt bytes. The work queue holds leases. Deleting the work queue drops the leases. The pools remain in the venue catalog.
 
-The database files take one exclusive open. A run with only the peer service opens the peer directory.
-
 The state pipeline opens the data directory it is given. A sample catalog is a copy of identities for a trial. The live catalog is the venue catalog of the full identity set.
 
-File ownership, the cursor rule, and the socket split are also recorded in [docs/architecture.md](docs/architecture.md).
+A pool identity with no observation stays version 1. An observation appends the block hash, transaction index, and log index and uses version 2. An identity read from a list has no observation. An identity read from a creation event carries the observation. A merge keeps a stored observation when the new identity has none.
+
+### Flock
+
+`Database::open` takes an exclusive lock. A second open fails with "Database already open." Header sync, discovery, and the state pipeline cannot share a file with a second process. redb commits through two header slots. Header append uses eventual durability. Venue commits, hit commits, era1 receipt bytes, state writes, corpus bundle writes, and cursor writes use immediate durability.
+
+`peers.redb` stays with the dialer. A peer-only process leaves the entity files closed.
+
+### Sockets
+
+A colocated pipeline calls the store and the peer service in process. The sockets stay so a client can ask the running service. A client uses the database socket or the peer socket.
+
+`ratatoskr peer status`, `ratatoskr peer fetch`, and `ratatoskr peer census` ask the peer service over its socket.
+
+## Non-goals
+
+- no Portal
+- no serving devp2p (outbound Hello port 0 only)
+- no second dialer
+- no SQL
+- no `eth_getLogs` backfill
