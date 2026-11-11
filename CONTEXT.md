@@ -284,6 +284,18 @@ _Avoid_: cap, hop, tick
 A stored edge built from other actions. A pool direction is not a meta-action.
 _Avoid_: route, pool direction, hop
 
+**Basket**:
+A demand for output tokens in fixed weights. The count is the largest integer every output still supports. Holding `h` supports count `q` at weight `r` when `q * r <= h`.
+_Avoid_: route, pair conduit, hop
+
+**Depletion**:
+The reserve state a pool is quoted against.
+_Avoid_: quoting state, generation
+
+**Trading set**:
+One tender and one receipt for a direction, taken from the original reserves. `kept / denominator` of the tender enters a constant-product reserve. Same-direction tenders are one submission.
+_Avoid_: accrued fee, quote record
+
 **Acceptance bar**:
 The worst relative error a stored formula is allowed on its labels: ten basis points.
 _Avoid_: score, tolerance
@@ -524,6 +536,8 @@ _Avoid_: live catalog, quote record, grid
 - A new **Generation** drops the **Price curve**. The **Quote record** stays until the **Pool identity** is deleted. Dropping the price curve queues the **Pair conduit** again
 - A **Pair conduit** merges the direct actions for one ordered pair of tokens. A path through a third token is a composition of pair conduits
 - A **Slope segment** is one step of that merge. A **Meta-action** is the stored edge. A pool direction is a member of a meta-action
+- A **Basket** counts the outputs a set of holdings can still pay. The count is the minimum of the last counts
+- **Depletion** is the reserve a quote uses. A **Trading set** quotes a direction from its original reserves. Same-direction tenders are one submission. The accrued-fee update is not that ledger
 - A **Stage** is configuration, quoting state, the tick book, **Fit**, or the pair conduit. There is no live stage for chain quotes
 - A **Sample catalog** is a copy of identities for a trial. It is not the **Live catalog**
 
@@ -593,7 +607,7 @@ _Avoid_: live catalog, quote record, grid
 - **"Fit"** is the stage that stores a **Price curve**. The choice among formulas inside that stage is **Selection**.
 - **"The function"** is not a name for a **Price curve** or a **Formula**.
 - **Quote stage.** Older work named a stage that fetched chain quotes. That stage is not claimed. Chain quotes already stored remain **Quote records**.
-- **"Route"** and **"hop"** are not names for a **Pair conduit**. The conduit is one ordered pair of tokens. A path through a third token is a composition of pair conduits.
+- **"Route"** and **"hop"** are not names for a **Pair conduit**. The conduit is one ordered pair of tokens. A path through a third token is a composition of pair conduits. A **Basket** is the count of fixed-weight outputs. It is not a pair conduit.
 - **Unequal-weight Balancer.** The local quote and the stored weighted formula are both determined by balances, weights, and the pool fee, and they are different evaluations. Selection can store a **Sample formula** instead. Do not treat the local quote and the stored formula as one object.
 - **Crypto pool.** Its local quote is a spot line on the price scales. That line is not the crypto invariant and not a chain quote.
 - **Kind and shape.** Kind is the family on the pool identity. Shape is the quoting rule of the pool.

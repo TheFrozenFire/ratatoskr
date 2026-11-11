@@ -58,6 +58,16 @@ Each action is one direction of one pool. The stored row is the slope merge of t
 
 The stage runs after fit. A curve write queues the ordered pairs of its priced directions. The first pass of a state run also queues pairs whose stored conduit is missing or behind the curves already in the catalog. The merge reads slope segments from `estimate` at the origin, the sampling ceiling, and the grid fractions of that ceiling. It does not hold a curve lease while it merges.
 
+## Basket
+
+A basket asks for output tokens in fixed weights. Holding `h` supports count `q` at weight `r` when `q * r <= h`. For a positive weight the last count is the floor quotient `h / r`. The basket count is the minimum of those last counts. Opening a pool is worth the baskets it adds, minus the cost of opening it.
+
+## Depletion
+
+Depletion is the reserve a quote uses. A pool named by more than one pair conduit shares one ledger. The trading set keeps one tender per direction and quotes it from the original reserves: `kept / denominator` of the tender enters the reserve, and same-direction tenders are one submission. The accrued-fee update deposits the whole tender and quotes the next piece against the new reserve. That update is not the ledger. Two directions of one multi-coin pool leave different reserves when their order is swapped.
+
+On two roads that carry a demand of 2, one latency equals its flow and the other latency is the constant 2. The cost is 3 only when the flow on the linear road is 1. That split equalizes the linear road's marginal social cost with the constant latency. A cross link of latency 0 raises the even split from 3 to 4.
+
 ## Refresh
 
 The watch reads receipt logs the peer service already holds and marks a pool dirty when a log is newer than its quoting state. Dirty work is claimed ahead of a quiet pool.

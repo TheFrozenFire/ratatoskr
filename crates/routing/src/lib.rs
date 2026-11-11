@@ -1,13 +1,45 @@
-//! Pair conduit: the slope merge of the direct actions between two tokens.
+//! Pair conduit, basket count, and the trading-set ledger.
 //!
 //! A slope segment is a positive input width and a nonnegative output on one
 //! action. Input `t` on that segment pays `(output * t) / width`, which is
 //! the output when `t` is the width. The merge spends the next input on the
 //! steepest remaining segment.
+//!
+//! A basket count is the largest integer every fixed-weight output still
+//! supports. A trading set quotes one direction from its original reserves:
+//! same-direction tenders are one submission.
+
+pub mod basket;
+pub mod depletion;
+pub mod latency;
 
 use num_bigint::BigInt;
 use num_traits::Zero;
 use std::cmp::Ordering;
+
+/// Floor quotient for a positive divisor. The remainder is nonnegative.
+pub(crate) fn floor_div(numer: &BigInt, denom: &BigInt) -> Option<BigInt> {
+    if denom <= &BigInt::from(0) {
+        return None;
+    }
+    let mut quot = numer / denom;
+    let rem = numer % denom;
+    if numer < &BigInt::from(0) && !rem.is_zero() {
+        quot -= 1;
+    }
+    Some(quot)
+}
+
+/// Least integer quotient that meets a nonnegative numerator.
+pub(crate) fn ceil_div(numer: &BigInt, denom: &BigInt) -> Option<BigInt> {
+    if denom <= &BigInt::from(0) || numer < &BigInt::from(0) {
+        return None;
+    }
+    if numer.is_zero() {
+        return Some(BigInt::from(0));
+    }
+    Some((numer + denom - 1) / denom)
+}
 
 /// Pool a slope segment spends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
