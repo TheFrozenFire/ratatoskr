@@ -17,7 +17,6 @@ mod export;
 mod peer_cmd;
 mod status;
 
-const DEFAULT_TARGET_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 const DEFAULT_LOG: &str =
     "ratatoskr=info,store=info,pipeline=info,peer=info,eth_p2p=info,venues=info,headers=info";
 
@@ -109,9 +108,6 @@ struct Args {
     /// Do not fold the local corpus into the venue catalog.
     #[arg(long)]
     no_corpus: bool,
-    /// Stop receipt ingest after this many stored bytes. Default is 10GiB.
-    #[arg(long, default_value_t = DEFAULT_TARGET_BYTES)]
-    target_bytes: u64,
     /// Bind IPv4 RLPx to this address. Policy routing sends that source into the tunnel.
     #[arg(long)]
     bind4: Option<Ipv4Addr>,
@@ -413,14 +409,8 @@ async fn supervise(args: Args) -> eyre::Result<()> {
     let mut stop_rx = stop_rx;
     let mut failed = tokio::task::LocalSet::new()
         .run_until(async {
-            let mut tasks = spawn_pipelines(
-                &pipelines,
-                store.clone(),
-                local,
-                opts,
-                args.target_bytes,
-                stop_rx.clone(),
-            );
+            let mut tasks =
+                spawn_pipelines(&pipelines, store.clone(), local, opts, stop_rx.clone());
             wait_for_stop(
                 &mut tasks,
                 &mut peer_task,
@@ -489,7 +479,6 @@ fn spawn_pipelines(
     store: Option<LocalStore>,
     local: Option<LocalPeer>,
     opts: RunOpts,
-    target_bytes: u64,
     stop: watch::Receiver<bool>,
 ) -> JoinSet<eyre::Result<()>> {
     let mut tasks = JoinSet::new();
@@ -508,9 +497,7 @@ fn spawn_pipelines(
         let stop = stop.clone();
         tasks.spawn_local(async move {
             let mut sink = StoreSink::new(store.clone());
-            ReceiptSource::new(store, peer, target_bytes)
-                .run(&mut sink, stop)
-                .await
+            ReceiptSource::new(store, peer).run(&mut sink, stop).await
         });
     }
     if pipelines.venues {

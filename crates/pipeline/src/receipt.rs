@@ -27,8 +27,8 @@ struct Range {
     name: &'static str,
     start: u64,
     end: u64,
-    /// Stop this range after adding this many bytes. The recent window uses the
-    /// global target instead.
+    /// Stop this range after adding this many bytes. The recent window runs to
+    /// its last block.
     byte_budget: Option<u64>,
 }
 
@@ -48,16 +48,11 @@ enum ChunkFate {
 pub struct ReceiptSource<S, P> {
     store: S,
     peer: P,
-    target_bytes: u64,
 }
 
 impl<S, P> ReceiptSource<S, P> {
-    pub fn new(store: S, peer: P, target_bytes: u64) -> Self {
-        Self {
-            store,
-            peer,
-            target_bytes,
-        }
+    pub fn new(store: S, peer: P) -> Self {
+        Self { store, peer }
     }
 }
 
@@ -75,27 +70,13 @@ where
         sink: &mut dyn Sink,
         stop: tokio::sync::watch::Receiver<bool>,
     ) -> eyre::Result<()> {
-        let mut stored = self.store.meta("bytes").await?.unwrap_or(0);
-        if stored >= self.target_bytes {
-            info!("corpus already reached the target");
-            return Ok(());
-        }
         let head = wait_for_head(&self.peer, &stop).await?;
         info!(head, "peer head");
         for range in ranges(head) {
-            if *stop.borrow() || stored >= self.target_bytes {
+            if *stop.borrow() {
                 break;
             }
-            stored = ingest_range(
-                &self.store,
-                &self.peer,
-                sink,
-                &range,
-                stored,
-                self.target_bytes,
-                &stop,
-            )
-            .await?;
+            ingest_range(&self.store, &self.peer, sink, &range, &stop).await?;
         }
         Ok(())
     }
@@ -103,8 +84,7 @@ where
 
 fn ranges(head: u64) -> Vec<Range> {
     let recent_end = head.saturating_sub(32);
-    // About 55 days. Ingest stops at the byte target, so the walk ends early
-    // once the corpus is large enough.
+    // About 55 days behind the peer head.
     let recent_start = recent_end.saturating_sub(399_999);
     vec![
         // UniswapV3Factory deployment, block 12369621, plus ~50k blocks.
@@ -136,10 +116,8 @@ async fn ingest_range<S, P>(
     peer: &P,
     sink: &mut dyn Sink,
     range: &Range,
-    mut stored: u64,
-    target: u64,
     stop: &tokio::sync::watch::Receiver<bool>,
-) -> eyre::Result<u64>
+) -> eyre::Result<()>
 where
     S: EntityStore,
     P: HistoryPeer + Clone + 'static,
@@ -151,14 +129,14 @@ where
     }
     if next > range.end {
         info!(range = range.name, "range already stored");
-        return Ok(stored);
+        return Ok(());
     }
     // The first peer is often a recent-only node. Wait for one that still
     // serves this range before clipping or skipping it.
     let deadline = Instant::now() + Duration::from_secs(900);
     loop {
         if *stop.borrow() {
-            return Ok(stored);
+            return Ok(());
         }
         match peer_floor(peer).await {
             Ok(PeerFloor::Unknown) => break,
@@ -169,7 +147,7 @@ where
                         range = range.name,
                         earliest, "peers do not serve this range"
                     );
-                    return Ok(stored);
+                    return Ok(());
                 }
                 info!(
                     range = range.name,
@@ -196,16 +174,17 @@ where
     }
     if next > range.end {
         info!(range = range.name, "range is past the advertised window");
-        return Ok(stored);
+        return Ok(());
     }
     info!(range = range.name, next, end = range.end, "range start");
     let mut single = false;
     let mut missing = 0u32;
     let mut soft = 0u32;
     let mut added_in_range = 0u64;
-    while next <= range.end && stored < target {
+    let mut stored = store.meta("bytes").await?.unwrap_or(0);
+    while next <= range.end {
         if *stop.borrow() {
-            return Ok(stored);
+            return Ok(());
         }
         if range
             .byte_budget
@@ -295,12 +274,12 @@ where
                     sleep(Duration::from_secs(pause)).await;
                     stop_batch = true;
                 }
-                ChunkFate::LeaveRange => return Ok(stored),
+                ChunkFate::LeaveRange => return Ok(()),
             }
         }
     }
     store.put_meta(&cursor_key, next).await?;
-    Ok(stored)
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -622,7 +601,7 @@ mod tests {
             serve_one: false,
         };
         let mut sink = StoreSink::new(store.clone());
-        ReceiptSource::new(store.clone(), peer, 10 * 1024 * 1024 * 1024)
+        ReceiptSource::new(store.clone(), peer)
             .run(&mut sink, stop())
             .await
             .unwrap();
@@ -635,7 +614,7 @@ mod tests {
             serve_one: false,
         };
         let mut sink = StoreSink::new(store.clone());
-        ReceiptSource::new(store.clone(), peer, 10 * 1024 * 1024 * 1024)
+        ReceiptSource::new(store.clone(), peer)
             .run(&mut sink, stop())
             .await
             .unwrap();
@@ -654,7 +633,7 @@ mod tests {
             serve_one: true,
         };
         let mut sink = StoreSink::new(bare.clone());
-        ReceiptSource::new(bare.clone(), peer, 10 * 1024 * 1024 * 1024)
+        ReceiptSource::new(bare.clone(), peer)
             .run(&mut sink, stop())
             .await
             .unwrap();
