@@ -296,6 +296,10 @@ _Avoid_: quoting state, generation
 One tender and one receipt for a direction, taken from the original reserves. `kept / denominator` of the tender enters a constant-product reserve. Same-direction tenders are one submission.
 _Avoid_: accrued fee, quote record
 
+**Hub label**:
+The directed quote from a token to one hub. The opposite direction is a different label. The same hub on both labels quotes `hop_num / hop_den`. Two hubs insert `two_hub_num / two_hub_den`. The direct quote stays among the candidates. The choice is the maximum of the cleared cross keys.
+_Avoid_: pair conduit, route
+
 **Acceptance bar**:
 The worst relative error a stored formula is allowed on its labels: ten basis points.
 _Avoid_: score, tolerance
@@ -538,6 +542,7 @@ _Avoid_: live catalog, quote record, grid
 - A **Slope segment** is one step of that merge. A **Meta-action** is the stored edge. A pool direction is a member of a meta-action
 - A **Basket** counts the outputs a set of holdings can still pay. The count is the minimum of the last counts
 - **Depletion** is the reserve a quote uses. A **Trading set** quotes a direction from its original reserves. Same-direction tenders are one submission. The accrued-fee update is not that ledger
+- A **Hub label** is the directed quote from a token to one hub. It is not a stage. The choice among the direct quote, one shared hub, and two hubs is the maximum of the cleared cross keys
 - A **Stage** is configuration, quoting state, the tick book, **Fit**, or the pair conduit. There is no live stage for chain quotes
 - A **Sample catalog** is a copy of identities for a trial. It is not the **Live catalog**
 

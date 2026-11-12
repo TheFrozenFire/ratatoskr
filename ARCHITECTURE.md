@@ -56,6 +56,10 @@ F(x) = max { sum f_i(x_i) | x_i >= 0, sum x_i <= x }
 
 Each action is one direction of one pool. The stored row is the slope merge of those actions: the next input goes to the action whose marginal is currently highest. The two directions of one pool are members of opposite conduits. A path through a third token is a composition of pair conduits.
 
+## Hub label
+
+A hub label is the directed quote from a token to one hub. The opposite direction is a different label. When both labels name the same hub, the candidate is `hop_num / hop_den` in `crates/routing/src/hub.rs`. When the labels name different hubs, the candidate inserts the quote from the first hub to the second, `two_hub_num / two_hub_den`. The direct quote stays in the candidate set. Each candidate enters as its numerator times the other quote's denominator, and the choice is the maximum of those keys. Which hub wins can change with the input. A quote through a token that is not one of those hubs can beat both the direct quote and the hub quote.
+
 The stage runs after fit. A curve write queues the ordered pairs of its priced directions. The first pass of a state run also queues pairs whose stored conduit is missing or behind the curves already in the catalog. The merge reads slope segments from `estimate` at the origin, the sampling ceiling, and the grid fractions of that ceiling. It does not hold a curve lease while it merges.
 
 ## Basket

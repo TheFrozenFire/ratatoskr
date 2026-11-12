@@ -1,4 +1,4 @@
-//! Pair conduit, basket count, and the trading-set ledger.
+//! Pair conduit, basket count, the trading-set ledger, and hub labels.
 //!
 //! A slope segment is a positive input width and a nonnegative output on one
 //! action. Input `t` on that segment pays `(output * t) / width`, which is
@@ -11,6 +11,7 @@
 
 pub mod basket;
 pub mod depletion;
+pub mod hub;
 pub mod latency;
 
 use num_bigint::BigInt;
