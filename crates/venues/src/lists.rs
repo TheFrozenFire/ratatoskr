@@ -191,7 +191,7 @@ pub async fn walk<S: EntityStore>(
         .max(job.origin);
     let mut wrote = 0_u64;
     loop {
-        if *stop.borrow() {
+        if crate::hold_for_pause(stop).await {
             return Ok(wrote);
         }
         let rpc_len = rpc.clone();

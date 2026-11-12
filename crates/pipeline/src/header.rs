@@ -49,7 +49,7 @@ where
         // Target `headers` matches the binary filter when `RUST_LOG` is unset.
         info!(target: "headers", next, "header chain open");
         loop {
-            if *stop.borrow() {
+            if venues::hold_for_pause(&stop).await {
                 return Ok(());
             }
             let head = match self.peer.status().await {

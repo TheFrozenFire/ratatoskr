@@ -1530,7 +1530,7 @@ where
     let mut quiet = 0_u32;
     let mut batches = 0_u64;
     loop {
-        if *stop.borrow() {
+        if crate::hold_for_pause(&stop).await {
             return Ok(report);
         }
         if let Some(peer) = peer {
@@ -1547,7 +1547,7 @@ where
                 }
             }
         }
-        if *stop.borrow() {
+        if crate::hold_for_pause(&stop).await {
             return Ok(report);
         }
         let mut notes = Vec::new();
@@ -1596,6 +1596,9 @@ async fn drive_one<S>(
 where
     S: EntityStore + Clone + 'static,
 {
+    if crate::work_paused() {
+        return Ok(false);
+    }
     let mut claimed = Vec::new();
     for stage in [STAGE_IMMUTABLE, STAGE_MUTABLE, STAGE_TICKS, STAGE_CURVE] {
         let jobs = store

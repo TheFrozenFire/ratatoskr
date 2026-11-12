@@ -150,9 +150,13 @@ fn header(view: &View, url: &str) -> Paragraph<'static> {
     } else {
         format!("exporter down ({url}): {}", view.error)
     };
+    let paused = snap
+        .and_then(|snap| snap["paused"].as_bool())
+        .unwrap_or(false);
     let text = format!(
-        " block {block}    up {}    {link}\n {}",
+        " block {block}    up {}    {}{link}\n {}",
         format_uptime(uptime),
+        if paused { "paused    " } else { "" },
         pace_line(view)
     );
     Paragraph::new(text).block(

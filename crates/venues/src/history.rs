@@ -135,7 +135,7 @@ async fn load_and_scan<S: EntityStore>(
     let mut seen = 0_u64;
     let mut at = start;
     while at < end {
-        if *stop.borrow() {
+        if crate::hold_for_pause(stop).await {
             return Ok(BloomScan {
                 end,
                 jobs: pending,
@@ -229,7 +229,7 @@ where
     let mut era = LiveEra { http: None };
     let mut notes = Vec::new();
     for job in pending {
-        if *stop.borrow() {
+        if crate::hold_for_pause(stop).await {
             break;
         }
         if job.at >= end {
@@ -339,7 +339,7 @@ where
     }
     let mut done_through = job.at;
     for chunk in hits.chunks(ERA_BATCH) {
-        if *stop.borrow() {
+        if crate::hold_for_pause(stop).await {
             return Ok(Some(Walk::Stopped {
                 at: done_through,
                 reason: "stop".into(),
@@ -444,7 +444,7 @@ where
     let mut fetched = 0_u64;
     let mut from_cache = 0_u64;
     loop {
-        if *stop.borrow() {
+        if crate::hold_for_pause(stop).await {
             abort(&mut pending);
             commit_rows(store, &job.job.name, cursor, &rows).await?;
             return Ok(Walk::Stopped {

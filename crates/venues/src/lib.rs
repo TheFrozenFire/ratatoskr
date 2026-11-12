@@ -53,6 +53,64 @@ pub use state::{
 };
 
 use ipc::HistoryPeer;
+use std::sync::OnceLock;
+use tokio::sync::watch;
+
+struct WorkPause {
+    tx: watch::Sender<bool>,
+    _rx: watch::Receiver<bool>,
+}
+
+static WORK_PAUSE: OnceLock<WorkPause> = OnceLock::new();
+
+fn work_pause() -> &'static WorkPause {
+    WORK_PAUSE.get_or_init(|| {
+        let (tx, rx) = watch::channel(false);
+        WorkPause { tx, _rx: rx }
+    })
+}
+
+/// Stop claiming work on every stage. Peer sessions stay connected.
+pub fn pause_work() {
+    let _ = work_pause().tx.send(true);
+    tracing::info!("work paused");
+}
+
+/// Let every stage claim again. Peer sessions were not dropped.
+pub fn resume_work() {
+    let _ = work_pause().tx.send(false);
+    tracing::info!("work resumed");
+}
+
+pub fn work_paused() -> bool {
+    *work_pause().tx.borrow()
+}
+
+/// Wait while work is paused. Returns true when the caller should shut down.
+pub async fn hold_for_pause(stop: &watch::Receiver<bool>) -> bool {
+    let mut paused = work_pause().tx.subscribe();
+    let mut stop = stop.clone();
+    loop {
+        if *stop.borrow() {
+            return true;
+        }
+        if !*paused.borrow() {
+            return false;
+        }
+        tokio::select! {
+            changed = stop.changed() => {
+                if changed.is_err() || *stop.borrow() {
+                    return true;
+                }
+            }
+            changed = paused.changed() => {
+                if changed.is_err() {
+                    return false;
+                }
+            }
+        }
+    }
+}
 
 /// Which part of a venue run to perform. A standalone binary splits these so
 /// one phase does not hold a file the next phase must leave free.
@@ -132,7 +190,7 @@ where
             .await
             .map_err(|err| eyre::eyre!("rpc client task: {err}"))??;
         for job in lists::jobs() {
-            if *stop.borrow() {
+            if hold_for_pause(&stop).await {
                 return Ok(report);
             }
             if !job_wanted(&opts.only, &job.name) {
@@ -149,7 +207,7 @@ where
         }
     }
     if import && !opts.no_corpus && opts.corpus_available && job_wanted(&opts.only, "corpus") {
-        if *stop.borrow() {
+        if hold_for_pause(&stop).await {
             return Ok(report);
         }
         match import::import_corpus(store).await {
@@ -166,7 +224,7 @@ where
         }
     }
     if history {
-        if *stop.borrow() {
+        if hold_for_pause(&stop).await {
             return Ok(report);
         }
         let logs_wanted = logs::jobs()
@@ -215,4 +273,58 @@ where
     P: HistoryPeer + Clone + 'static,
 {
     history::fetch_receipts(store, peer, scan, stop).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn one_at_a_time() -> tokio::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await
+    }
+
+    struct ResumeOnDrop;
+    impl Drop for ResumeOnDrop {
+        fn drop(&mut self) {
+            resume_work();
+        }
+    }
+
+    #[tokio::test]
+    async fn pause_work_parks_until_resume() {
+        let _one = one_at_a_time().await;
+        let _guard = ResumeOnDrop;
+        let (_stop_tx, stop) = watch::channel(false);
+        pause_work();
+        assert!(work_paused());
+        let wait = tokio::spawn(async move { hold_for_pause(&stop).await });
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        assert!(!wait.is_finished());
+        resume_work();
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(1), wait)
+            .await
+            .expect("resume wakes the stage")
+            .expect("task");
+        assert!(!stopped);
+        assert!(!work_paused());
+    }
+
+    #[tokio::test]
+    async fn pause_work_still_hears_shutdown() {
+        let _one = one_at_a_time().await;
+        let _guard = ResumeOnDrop;
+        let (stop_tx, stop) = watch::channel(false);
+        pause_work();
+        let wait = tokio::spawn(async move { hold_for_pause(&stop).await });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        stop_tx.send(true).expect("shutdown");
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(1), wait)
+            .await
+            .expect("shutdown wakes the stage")
+            .expect("task");
+        assert!(stopped);
+    }
 }

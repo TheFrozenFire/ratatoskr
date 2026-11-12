@@ -360,6 +360,11 @@ async fn supervise(args: Args) -> eyre::Result<()> {
         }
         let _ = signal_tx.send(true);
     });
+    tokio::spawn(async move {
+        if let Err(err) = pause_signal().await {
+            tracing::error!(%err, "pause signal");
+        }
+    });
     let peer_task = prepared.map(|prepared| {
         let stop = stop_rx.clone();
         tokio::spawn(async move { peer::run(prepared, stop).await })
@@ -627,6 +632,18 @@ async fn shutdown_signal() -> eyre::Result<()> {
         _ = terminate.recv() => {}
     }
     Ok(())
+}
+
+async fn pause_signal() -> eyre::Result<()> {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut pause = signal(SignalKind::user_defined1())?;
+    let mut resume = signal(SignalKind::user_defined2())?;
+    loop {
+        tokio::select! {
+            _ = pause.recv() => venues::pause_work(),
+            _ = resume.recv() => venues::resume_work(),
+        }
+    }
 }
 
 fn egress_from(bind4: Option<Ipv4Addr>, bind6: Option<Ipv6Addr>) -> eyre::Result<Option<Egress>> {

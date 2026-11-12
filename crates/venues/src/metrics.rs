@@ -378,6 +378,7 @@ fn snapshot() -> Value {
         "mismatches": metrics.mismatches.load(Ordering::Relaxed),
         "jobs": metrics.jobs.load(Ordering::Relaxed),
         "job_errors": metrics.job_errors.load(Ordering::Relaxed),
+        "paused": crate::work_paused(),
         "stages": stages,
         "errors": errors,
     })

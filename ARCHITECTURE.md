@@ -42,7 +42,7 @@ A head-class refresh with an unchanged bitmap keeps the tick pages and marks the
 
 Fit stores the price curve for one generation. A local quote is computed from the quote inputs. Selection may score formulas against a grid of those local quotes. The stored price curve is the formula selection keeps, or a skipped curve.
 
-Fit reads local quotes of the quote inputs. Chain quotes already stored stay in the quote record, for checking a price curve later. The live stages are configuration, quoting state, the tick book, fit, and the pair conduit. A new quoting state drops the price curve and leaves the quote record in place until the pool identity is deleted.
+Fit reads local quotes of the quote inputs. Chain quotes already stored stay in the quote record, for checking a price curve later. The live stages are configuration, quoting state, the tick book, fit, and the pair conduit. `venues::pause_work` in `crates/venues/src/lib.rs` stops those stages from claiming more work, and header and discovery reads wait with them. Peer sessions stay connected. `venues::resume_work` lets the same stages claim again. SIGUSR1 pauses and SIGUSR2 resumes. A new quoting state drops the price curve and leaves the quote record in place until the pool identity is deleted.
 
 An estimate is read from the stored price curve. A local quote is read from the quote inputs.
 
