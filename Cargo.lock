@@ -5012,6 +5012,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "seek"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "eyre",
+ "num-bigint",
+ "num-traits",
+ "routing",
+ "searcher",
+ "venues",
+]
+
+[[package]]
 name = "semver"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

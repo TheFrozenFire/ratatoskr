@@ -409,6 +409,30 @@ impl Catalog {
         }
     }
 
+    /// Read every stored pair conduit. Empty curves are included.
+    pub fn visit_conduits(
+        &self,
+        mut visit: impl FnMut(Address, Address, &[SlopeSegment]) -> eyre::Result<()>,
+    ) -> eyre::Result<()> {
+        let read = self.entities.begin_read()?;
+        let Some(table) = open_conduits(&read)? else {
+            return Ok(());
+        };
+        for item in table.iter()? {
+            let (key, value) = item?;
+            let raw = key.value();
+            if raw.len() != 40 {
+                continue;
+            }
+            let mut pair = [0_u8; 40];
+            pair.copy_from_slice(raw);
+            let (token_in, token_out) = pair_addresses(&pair);
+            let stored = decode_conduit(value.value())?;
+            visit(token_in, token_out, &stored.segments)?;
+        }
+        Ok(())
+    }
+
     fn member_segments(
         &self,
         token_in: Address,

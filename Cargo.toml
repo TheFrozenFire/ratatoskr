@@ -19,6 +19,7 @@ members = [
     "crates/searcher",
     "crates/peer",
     "bins/ratatoskr",
+    "bins/seek",
 ]
 
 [workspace.package]

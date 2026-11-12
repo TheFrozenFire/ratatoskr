@@ -8,7 +8,7 @@
 //! address. The wrap pays one wrapped token per native token at any size.
 //!
 //! The caller supplies the conduits. This crate does not open the catalog and
-//! does not allocate the flow.
+//! does not allocate the flow. A curve is kept only when a route uses it.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -63,7 +63,7 @@ pub struct Route {
     pub edges: Vec<usize>,
 }
 
-/// What an optimizer allocates. Each curve appears once.
+/// What an optimizer allocates. Each curve appears once, and only on a route.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RouteSet {
     pub inputs: Vec<(Token, BigUint)>,
@@ -163,12 +163,40 @@ pub fn execute(query: &Query, conduits: &impl Conduits) -> RouteSet {
             build.routes_from(*input, *output);
         }
     }
+    let (edges, routes) = retain_used(build.edges, build.routes);
     RouteSet {
         inputs: query.inputs.clone(),
         outputs: query.outputs.clone(),
-        edges: build.edges,
-        routes: build.routes,
+        edges,
+        routes,
     }
+}
+
+/// Drop curves that were read while a longer path was still incomplete.
+fn retain_used(edges: Vec<Edge>, routes: Vec<Route>) -> (Vec<Edge>, Vec<Route>) {
+    let mut used = vec![false; edges.len()];
+    for route in &routes {
+        for index in &route.edges {
+            if let Some(flag) = used.get_mut(*index) {
+                *flag = true;
+            }
+        }
+    }
+    let mut remap = vec![0; edges.len()];
+    let mut kept = Vec::new();
+    for (index, edge) in edges.into_iter().enumerate() {
+        if used[index] {
+            remap[index] = kept.len();
+            kept.push(edge);
+        }
+    }
+    let routes = routes
+        .into_iter()
+        .map(|route| Route {
+            edges: route.edges.into_iter().map(|index| remap[index]).collect(),
+        })
+        .collect();
+    (kept, routes)
 }
 
 struct Build<'a, C: Conduits> {
@@ -392,6 +420,7 @@ mod tests {
         let catalog = Catalog(HashMap::from([((token(1), hub), vec![segment(1, 1, 1)])]));
         let set = execute(&query, &catalog);
         assert!(set.routes.is_empty());
+        assert!(set.edges.is_empty());
     }
 
     #[test]
@@ -456,6 +485,42 @@ mod tests {
         assert_eq!(set.routes, vec![Route { edges: vec![0] }]);
         assert_eq!(set.edges[0].curve, Curve::Wrap);
         assert_eq!(set.edges[0].token_out, NATIVE);
+    }
+
+    #[test]
+    fn a_leg_that_no_route_uses_is_dropped() {
+        let dropped = token(8);
+        let kept = token(9);
+        let query = prepare(trade(&[(1, 10)], &[2]), &[dropped, kept], None).unwrap();
+        let catalog = Catalog(HashMap::from([
+            ((token(1), dropped), vec![segment(1, 1, 1)]),
+            ((token(1), kept), vec![segment(1, 1, 2)]),
+            ((kept, token(2)), vec![segment(1, 1, 3)]),
+        ]));
+        let set = execute(&query, &catalog);
+        assert_eq!(set.routes, vec![Route { edges: vec![0, 1] }]);
+        assert_eq!(set.edges.len(), 2);
+        assert!(set
+            .edges
+            .iter()
+            .all(|edge| edge.token_in != dropped && edge.token_out != dropped));
+    }
+
+    #[test]
+    fn native_with_no_onward_conduit_keeps_no_edge() {
+        let wrapped = token(1);
+        let query = prepare(
+            Trade {
+                inputs: vec![(NATIVE, amount(1))],
+                outputs: vec![token(2)],
+            },
+            &[],
+            Some(wrapped),
+        )
+        .unwrap();
+        let set = execute(&query, &Catalog(HashMap::new()));
+        assert!(set.routes.is_empty());
+        assert!(set.edges.is_empty());
     }
 
     #[test]
