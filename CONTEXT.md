@@ -300,6 +300,14 @@ _Avoid_: accrued fee, quote record
 The directed quote from a token to one hub. The opposite direction is a different label. The same hub on both labels quotes `hop_num / hop_den`. Two hubs insert `two_hub_num / two_hub_den`. The direct quote stays among the candidates. The choice is the maximum of the cleared cross keys.
 _Avoid_: pair conduit, route
 
+**Route set**:
+The curves a search hands an optimizer for one trade. It carries the input amounts, the output tokens, and each direct, one-hub, and two-hub curve once.
+_Avoid_: plan, basket
+
+**Searcher**:
+The build of a route set from a trade. It reads stored pair conduits, and the wrap between native ETH and wrapped ETH. It does not allocate the flow.
+_Avoid_: optimizer, state pipeline
+
 **Acceptance bar**:
 The worst relative error a stored formula is allowed on its labels: ten basis points.
 _Avoid_: score, tolerance

@@ -16,6 +16,7 @@ members = [
     "crates/univ3",
     "crates/venues",
     "crates/routing",
+    "crates/searcher",
     "crates/peer",
     "bins/ratatoskr",
 ]
@@ -48,6 +49,7 @@ ipc = { path = "crates/ipc" }
 model = { path = "crates/model" }
 peer = { path = "crates/peer" }
 routing = { path = "crates/routing" }
+searcher = { path = "crates/searcher" }
 univ3 = { path = "crates/univ3" }
 venues = { path = "crates/venues" }
 # Libraries for one outbound devp2p socket. Not the reth node.

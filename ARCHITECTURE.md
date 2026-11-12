@@ -62,6 +62,10 @@ A hub label is the directed quote from a token to one hub. The opposite directio
 
 The stage runs after fit. A curve write queues the ordered pairs of its priced directions. The first pass of a state run also queues pairs whose stored conduit is missing or behind the curves already in the catalog. The merge reads slope segments from `estimate` at the origin, the sampling ceiling, and the grid fractions of that ceiling. It does not hold a curve lease while it merges.
 
+## Searcher
+
+`crates/searcher` builds a route set from a trade. The trade names input tokens with amounts and the output tokens. The query adds the hub list and the wrapped token. Execution asks the caller for each pair conduit it needs and returns the direct curve, the one-hub routes, and the two-hub routes. A curve is stored once, and the slope segments keep the pool each piece spends. Native ETH is the zero address. The wrap to the wrapped token pays one wrapped token per native token at any size, and the reverse pays one native token per wrapped token. The catalog read stays `EntityStore::read_conduit` in `crates/venues/src/conduit.rs`. The route set is what an optimizer allocates. The searcher does not allocate it.
+
 ## Basket
 
 A basket asks for output tokens in fixed weights. Holding `h` supports count `q` at weight `r` when `q * r <= h`. For a positive weight the last count is the floor quotient `h / r`. The basket count is the minimum of those last counts. Opening a pool is worth the baskets it adds, minus the cost of opening it.
