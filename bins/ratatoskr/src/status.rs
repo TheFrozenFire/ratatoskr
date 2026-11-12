@@ -50,10 +50,12 @@ pub fn run(base: &str) -> eyre::Result<()> {
     let result = loop {
         if event::poll(Duration::from_millis(200))? {
             if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press
-                    && matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
-                {
-                    break Ok(());
+                if key.kind == KeyEventKind::Press {
+                    match key.code {
+                        KeyCode::Char('q') | KeyCode::Esc => break Ok(()),
+                        KeyCode::Char('p') => apply_control(&mut view, &url),
+                        _ => {}
+                    }
                 }
             }
         }
@@ -161,9 +163,45 @@ fn header(view: &View, url: &str) -> Paragraph<'static> {
     );
     Paragraph::new(text).block(
         Block::default()
-            .title(" ratatoskr state    q quits ")
+            .title(format!(
+                " ratatoskr state    {}    q quits ",
+                control_label(paused)
+            ))
             .borders(Borders::ALL),
     )
+}
+
+fn apply_control(view: &mut View, url: &str) {
+    let paused = view
+        .snap
+        .as_ref()
+        .and_then(|snap| snap["paused"].as_bool())
+        .unwrap_or(false);
+    match post_control(url, control_path(paused)) {
+        Ok(snap) => {
+            view.note(&snap);
+            view.snap = Some(snap);
+            view.fetched = Some(Instant::now());
+            view.error.clear();
+        }
+        Err(err) => view.error = err,
+    }
+}
+
+fn control_path(paused: bool) -> &'static str {
+    if paused {
+        "/resume"
+    } else {
+        "/pause"
+    }
+}
+
+fn control_label(paused: bool) -> &'static str {
+    if paused {
+        "p resumes"
+    } else {
+        "p pauses"
+    }
 }
 
 fn catalog(view: &View) -> Paragraph<'static> {
@@ -499,6 +537,36 @@ fn fetch(url: &str) -> Result<Value, String> {
 }
 
 fn fetch_once(url: &str) -> Result<Value, String> {
+    let (host, addr, path) = endpoint(url)?;
+    let mut stream = connect(&addr)?;
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+    )
+    .map_err(|err| err.to_string())?;
+    let (code, body) = read_response(&mut stream)?;
+    if code != 200 {
+        return Err(format!("status returned {code}"));
+    }
+    serde_json::from_str(&body).map_err(|err| format!("{err}"))
+}
+
+fn post_control(status_url: &str, path: &str) -> Result<Value, String> {
+    let (host, addr, _status_path) = endpoint(status_url)?;
+    let mut stream = connect(&addr)?;
+    write!(
+        stream,
+        "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    )
+    .map_err(|err| err.to_string())?;
+    let (code, body) = read_response(&mut stream)?;
+    if code != 200 {
+        return Err(format!("control {path} returned {code}"));
+    }
+    serde_json::from_str(&body).map_err(|err| format!("{err}"))
+}
+
+fn endpoint(url: &str) -> Result<(String, String, String), String> {
     let rest = url
         .strip_prefix("http://")
         .ok_or_else(|| "status url needs http://".to_string())?;
@@ -509,7 +577,11 @@ fn fetch_once(url: &str) -> Result<Value, String> {
     } else {
         format!("{host}:80")
     };
-    let mut stream = TcpStream::connect_timeout(
+    Ok((host.to_string(), addr, path))
+}
+
+fn connect(addr: &str) -> Result<TcpStream, String> {
+    let stream = TcpStream::connect_timeout(
         &addr.parse().map_err(|err| format!("{addr}: {err}"))?,
         Duration::from_millis(400),
     )
@@ -521,21 +593,15 @@ fn fetch_once(url: &str) -> Result<Value, String> {
     stream
         .set_write_timeout(Some(Duration::from_millis(400)))
         .ok();
-    write!(
-        stream,
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
-    )
-    .map_err(|err| err.to_string())?;
-    let body = read_body(&mut stream)?;
-    serde_json::from_str(&body).map_err(|err| format!("{err}"))
+    Ok(stream)
 }
 
-fn read_body(stream: &mut TcpStream) -> Result<String, String> {
+fn read_response(stream: &mut TcpStream) -> Result<(u16, String), String> {
     let mut buf = Vec::new();
     let mut tmp = [0_u8; 4096];
     loop {
-        if let Some(body) = complete_body(&buf) {
-            return Ok(body);
+        if let Some(response) = complete_response(&buf) {
+            return Ok(response);
         }
         let n = stream.read(&mut tmp).map_err(|err| err.to_string())?;
         if n == 0 {
@@ -546,13 +612,20 @@ fn read_body(stream: &mut TcpStream) -> Result<String, String> {
             return Err("status response too large".into());
         }
     }
-    complete_body(&buf).ok_or_else(|| "truncated status response".into())
+    complete_response(&buf).ok_or_else(|| "truncated status response".into())
 }
 
-fn complete_body(buf: &[u8]) -> Option<String> {
+fn complete_response(buf: &[u8]) -> Option<(u16, String)> {
     let split = buf.windows(4).position(|window| window == b"\r\n\r\n")?;
-    let headers = std::str::from_utf8(buf.get(..split)?).ok()?;
-    let length = headers.lines().find_map(|line| {
+    let head = std::str::from_utf8(buf.get(..split)?).ok()?;
+    let code = head
+        .lines()
+        .next()?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()?;
+    let length = head.lines().find_map(|line| {
         let value = line
             .split_once(':')
             .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))?
@@ -562,5 +635,18 @@ fn complete_body(buf: &[u8]) -> Option<String> {
     })?;
     let start = split + 4;
     let body = buf.get(start..start + length)?;
-    String::from_utf8(body.to_vec()).ok()
+    Some((code, String::from_utf8(body.to_vec()).ok()?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn p_pauses_until_the_snapshot_says_paused() {
+        assert_eq!(control_path(false), "/pause");
+        assert_eq!(control_label(false), "p pauses");
+        assert_eq!(control_path(true), "/resume");
+        assert_eq!(control_label(true), "p resumes");
+    }
 }

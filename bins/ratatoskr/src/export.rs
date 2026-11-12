@@ -1,4 +1,6 @@
 //! Local HTTP exporter. `GET /status` is JSON. `GET /metrics` is Prometheus text.
+//! `POST /pause` and `POST /resume` stop and start stage claims. Peer sessions
+//! stay connected.
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -37,11 +39,8 @@ fn answer(stream: &mut TcpStream) -> io::Result<()> {
         .split('?')
         .next()
         .unwrap_or("/");
-    let (content_type, body) = if path == "/metrics" {
-        ("text/plain; version=0.0.4", venues::prometheus_text())
-    } else {
-        ("application/json", venues::status_json())
-    };
+    let method = request.split_whitespace().next().unwrap_or("GET");
+    let (content_type, body) = respond(method, path);
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
@@ -79,6 +78,21 @@ fn read_headers(stream: &mut TcpStream) -> io::Result<String> {
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
+fn respond(method: &str, path: &str) -> (&'static str, String) {
+    match (method, path) {
+        ("POST", "/pause") => {
+            venues::pause_work();
+            ("application/json", venues::status_json())
+        }
+        ("POST", "/resume") => {
+            venues::resume_work();
+            ("application/json", venues::status_json())
+        }
+        (_, "/metrics") => ("text/plain; version=0.0.4", venues::prometheus_text()),
+        _ => ("application/json", venues::status_json()),
+    }
+}
+
 fn finish(stream: &mut TcpStream) {
     let _ = stream.shutdown(Shutdown::Write);
     let _ = stream.set_read_timeout(Some(Duration::from_millis(20)));
@@ -88,5 +102,69 @@ fn finish(stream: &mut TcpStream) {
             Ok(0) | Err(_) => break,
             Ok(_) => continue,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    struct ResumeOnDrop;
+    impl Drop for ResumeOnDrop {
+        fn drop(&mut self) {
+            venues::resume_work();
+        }
+    }
+
+    fn exchange(request: &str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            answer(&mut stream).unwrap();
+            finish(&mut stream);
+        });
+        let mut client = TcpStream::connect(addr).unwrap();
+        client.write_all(request.as_bytes()).unwrap();
+        let mut buf = String::new();
+        client.read_to_string(&mut buf).unwrap();
+        server.join().unwrap();
+        buf
+    }
+
+    #[test]
+    fn post_pause_and_resume_round_trip() {
+        let _one = one_at_a_time();
+        let _guard = ResumeOnDrop;
+        venues::resume_work();
+        let paused = exchange(
+            "POST /pause HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        assert!(paused.starts_with("HTTP/1.1 200 "));
+        assert!(paused.contains("\"paused\":true"));
+        assert!(venues::work_paused());
+        let resumed = exchange(
+            "POST /resume HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        assert!(resumed.contains("\"paused\":false"));
+        assert!(!venues::work_paused());
+    }
+
+    #[test]
+    fn get_status_leaves_work_running() {
+        let _one = one_at_a_time();
+        let _guard = ResumeOnDrop;
+        venues::resume_work();
+        let body = exchange("GET /status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        assert!(body.contains("\"paused\":false"));
+        assert!(!venues::work_paused());
     }
 }
