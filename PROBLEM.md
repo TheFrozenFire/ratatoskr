@@ -28,7 +28,9 @@ The second collects every direct action between one ordered pair of tokens and a
 
 A pair conduit is named by two identity tokens, in order. In this model its members are the direct venues between those tokens. A multi-hop route is not a member. Whether any multi-hop route belongs inside a pair conduit is open.
 
-The conduit orders those venues by marginal value. The venue with the best price curve takes input first. When another unit of input would pay more through the next venue than through the venue already in use, the next unit goes there. The same rule continues across the remaining venues. For each input size the result is the output of that allocation, which is the optimal output those direct venues can produce together.
+The allocation orders the marginal pieces of the member curves. The next unit of input goes to the remaining piece with the highest slope, whichever venue that piece belongs to. A venue receives more input later when one of its later pieces is still the steepest piece remaining. For each input size the result is the output of that allocation.
+
+That output is the best these direct venues can produce together when each action's marginal falls as its own input grows, and the actions do not share a pool. When a later piece of a venue curve is steeper than an earlier piece, the curve that enters the allocation is the left-greedy minorant: the prefix whose slopes already fall, with each later piece lowered until its slope no longer rises. Once a slope rises, no increasing concave curve under the samples dominates the others.
 
 That allocation is itself a price curve, the whole-conduit curve. A later quote reads the conduit curve. It does not quote the member venues again. The conduit is the routing entity the search sees for that ordered pair.
 
