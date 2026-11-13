@@ -86,6 +86,112 @@ fn rebuild(parent: &HashMap<Token, Token>, from: Token, to: Token) -> Vec<Token>
     path
 }
 
+/// One token and how many stored conduits name it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HubScore {
+    pub token: Token,
+    pub conduits: usize,
+}
+
+/// How many tokens meet each connectivity floor, and the highest ranks.
+#[derive(Clone, Debug)]
+pub struct HubCensus {
+    pub tokens: u64,
+    pub at_least: BTreeMap<usize, u64>,
+    pub ranked: Vec<HubScore>,
+}
+
+/// Tokens with a directed path into the hub set, out of it, both, or neither.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HubReach {
+    pub both: u64,
+    pub toward: u64,
+    pub from_hub: u64,
+    pub outside: u64,
+}
+
+const HUB_FLOORS: [usize; 4] = [3, 10, 50, 100];
+
+/// Rank tokens by the number of conduits that name them.
+///
+/// A conduit in each direction counts twice. `min_conduits` is the floor a
+/// token must meet before it can be a hub. `limit` is how many of those tokens
+/// the caller wants, highest count first. Equal counts keep the lower token.
+pub fn hub_census(
+    graph: &Graph,
+    incoming: &HashMap<Token, Vec<Token>>,
+    min_conduits: usize,
+    limit: usize,
+) -> HubCensus {
+    let mut score: HashMap<Token, usize> = HashMap::new();
+    for (token, links) in &graph.out {
+        *score.entry(*token).or_default() += links.len();
+    }
+    for (token, preds) in incoming {
+        *score.entry(*token).or_default() += preds.len();
+    }
+    let mut at_least = BTreeMap::new();
+    for floor in HUB_FLOORS {
+        at_least.insert(floor, 0);
+    }
+    for conduits in score.values() {
+        for floor in HUB_FLOORS {
+            if *conduits >= floor {
+                *at_least.entry(floor).or_default() += 1;
+            }
+        }
+    }
+    let tokens = score.len() as u64;
+    let mut ranked: Vec<HubScore> = score
+        .into_iter()
+        .filter(|(_, conduits)| *conduits >= min_conduits)
+        .map(|(token, conduits)| HubScore { token, conduits })
+        .collect();
+    ranked.sort_by(|left, right| {
+        right
+            .conduits
+            .cmp(&left.conduits)
+            .then(left.token.cmp(&right.token))
+    });
+    ranked.truncate(limit);
+    HubCensus {
+        tokens,
+        at_least,
+        ranked,
+    }
+}
+
+/// Directed reach of this hub list. Native ETH is omitted from the counts.
+pub fn reach_of(graph: &Graph, incoming: &HashMap<Token, Vec<Token>>, hubs: &[Token]) -> HubReach {
+    let hub_set: HashSet<Token> = hubs.iter().copied().collect();
+    let outward = forward(graph);
+    let toward = walk(hubs, incoming);
+    let away = walk(hubs, &outward);
+    let mut reach = HubReach::default();
+    let mut all = HashSet::new();
+    for token in graph.out.keys() {
+        all.insert(*token);
+    }
+    for token in incoming.keys() {
+        all.insert(*token);
+    }
+    for token in all {
+        if hub_set.contains(&token) || native(token) {
+            continue;
+        }
+        match (
+            toward.dist.contains_key(&token),
+            away.dist.contains_key(&token),
+        ) {
+            (true, true) => reach.both += 1,
+            (true, false) => reach.toward += 1,
+            (false, true) => reach.from_hub += 1,
+            (false, false) => reach.outside += 1,
+        }
+    }
+    reach
+}
+
 /// Who has a conduit into this token, in token order.
 pub fn incoming(graph: &Graph) -> HashMap<Token, Vec<Token>> {
     let mut incoming: HashMap<Token, Vec<Token>> = HashMap::new();
@@ -191,11 +297,8 @@ struct Ctx<'a> {
     graph: &'a Graph,
     incoming: &'a HashMap<Token, Vec<Token>>,
     hubs: &'a HashSet<Token>,
-    hub_order: &'a [Token],
     toward: &'a Walk,
     away: &'a Walk,
-    to_hub: &'a [Walk],
-    from_hub: &'a [Walk],
     wide_skips: &'a Cell<u32>,
 }
 
@@ -245,24 +348,13 @@ pub fn select(graph: &Graph, hubs: &[Token]) -> Selection {
 
     let sources = diversify(&to_tendrils, |item| item.dist >= 2, 48);
     let dests = diversify(&from_tendrils, |item| item.dist >= 2, 48);
-    let to_hub: Vec<Walk> = hubs
-        .iter()
-        .map(|hub| walk(std::slice::from_ref(hub), &incoming))
-        .collect();
-    let from_hub: Vec<Walk> = hubs
-        .iter()
-        .map(|hub| walk(std::slice::from_ref(hub), &outward))
-        .collect();
     let wide_skips = Cell::new(0);
     let ctx = Ctx {
         graph,
         incoming: &incoming,
         hubs: &hub_set,
-        hub_order: hubs,
         toward: &toward,
         away: &away,
-        to_hub: &to_hub,
-        from_hub: &from_hub,
         wide_skips: &wide_skips,
     };
     let mut used = HashSet::new();
@@ -942,35 +1034,44 @@ fn avoiding(ctx: &Ctx<'_>, source: Token, dest: Token, max_edges: usize) -> Reac
     Reach::Clear
 }
 
+struct Spur {
+    dist: usize,
+    path: Vec<Token>,
+}
+
 /// Shortest path that touches a hub, plus that length when the path does not stitch.
+///
+/// The search starts at the two ends and stops at a hub, so a wide hub is not expanded.
 fn mediated(
     ctx: &Ctx<'_>,
     source: Token,
     dest: Token,
     max_edges: usize,
 ) -> (Option<usize>, Option<Vec<Token>>) {
+    let up = toward_hubs(ctx, source, max_edges);
+    let down = from_hubs(ctx, dest, max_edges);
     let mut best_len: Option<usize> = None;
     let mut pairs = Vec::new();
-    for (left, hub_in) in ctx.to_hub.iter().enumerate() {
-        let Some(up) = hub_in.dist.get(&source).copied() else {
+    let mut hubs: Vec<Token> = up.keys().copied().collect();
+    hubs.extend(down.keys().copied());
+    hubs.sort();
+    hubs.dedup();
+    for left in &hubs {
+        let Some(inbound) = up.get(left) else {
             continue;
         };
-        for (right, hub_out) in ctx.from_hub.iter().enumerate() {
-            let Some(down) = hub_out.dist.get(&dest).copied() else {
+        for right in &hubs {
+            let Some(outbound) = down.get(right) else {
                 continue;
             };
             let mid = if left == right {
                 0
-            } else if ctx
-                .graph
-                .meta(ctx.hub_order[left], ctx.hub_order[right])
-                .is_some()
-            {
+            } else if ctx.graph.meta(*left, *right).is_some() {
                 1
             } else {
                 continue;
             };
-            let total = up as usize + mid + down as usize;
+            let total = inbound.dist + mid + outbound.dist;
             if total == 0 || total > max_edges {
                 continue;
             }
@@ -983,30 +1084,139 @@ fn mediated(
                 None => best_len = Some(total),
                 Some(_) => {}
             }
-            pairs.push((left, right));
+            pairs.push((*left, *right));
         }
     }
     let Some(total) = best_len else {
         return (None, None);
     };
     for (left, right) in pairs {
-        let Some(mut path) = ascend(&ctx.to_hub[left], source) else {
+        let Some(inbound) = up.get(&left) else {
             continue;
         };
+        let Some(outbound) = down.get(&right) else {
+            continue;
+        };
+        let mut path = inbound.path.clone();
         if left != right {
-            path.push(ctx.hub_order[right]);
+            path.push(right);
         }
-        let Some(mut down) = ascend(&ctx.from_hub[right], dest) else {
-            continue;
-        };
-        down.pop();
-        down.reverse();
-        path.extend(down);
+        if outbound.path.len() > 1 {
+            path.extend_from_slice(&outbound.path[1..]);
+        }
         if path.len() == total + 1 && simple(&path) {
             return (Some(total), Some(path));
         }
     }
     (Some(total), None)
+}
+
+fn toward_hubs(ctx: &Ctx<'_>, source: Token, max_edges: usize) -> HashMap<Token, Spur> {
+    let mut found = HashMap::new();
+    if ctx.hubs.contains(&source) {
+        found.insert(
+            source,
+            Spur {
+                dist: 0,
+                path: vec![source],
+            },
+        );
+        return found;
+    }
+    let mut parent = HashMap::new();
+    let mut depth = HashMap::new();
+    let mut queue = VecDeque::new();
+    parent.insert(source, source);
+    depth.insert(source, 0_usize);
+    queue.push_back(source);
+    let mut seen = 0_usize;
+    while let Some(node) = queue.pop_front() {
+        let hops = depth[&node];
+        if hops >= max_edges {
+            continue;
+        }
+        for next in targets(ctx.graph, node) {
+            if depth.contains_key(&next) {
+                continue;
+            }
+            let next_hops = hops + 1;
+            if ctx.hubs.contains(&next) {
+                found.entry(next).or_insert_with(|| {
+                    let mut path = rebuild(&parent, source, node);
+                    path.push(next);
+                    Spur {
+                        dist: next_hops,
+                        path,
+                    }
+                });
+                continue;
+            }
+            if seen > 200_000 {
+                continue;
+            }
+            parent.insert(next, node);
+            depth.insert(next, next_hops);
+            seen += 1;
+            queue.push_back(next);
+        }
+    }
+    found
+}
+
+fn from_hubs(ctx: &Ctx<'_>, dest: Token, max_edges: usize) -> HashMap<Token, Spur> {
+    let mut found = HashMap::new();
+    if ctx.hubs.contains(&dest) {
+        found.insert(
+            dest,
+            Spur {
+                dist: 0,
+                path: vec![dest],
+            },
+        );
+        return found;
+    }
+    let mut parent = HashMap::new();
+    let mut depth = HashMap::new();
+    let mut queue = VecDeque::new();
+    parent.insert(dest, dest);
+    depth.insert(dest, 0_usize);
+    queue.push_back(dest);
+    let mut seen = 0_usize;
+    while let Some(node) = queue.pop_front() {
+        let hops = depth[&node];
+        if hops >= max_edges {
+            continue;
+        }
+        let Some(preds) = ctx.incoming.get(&node) else {
+            continue;
+        };
+        for next in preds {
+            if depth.contains_key(next) {
+                continue;
+            }
+            let next_hops = hops + 1;
+            if ctx.hubs.contains(next) {
+                found.entry(*next).or_insert_with(|| {
+                    let mut path = rebuild(&parent, dest, node);
+                    path.push(*next);
+                    path.reverse();
+                    Spur {
+                        dist: next_hops,
+                        path,
+                    }
+                });
+                continue;
+            }
+            if seen > 200_000 {
+                continue;
+            }
+            parent.insert(*next, node);
+            depth.insert(*next, next_hops);
+            seen += 1;
+            queue.push_back(*next);
+        }
+    }
+    found
 }
 
 fn shortest_built(
@@ -1407,5 +1617,27 @@ mod tests {
             .isolated
             .iter()
             .any(|path| path.path.len() >= 5 && path.path.first() == Some(&token(1))));
+    }
+
+    #[test]
+    fn hubs_follow_the_number_of_conduits() {
+        let mut graph = Graph::default();
+        link(&mut graph, 1, 9);
+        link(&mut graph, 2, 9);
+        link(&mut graph, 9, 3);
+        link(&mut graph, 8, 4);
+        let incoming = incoming(&graph);
+        let census = hub_census(&graph, &incoming, 3, 8);
+        assert_eq!(census.tokens, 6);
+        assert_eq!(census.ranked.len(), 1);
+        assert_eq!(census.ranked[0].token, token(9));
+        assert_eq!(census.ranked[0].conduits, 3);
+        assert_eq!(census.at_least.get(&3).copied(), Some(1));
+        assert_eq!(census.at_least.get(&10).copied(), Some(0));
+        let reach = reach_of(&graph, &incoming, &[token(9)]);
+        assert_eq!(reach.toward, 2);
+        assert_eq!(reach.from_hub, 1);
+        assert_eq!(reach.outside, 2);
+        assert_eq!(reach.both, 0);
     }
 }

@@ -2,8 +2,9 @@
 //!
 //! The trades are parameterization scenarios. They cover each venue kind, the
 //! hub pairs, native ETH through the wrap, one-hub leaf pairs, and token pairs
-//! whose shortest stored path is longer than two hubs. The searcher still
-//! builds only direct, one-hub, and two-hub routes.
+//! whose shortest stored path is longer than two hubs. Hubs are the tokens
+//! named by the most conduits. The search returns the direct pair, the hub
+//! routes, and a bounded walk from an endpoint that names few conduits.
 
 mod graph;
 
@@ -17,12 +18,19 @@ use std::str::FromStr;
 
 use alloy_primitives::Address;
 use eyre::WrapErr;
-use graph::{Deep, Graph, PathEnds, Selection};
+use graph::{Deep, Graph, HubCensus, HubReach, PathEnds, Selection};
 use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::Pow;
 use routing::SlopeSegment;
-use searcher::{execute, prepare, Conduits, Curve, Route, RouteSet, Token, Trade, NATIVE};
+use searcher::{
+    execute, prepare, Conduits, Curve, Route, RouteSet, Token, Trade, NATIVE, NEIGHBOR_LIMIT,
+    WALK_DEPTH,
+};
 use venues::{kind_name, Catalog};
+
+const HUB_MINIMUM: usize = 3;
+const QUERY_HUBS: usize = 32;
+const HUB_LIMITS: [usize; 4] = [8, 16, 32, 64];
 
 const WETH: &str = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
 const USDC: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
@@ -70,9 +78,7 @@ struct Picks {
     witness: Vec<(u8, Example)>,
     rich: Vec<(u8, Example)>,
     into_weth: Vec<(u8, Example)>,
-    into_exact: bool,
     out_of_weth: Vec<(u8, Example)>,
-    out_exact: bool,
     mixed: Vec<(u8, Example)>,
 }
 
@@ -103,7 +109,10 @@ struct Scenario {
     sweep: Option<String>,
     require_end: Option<Token>,
     forbid_ends: Vec<Token>,
+    reach: Vec<Token>,
     must_wrap: bool,
+    cover: bool,
+    exact_path: bool,
     class: Class,
 }
 
@@ -141,8 +150,7 @@ fn run() -> eyre::Result<()> {
         return Err(eyre::eyre!("usage: seek [data-dir]"));
     }
     let known = known_tokens();
-    let hub_list: Vec<Token> = known.iter().skip(1).map(|item| item.token).collect();
-    let wrapped = hub_list[0];
+    let wrapped = known_named(&known, "WETH");
     eprintln!("opening {}", data_dir.display());
     let catalog = Catalog::open(&data_dir).wrap_err("open catalog")?;
     eprintln!("scanning conduits");
@@ -152,8 +160,31 @@ fn run() -> eyre::Result<()> {
         survey.conduits,
         survey.graph.out.len()
     );
-    let hubs = present_hubs(&survey.graph, &hub_list);
+    let incoming = graph::incoming(&survey.graph);
+    let census = graph::hub_census(&survey.graph, &incoming, HUB_MINIMUM, HUB_LIMITS[3]);
+    let hubs: Vec<Token> = census
+        .ranked
+        .iter()
+        .take(QUERY_HUBS)
+        .map(|hub| hub.token)
+        .collect();
     note_degrees(&survey.graph, &known);
+    note_hubs(&census, &known);
+    let mut reach_rows = Vec::new();
+    for limit in HUB_LIMITS {
+        let slice: Vec<Token> = census
+            .ranked
+            .iter()
+            .take(limit)
+            .map(|hub| hub.token)
+            .collect();
+        let reach = graph::reach_of(&survey.graph, &incoming, &slice);
+        eprintln!(
+            "reach K={limit} both {} toward {} from {} outside {}",
+            reach.both, reach.toward, reach.from_hub, reach.outside
+        );
+        reach_rows.push((limit, reach));
+    }
     eprintln!("choosing paths through {} hubs", hubs.len());
     let selection = graph::select(&survey.graph, &hubs);
     eprintln!(
@@ -164,10 +195,11 @@ fn run() -> eyre::Result<()> {
         selection.isolated.len(),
         selection.wide_skips
     );
-    let incoming = graph::incoming(&survey.graph);
     let reader = Reader {
         catalog: &catalog,
         cache: RefCell::new(HashMap::new()),
+        graph: &survey.graph,
+        incoming: &incoming,
     };
     eprintln!("checking pool identity on the candidate paths");
     let long = keep_disjoint(&survey.graph, &incoming, &reader, &selection.long, 24);
@@ -193,7 +225,15 @@ fn run() -> eyre::Result<()> {
         isolated: &isolated,
     });
     let mut out = String::new();
-    push_header(&mut out, &survey, &known, &hubs, &selection);
+    push_header(
+        &mut out,
+        &survey,
+        &known,
+        &hubs,
+        &selection,
+        &census,
+        &reach_rows,
+    );
     let mut checks = Checks {
         failures: Vec::new(),
         kinds: 0,
@@ -212,7 +252,14 @@ fn run() -> eyre::Result<()> {
         match prepare(scenario.trade.clone(), &scenario.hubs, scenario.wrapped) {
             Ok(query) => {
                 let set = execute(&query, &reader);
-                record(&mut checks, scenario, &set, &known);
+                record(
+                    &mut checks,
+                    scenario,
+                    &set,
+                    &known,
+                    &survey.graph,
+                    &incoming,
+                );
                 push_set(
                     &mut out,
                     scenario,
@@ -383,8 +430,8 @@ fn picks(
         }
         witness.push((*kind, chosen));
     }
-    let (into_weth, into_exact) = bundle_into(survey, graph, incoming, hubs, weth);
-    let (out_of_weth, out_exact) = bundle_out(survey, graph, incoming, hubs, weth);
+    let into_weth = bundle_into(survey, graph, incoming, hubs, weth);
+    let out_of_weth = bundle_out(survey, graph, incoming, hubs, weth);
     let mut mixed = Vec::new();
     for kind in 1..15_u8 {
         if survey.pure.contains_key(&kind) {
@@ -400,9 +447,7 @@ fn picks(
         witness,
         rich,
         into_weth,
-        into_exact,
         out_of_weth,
-        out_exact,
         mixed,
     }
 }
@@ -433,14 +478,14 @@ fn bundle_into(
     incoming: &HashMap<Token, Vec<Token>>,
     hubs: &HashSet<Token>,
     weth: Token,
-) -> (Vec<(u8, Example)>, bool) {
+) -> Vec<(u8, Example)> {
     let exact = gather_into(survey, weth, |example| {
         sole(graph, incoming, example.from, hubs) == Some(weth)
     });
     if !exact.is_empty() {
-        return (exact, true);
+        return exact;
     }
-    (gather_into(survey, weth, |_| true), false)
+    gather_into(survey, weth, |_| true)
 }
 
 fn gather_into(
@@ -477,15 +522,12 @@ fn bundle_out(
     incoming: &HashMap<Token, Vec<Token>>,
     hubs: &HashSet<Token>,
     weth: Token,
-) -> (Vec<(u8, Example)>, bool) {
+) -> Vec<(u8, Example)> {
     let exact = gather_out(survey, graph, incoming, hubs, weth, true);
     if !exact.is_empty() {
-        return (exact, true);
+        return exact;
     }
-    (
-        gather_out(survey, graph, incoming, hubs, weth, false),
-        false,
-    )
+    gather_out(survey, graph, incoming, hubs, weth, false)
 }
 
 fn gather_out(
@@ -551,7 +593,7 @@ fn scenarios(chosen: &Chosen<'_>) -> Vec<Scenario> {
     out.extend(via_scenarios(via, known, hubs, *wrapped));
     out.extend(split_scenarios(
         via,
-        &selection.deep_to,
+        &selection.deep_from,
         known,
         hubs,
         *wrapped,
@@ -624,6 +666,9 @@ fn native_scenarios(known: &[Known], hubs: &[Token], wrapped: Token) -> Vec<Scen
     let mut out = Vec::new();
     let ether = amount(18);
     for hub in hubs {
+        if *hub == NATIVE {
+            continue;
+        }
         out.push(single(
             format!("native-{}", label(*hub, known)),
             format!("native ETH in, {} out", label(*hub, known)),
@@ -911,7 +956,11 @@ fn split_scenarios(
             continue;
         };
         let far = deep.iter().find(|item| {
-            item.dist >= 2 && item.token != from && item.token != hub && !used.contains(&item.token)
+            item.dist >= 2
+                && item.hub == hub
+                && item.token != from
+                && item.token != hub
+                && !used.contains(&item.token)
         });
         let Some(far) = far else {
             continue;
@@ -919,9 +968,10 @@ fn split_scenarios(
         used.insert(far.token);
         let name = format!("split-{index:02}");
         let detail = format!(
-            "{} reaches {} in one conduit. {} is {} conduits from {} and shares no venue with the input, so the route set reaches the hub and misses the far token",
+            "{} spends one input. The outputs are {} and {}, and {} is {} conduits downstream of {}.",
             label(from, known),
             label(hub, known),
+            label(far.token, known),
             label(far.token, known),
             far.dist,
             label(far.hub, known)
@@ -934,8 +984,7 @@ fn split_scenarios(
             hubs,
             wrapped,
         );
-        scenario.require_end = Some(hub);
-        scenario.forbid_ends = vec![far.token];
+        scenario.reach = vec![hub, far.token];
         scenario.paths = vec![path.path.clone(), far.path.clone()];
         scenario.show_path = true;
         out.push(scenario);
@@ -979,11 +1028,14 @@ fn bundle_scenarios(picks: &Picks, hubs: &[Token], wrapped: Token) -> Vec<Scenar
             direct_kinds: None,
             expect_pure,
             must_empty: false,
-            expect_routes: picks.into_exact.then_some(picks.into_weth.len()),
+            expect_routes: None,
             sweep: None,
             require_end: None,
             forbid_ends: Vec::new(),
+            reach: Vec::new(),
             must_wrap: false,
+            cover: false,
+            exact_path: false,
             class: Class::Ordinary,
         });
     }
@@ -1021,11 +1073,14 @@ fn bundle_scenarios(picks: &Picks, hubs: &[Token], wrapped: Token) -> Vec<Scenar
             direct_kinds: None,
             expect_pure,
             must_empty: false,
-            expect_routes: picks.out_exact.then_some(picks.out_of_weth.len()),
+            expect_routes: None,
             sweep: None,
             require_end: None,
             forbid_ends: Vec::new(),
+            reach: Vec::new(),
             must_wrap: false,
+            cover: false,
+            exact_path: false,
             class: Class::Ordinary,
         });
     }
@@ -1064,7 +1119,7 @@ fn via_scenarios(
         scenario.class = Class::Via;
         scenario.paths = vec![path.path.clone()];
         scenario.show_path = true;
-        scenario.expect_routes = Some(1);
+        scenario.exact_path = true;
         out.push(scenario);
     }
     if let Some(path) = via.first() {
@@ -1084,7 +1139,7 @@ fn via_scenarios(
         scenario.class = Class::Via;
         scenario.paths = vec![path.path.clone()];
         scenario.show_path = true;
-        scenario.expect_routes = Some(1);
+        scenario.exact_path = true;
         out.push(scenario);
     }
     out
@@ -1131,7 +1186,7 @@ fn deep_scenarios(
         scenario.class = Class::Deep;
         scenario.paths = vec![item.path.clone()];
         scenario.show_path = true;
-        scenario.must_empty = true;
+        scenario.cover = true;
         out.push(scenario);
         if item.hub == wrapped && native_at.insert(item.dist) {
             let (name, from, to, detail) = if toward_hub {
@@ -1162,7 +1217,7 @@ fn deep_scenarios(
             scenario.class = Class::Deep;
             scenario.paths = vec![item.path.clone()];
             scenario.show_path = true;
-            scenario.must_empty = true;
+            scenario.cover = true;
             out.push(scenario);
         }
     }
@@ -1202,7 +1257,7 @@ fn long_scenarios(long: &[PathEnds], hubs: &[Token], wrapped: Token) -> Vec<Scen
         scenario.class = Class::Long;
         scenario.paths = vec![path.path.clone()];
         scenario.show_path = true;
-        scenario.must_empty = true;
+        scenario.cover = true;
         out.push(scenario);
         if index < 3 && path.min_capacity > 1 {
             let mut spent = single(
@@ -1219,7 +1274,7 @@ fn long_scenarios(long: &[PathEnds], hubs: &[Token], wrapped: Token) -> Vec<Scen
             );
             spent.paths = vec![path.path.clone()];
             spent.show_path = true;
-            spent.must_empty = true;
+            spent.cover = true;
             out.push(spent);
         }
     }
@@ -1284,12 +1339,15 @@ fn push_multi(
             show_path: true,
             direct_kinds: None,
             expect_pure: Vec::new(),
-            must_empty: true,
-            expect_routes: Some(0),
+            must_empty: false,
+            expect_routes: None,
             sweep: None,
             require_end: None,
             forbid_ends: Vec::new(),
+            reach: Vec::new(),
             must_wrap: false,
+            cover: true,
+            exact_path: false,
             class: Class::Long,
         }
     } else {
@@ -1315,12 +1373,15 @@ fn push_multi(
             show_path: true,
             direct_kinds: None,
             expect_pure: Vec::new(),
-            must_empty: true,
-            expect_routes: Some(0),
+            must_empty: false,
+            expect_routes: None,
             sweep: None,
             require_end: None,
             forbid_ends: Vec::new(),
+            reach: Vec::new(),
             must_wrap: false,
+            cover: true,
+            exact_path: false,
             class: Class::Long,
         }
     };
@@ -1390,7 +1451,7 @@ fn isolated_scenarios(isolated: &[PathEnds], hubs: &[Token], wrapped: Token) -> 
         scenario.class = Class::Isolated;
         scenario.paths = vec![path.path.clone()];
         scenario.show_path = true;
-        scenario.must_empty = true;
+        scenario.cover = true;
         out.push(scenario);
     }
     out
@@ -1423,7 +1484,10 @@ fn single(
         sweep: None,
         require_end: None,
         forbid_ends: Vec::new(),
+        reach: Vec::new(),
         must_wrap: false,
+        cover: false,
+        exact_path: false,
         class: Class::Ordinary,
     }
 }
@@ -1451,7 +1515,10 @@ fn multi(
         sweep: None,
         require_end: None,
         forbid_ends: Vec::new(),
+        reach: Vec::new(),
         must_wrap: false,
+        cover: false,
+        exact_path: false,
         class: Class::Ordinary,
     }
 }
@@ -1559,6 +1626,8 @@ type CurveCache = HashMap<(Token, Token), Option<Vec<SlopeSegment>>>;
 struct Reader<'a> {
     catalog: &'a Catalog,
     cache: RefCell<CurveCache>,
+    graph: &'a Graph,
+    incoming: &'a HashMap<Token, Vec<Token>>,
 }
 
 impl Conduits for Reader<'_> {
@@ -1580,6 +1649,30 @@ impl Conduits for Reader<'_> {
         self.cache.borrow_mut().insert(key, loaded.clone());
         loaded
     }
+
+    fn outgoing(&self, token: Token, limit: usize) -> Option<Vec<Token>> {
+        if self.graph.degree(token) > limit {
+            return None;
+        }
+        let mut tokens: Vec<Token> = self.graph.neighbors(token).into_iter().collect();
+        tokens.sort();
+        if tokens.len() > limit {
+            None
+        } else {
+            Some(tokens)
+        }
+    }
+
+    fn incoming(&self, token: Token, limit: usize) -> Option<Vec<Token>> {
+        let Some(preds) = self.incoming.get(&token) else {
+            return Some(Vec::new());
+        };
+        if preds.len() > limit {
+            None
+        } else {
+            Some(preds.clone())
+        }
+    }
 }
 
 fn push_header(
@@ -1588,21 +1681,49 @@ fn push_header(
     known: &[Known],
     hubs: &[Token],
     selection: &Selection,
+    census: &HubCensus,
+    reach_rows: &[(usize, HubReach)],
 ) {
     out.push_str(&format!(
-        "conduits {}\ntokens {}\n",
+        "conduits {}\ntokens with an outgoing curve {}\ntokens named by a conduit {}\nhub minimum {HUB_MINIMUM}\nquery hubs {QUERY_HUBS}\nneighbor limit {NEIGHBOR_LIMIT}\nwalk depth {WALK_DEPTH}\n",
         survey.conduits,
-        survey.graph.out.len()
+        survey.graph.out.len(),
+        census.tokens
     ));
+    for (floor, count) in &census.at_least {
+        out.push_str(&format!("tokens with at least {floor} conduits: {count}\n"));
+    }
+    for limit in HUB_LIMITS {
+        let Some(hub) = census.ranked.get(limit - 1) else {
+            continue;
+        };
+        out.push_str(&format!(
+            "hub rank {limit} {} conduits {}\n",
+            label(hub.token, known),
+            hub.conduits
+        ));
+    }
     out.push_str("hubs");
     for hub in hubs {
+        let conduits = census
+            .ranked
+            .iter()
+            .find(|score| score.token == *hub)
+            .map(|score| score.conduits)
+            .unwrap_or(0);
         out.push_str(&format!(
-            " {} deg={}",
+            " {} conduits={conduits} out={}",
             label(*hub, known),
             survey.graph.degree(*hub)
         ));
     }
     out.push('\n');
+    for (limit, reach) in reach_rows {
+        out.push_str(&format!(
+            "reach K={limit} both {} toward {} from {} outside {}\n",
+            reach.both, reach.toward, reach.from_hub, reach.outside
+        ));
+    }
     let mut pure: Vec<u8> = survey.pure.keys().copied().collect();
     pure.sort_unstable();
     out.push_str("pure kinds");
@@ -1699,12 +1820,13 @@ fn push_set(
     }
     let shapes = shapes(set);
     out.push_str(&format!(
-        "routes {} edges {}\nshapes direct {} one {} two {} wrap {}\n",
+        "routes {} edges {}\nshapes direct {} one {} two {} longer {} wrap {}\n",
         set.routes.len(),
         set.edges.len(),
         shapes.direct,
         shapes.one,
         shapes.two,
+        shapes.longer,
         shapes.wrap
     ));
     let mut kinds = 0_u32;
@@ -1771,6 +1893,7 @@ struct Shapes {
     direct: usize,
     one: usize,
     two: usize,
+    longer: usize,
     wrap: usize,
 }
 
@@ -1779,6 +1902,7 @@ fn shapes(set: &RouteSet) -> Shapes {
         direct: 0,
         one: 0,
         two: 0,
+        longer: 0,
         wrap: 0,
     };
     for route in &set.routes {
@@ -1798,6 +1922,7 @@ fn shapes(set: &RouteSet) -> Shapes {
             1 => shapes.direct += 1,
             2 => shapes.one += 1,
             3 => shapes.two += 1,
+            n if n > 3 => shapes.longer += 1,
             _ => {}
         }
     }
@@ -1820,7 +1945,14 @@ fn route_line(set: &RouteSet, route: &Route, known: &[Known]) -> String {
     parts.join(" -> ")
 }
 
-fn record(checks: &mut Checks, scenario: &Scenario, set: &RouteSet, known: &[Known]) {
+fn record(
+    checks: &mut Checks,
+    scenario: &Scenario,
+    set: &RouteSet,
+    known: &[Known],
+    graph: &Graph,
+    incoming: &HashMap<Token, Vec<Token>>,
+) {
     for edge in &set.edges {
         let bits = curve_kinds(&edge.curve);
         checks.kinds |= bits;
@@ -1850,15 +1982,42 @@ fn record(checks: &mut Checks, scenario: &Scenario, set: &RouteSet, known: &[Kno
             ));
         }
     }
-    if scenario.expect_routes == Some(1) && set.routes.len() == 1 {
-        if let Some(path) = scenario.paths.first() {
-            let got = route_line(set, &set.routes[0], known);
-            let want = path_labels(path, known);
-            if got != want {
-                checks
-                    .failures
-                    .push(format!("{} route {got} catalog {want}", scenario.name));
+    if scenario.cover {
+        for path in &scenario.paths {
+            if !path_covered(scenario, set, path) {
+                checks.failures.push(format!(
+                    "{} has no route across its catalog path of {} conduits ({})",
+                    scenario.name,
+                    path.len().saturating_sub(1),
+                    path_degrees(graph, incoming, &scenario.hubs, path, known)
+                ));
             }
+        }
+    }
+    if scenario.exact_path {
+        let matched = scenario.paths.iter().any(|path| {
+            set.routes
+                .iter()
+                .any(|route| route_tokens(set, route) == path.as_slice())
+        });
+        if !matched {
+            checks.failures.push(format!(
+                "{} does not contain its catalog path",
+                scenario.name
+            ));
+        }
+    }
+    for token in &scenario.reach {
+        let reached = set
+            .routes
+            .iter()
+            .any(|route| route_end(set, route) == Some(*token));
+        if !reached {
+            checks.failures.push(format!(
+                "{} never reaches {}",
+                scenario.name,
+                label(*token, known)
+            ));
         }
     }
     if let Some(expected) = scenario.direct_kinds {
@@ -2036,6 +2195,72 @@ fn push_checks(out: &mut String, checks: &Checks) {
     }
 }
 
+fn path_degrees(
+    graph: &Graph,
+    incoming: &HashMap<Token, Vec<Token>>,
+    hubs: &[Token],
+    path: &[Token],
+    known: &[Known],
+) -> String {
+    path.iter()
+        .map(|token| {
+            let indeg = incoming.get(token).map(|preds| preds.len()).unwrap_or(0);
+            let mark = if hubs.contains(token) { "h" } else { "" };
+            format!(
+                "{}:{}/{}{mark}",
+                label(*token, known),
+                graph.degree(*token),
+                indeg
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn route_tokens(set: &RouteSet, route: &Route) -> Vec<Token> {
+    let Some(first) = route.edges.first() else {
+        return Vec::new();
+    };
+    let mut tokens = vec![set.edges[*first].token_in];
+    for index in &route.edges {
+        if let Some(edge) = set.edges.get(*index) {
+            tokens.push(edge.token_out);
+        }
+    }
+    tokens
+}
+
+fn path_covered(scenario: &Scenario, set: &RouteSet, path: &[Token]) -> bool {
+    let (Some(&catalog_start), Some(&catalog_end)) = (path.first(), path.last()) else {
+        return false;
+    };
+    let mut start = catalog_start;
+    let mut end = catalog_end;
+    let mut budget = path.len().saturating_sub(1);
+    if scenario
+        .trade
+        .inputs
+        .iter()
+        .any(|(token, _)| *token == NATIVE)
+        && start != NATIVE
+        && scenario.wrapped == Some(start)
+    {
+        start = NATIVE;
+        budget += 1;
+    }
+    if scenario.trade.outputs.contains(&NATIVE) && end != NATIVE && scenario.wrapped == Some(end) {
+        end = NATIVE;
+        budget += 1;
+    }
+    set.routes.iter().any(|route| {
+        if route.edges.len() > budget {
+            return false;
+        }
+        let tokens = route_tokens(set, route);
+        tokens.first().copied() == Some(start) && tokens.last().copied() == Some(end)
+    })
+}
+
 fn edge_kinds(set: &RouteSet, from: Token, to: Token) -> Option<u32> {
     set.edges
         .iter()
@@ -2060,13 +2285,6 @@ fn topology(set: &RouteSet) -> String {
         signature.push(';');
     }
     signature
-}
-
-fn path_labels(path: &[Token], known: &[Known]) -> String {
-    path.iter()
-        .map(|token| label(*token, known))
-        .collect::<Vec<_>>()
-        .join(" -> ")
 }
 
 fn path_ends(path: &[Token]) -> Option<(Token, Token)> {
@@ -2184,6 +2402,17 @@ fn amount(exp: u32) -> BigUint {
     BigUint::from(10_u32).pow(exp)
 }
 
+fn note_hubs(census: &HubCensus, known: &[Known]) {
+    eprint!("ranked");
+    for hub in census.ranked.iter().take(QUERY_HUBS) {
+        eprint!(" {}={}", label(hub.token, known), hub.conduits);
+    }
+    eprintln!();
+    for (floor, count) in &census.at_least {
+        eprintln!("tokens with at least {floor} conduits: {count}");
+    }
+}
+
 fn note_degrees(graph: &Graph, known: &[Known]) {
     let mut ranks: Vec<(usize, Token)> = graph
         .out
@@ -2197,18 +2426,4 @@ fn note_degrees(graph: &Graph, known: &[Known]) {
         eprint!(" {}={degree}", label(token, known));
     }
     eprintln!();
-}
-
-fn present_hubs(graph: &Graph, hubs: &[Token]) -> Vec<Token> {
-    hubs.iter()
-        .copied()
-        .filter(|hub| graph.degree(*hub) > 0 || mentioned(graph, *hub))
-        .collect()
-}
-
-fn mentioned(graph: &Graph, token: Token) -> bool {
-    graph
-        .out
-        .values()
-        .any(|links| links.iter().any(|link| link.to == token))
 }
