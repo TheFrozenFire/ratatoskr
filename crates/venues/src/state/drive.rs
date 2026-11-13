@@ -1,4 +1,7 @@
 //! One pass of the state pipeline and the watch.
+//!
+//! A detail read uses the latest stored header. `pin_block` holds that read
+//! at one block for the whole run.
 
 use super::*;
 
@@ -36,18 +39,7 @@ where
     let rpc = tokio::task::spawn_blocking(move || Rpc::new(urls))
         .await
         .wrap_err("rpc client task")??;
-    let block = match opts.pin_block {
-        Some(pin) => pin,
-        None => match store.header_cursor().await? {
-            cursor if cursor > 0 => cursor - 1,
-            _ => {
-                let rpc = rpc.clone();
-                tokio::task::spawn_blocking(move || rpc.block_number())
-                    .await
-                    .wrap_err("block number task")??
-            }
-        },
-    };
+    let mut block = current_block(store, &rpc, opts.pin_block).await?;
     crate::metrics::set_block(block);
     tracing::info!(block, "state block");
     let give_up_after = if opts.until_idle { 4 } else { 0 };
@@ -73,6 +65,12 @@ where
         }
         if crate::hold_for_pause(&stop).await {
             return Ok(report);
+        }
+        let next = current_block(store, &rpc, opts.pin_block).await?;
+        if next != block {
+            block = next;
+            crate::metrics::set_block(block);
+            tracing::info!(block, "state block");
         }
         let mut notes = Vec::new();
         let worked = drive_one(store, &rpc, block, unix_now(), give_up_after, &mut notes).await?;
@@ -100,6 +98,29 @@ where
         }
         sleep_or_stop(&mut stop).await;
     }
+}
+
+/// The block a detail read uses. A pin wins. Otherwise the block is the
+/// latest stored header. An empty chain has no header yet.
+fn tagged_block(pin: Option<u64>, cursor: u64) -> Option<u64> {
+    if let Some(pin) = pin {
+        return Some(pin);
+    }
+    cursor.checked_sub(1)
+}
+
+async fn current_block<S: EntityStore>(
+    store: &S,
+    rpc: &Rpc,
+    pin: Option<u64>,
+) -> eyre::Result<u64> {
+    if let Some(block) = tagged_block(pin, store.header_cursor().await?) {
+        return Ok(block);
+    }
+    let rpc = rpc.clone();
+    tokio::task::spawn_blocking(move || rpc.block_number())
+        .await
+        .wrap_err("block number task")?
 }
 
 async fn sleep_or_stop(stop: &mut tokio::sync::watch::Receiver<bool>) {
@@ -737,4 +758,18 @@ fn contiguous(blocks: &[BlockRecord], from: u64) -> bool {
         .iter()
         .enumerate()
         .all(|(index, block)| block.number == from + index as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tagged_block;
+
+    #[test]
+    fn the_read_block_follows_the_header_cursor() {
+        assert_eq!(tagged_block(None, 0), None);
+        assert_eq!(tagged_block(None, 1), Some(0));
+        assert_eq!(tagged_block(None, 50), Some(49));
+        assert_eq!(tagged_block(Some(7), 50), Some(7));
+        assert_eq!(tagged_block(Some(7), 0), Some(7));
+    }
 }

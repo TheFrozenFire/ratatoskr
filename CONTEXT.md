@@ -507,11 +507,11 @@ The pipeline that appends headers.
 _Avoid_: discovery, state pipeline
 
 **Discovery**:
-The pipeline that writes pool identities. It reads enumeration roots from the seed file, walks lists and bloom hits, folds receipt bundles the corpus already holds, and then reads token symbol and decimals through the token lens.
+The pipeline that writes pool identities. It reads enumeration roots from the seed file, walks lists and bloom hits, folds receipt bundles the corpus already holds, and then reads token symbol and decimals through the token lens. It repeats as the header cursor advances, and it folds the corpus once in a process.
 _Avoid_: state pipeline, discovery hit, enumeration, census
 
 **State pipeline**:
-The pipeline that writes configuration, quoting state, tick books, and price curves for pool identities discovery has already stored.
+The pipeline that writes configuration, quoting state, tick books, and price curves for pool identities discovery has already stored. Each pass reads at the latest stored header.
 _Avoid_: discovery, chain state
 
 **Watch**:
