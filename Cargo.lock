@@ -3560,6 +3560,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "optimizer"
+version = "0.1.0"
+dependencies = [
+ "num-bigint",
+ "num-traits",
+ "routing",
+ "searcher",
+]
+
+[[package]]
 name = "parity-scale-codec"
 version = "3.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

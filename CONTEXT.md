@@ -308,6 +308,14 @@ _Avoid_: plan, basket
 The build of a route set from a trade. It reads stored pair conduits, walks endpoints that name few conduits, and applies the wrap between native ETH and wrapped ETH. It does not allocate the flow.
 _Avoid_: optimizer, state pipeline
 
+**Optimizer**:
+The allocation of input amounts across a route set. It bisects the basket count and books one net input on each shared edge. It does not read the catalog.
+_Avoid_: searcher, state pipeline
+
+**Plan**:
+The basket count a problem can fund, the input spent on each route, and the gas of the actions that receive input.
+_Avoid_: route set, quote
+
 **Acceptance bar**:
 The worst relative error a stored formula is allowed on its labels: ten basis points.
 _Avoid_: score, tolerance
