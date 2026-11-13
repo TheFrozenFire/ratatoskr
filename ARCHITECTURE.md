@@ -48,13 +48,21 @@ An estimate is read from the stored price curve. A local quote is read from the 
 
 ## Pair conduit
 
-A pair conduit is the quote of every direct action that spends one token and pays another. At input `x` its value is the most those actions can pay together:
+A pair conduit is the quote of every direct swap that spends one token and pays another. At input `x` its value is the most those swaps can pay together:
 
 ```
 F(x) = max { sum f_i(x_i) | x_i >= 0, sum x_i <= x }
 ```
 
-Each action is one direction of one pool. The stored row is the slope merge of those actions: the next input goes to the action whose marginal is currently highest. The two directions of one pool are members of opposite conduits. A path through a third token is a composition of pair conduits.
+Each swap is one direction of one pool. The stored row is the slope merge of those swaps: the next input goes to the swap whose marginal is currently highest. The two directions of one pool are members of opposite conduits. A path through a third token is a composition of pair conduits.
+
+## Action
+
+`crates/action` names one synchronous token transform. `action::Action` is that closed set: a custodial wrap, an exchange-rate wrap, a swap, a fungible liquidity mint or burn, a vault deposit or redeem, a rebasing supply or withdraw, a synchronous stake or unstake, a peg convert or a migration, an order fill, and a split or merge of principal and yield. Amounts, fees, and reserves are not fields. A factory pool stores its address in the low 20 bytes of the pool id. A singleton pool stores the 32-byte id.
+
+A pair conduit still stores only the swaps between two tokens. A mint, a vault deposit, and a fill are actions the conduit stage does not store. The pool key on a slope segment stays `routing::Action` in `crates/routing/src/lib.rs`. This crate does not read the catalog.
+
+A concentrated-liquidity position is an NFT and stays out of the set. A transfer, an approval, a bridge, a queued withdrawal, a flash loan, a zap, a borrow, and a donation stay out.
 
 ## Hub label
 

@@ -273,16 +273,36 @@ The output amount a stored price curve assigns to an input on one direction.
 _Avoid_: local quote, chain quote
 
 **Pair conduit**:
-The stored quote of every direct action that spends one token and pays another, as the slope merge of those actions.
-_Avoid_: route, hop
+The stored quote of every direct swap that spends one token and pays another, as the slope merge of those swaps.
+_Avoid_: route, hop, action
 
 **Slope segment**:
-A positive input width and a nonnegative output on one action. A zero-output segment is not stored.
+A positive input width and a nonnegative output on one pool direction. A zero-output segment is not stored.
 _Avoid_: cap, hop, tick
 
 **Meta-action**:
-A stored edge built from other actions. A pool direction is not a meta-action.
+A stored edge built from pool directions. A pool direction is not a meta-action.
 _Avoid_: route, pool direction, hop
+
+**Action**:
+A synchronous transform that spends tokens and pays tokens in one transaction. Amounts, fees, and reserves are not part of the action. The set is a custodial wrap, an exchange-rate wrap, a swap, a fungible liquidity mint or burn, a vault deposit or redeem, a rebasing supply or withdraw, a synchronous stake or unstake, a peg convert or a migration, an order fill, and a split or merge of principal and yield.
+_Avoid_: slope segment, pair conduit, route
+
+**Custodial wrap**:
+A one-for-one claim on a token the wrapper holds. Native ETH and wrapped ETH are this wrap.
+_Avoid_: vault deposit, liquidity mint
+
+**Liquidity mint**:
+Depositing a pool's tokens to receive a fungible share. The share is priced in the pool's ratio, from an unbalanced deposit, or from one token. Burning the share pays those tokens back. A concentrated-liquidity position NFT is not a share.
+_Avoid_: vault deposit, swap
+
+**Vault deposit**:
+Paying an ERC-4626 vault's asset, or a cToken's underlying, to receive shares in the same transaction. Redeeming the shares pays the asset back. A queued request is not a vault deposit.
+_Avoid_: liquidity mint, custodial wrap
+
+**Order fill**:
+A settlement contract paying tokens for one order. The order has no pool curve. A side may name several tokens.
+_Avoid_: swap, pair conduit
 
 **Basket**:
 A demand for output tokens in fixed weights. The count is the largest integer every output still supports. Holding `h` supports count `q` at weight `r` when `q * r <= h`.
@@ -556,6 +576,7 @@ _Avoid_: live catalog, quote record, grid
 - A new **Generation** drops the **Price curve**. The **Quote record** stays until the **Pool identity** is deleted. Dropping the price curve queues the **Pair conduit** again
 - A **Pair conduit** merges the direct actions for one ordered pair of tokens. A path through a third token is a composition of pair conduits
 - A **Slope segment** is one step of that merge. A **Meta-action** is the stored edge. A pool direction is a member of a meta-action
+- An **Action** spends tokens and pays tokens in one transaction. Amounts are not part of it. A **Pair conduit** stores the swaps between one ordered pair. A **Liquidity mint**, a **Vault deposit**, and an **Order fill** are actions a pair conduit does not store
 - A **Basket** counts the outputs a set of holdings can still pay. The count is the minimum of the last counts
 - **Depletion** is the reserve a quote uses. A **Trading set** quotes a direction from its original reserves. Same-direction tenders are one submission. The accrued-fee update is not that ledger
 - A **Hub label** is the directed quote from a token to one hub. It is not a stage. The choice among the direct quote, one shared hub, and two hubs is the maximum of the cleared cross keys
