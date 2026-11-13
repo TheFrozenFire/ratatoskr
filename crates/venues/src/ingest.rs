@@ -1,26 +1,23 @@
-//! Read the seed file into catalog notes and token records.
+//! Read the seed file into catalog notes and token links.
 //!
 //! A list root is probed for the view that answers. A log root's first block
 //! with code is found by binary search. The Curve address provider is asked
-//! for registries. Symbols and decimals are calls on the token.
+//! for registries. Symbol and decimals are a later token-lens pass.
 
 use std::collections::{HashMap, HashSet};
 
 use alloy_primitives::{keccak256, Address};
 use eyre::eyre;
 
-use crate::catalog::{Put, TokenRecord, CURVE};
+use crate::catalog::{Put, CURVE};
 use crate::lists::{self, ListJob};
 use crate::logs::{self, LogJob};
 use crate::rpc::Rpc;
 use crate::seeds::{self, Document};
 use crate::EntityStore;
 
-const TOKEN_BATCH: usize = 256;
 const CALL_GAS: u64 = 1_000_000;
 const NO_VIEW: u64 = u64::MAX;
-const SEL_DECIMALS: [u8; 4] = [0x31, 0x3c, 0xe5, 0x67];
-const SEL_SYMBOL: [u8; 4] = [0x95, 0xd8, 0x9b, 0x41];
 
 pub(crate) struct Plan {
     pub lists: Vec<ListJob>,
@@ -34,8 +31,7 @@ struct RegistryFound {
 }
 
 pub(crate) async fn plan<S: EntityStore>(store: &S, rpc: &Rpc) -> eyre::Result<Plan> {
-    write_wraps(store, rpc).await?;
-    write_token_batch(store, rpc).await?;
+    crate::tokens::write_links(store).await?;
     let doc = seeds::document();
     let mut shapes = HashMap::new();
     let mut deploys = HashMap::new();
@@ -132,53 +128,6 @@ fn assemble(
         ));
     }
     Plan { lists, logs }
-}
-
-async fn write_wraps<S: EntityStore>(store: &S, rpc: &Rpc) -> eyre::Result<()> {
-    let mut rows = Vec::new();
-    for wrap in &seeds::document().wraps {
-        rows.push(TokenRecord {
-            address: wrap.token,
-            symbol: String::new(),
-            decimals: None,
-            wraps: Some(wrap.wrapper),
-        });
-        let (symbol, decimals) = if wrap.wrapper == Address::ZERO {
-            (String::new(), None)
-        } else {
-            let rpc = rpc.clone();
-            let wrapper = wrap.wrapper;
-            block_on(move || read_erc20(&rpc, wrapper))
-                .await
-                .unwrap_or((String::new(), None))
-        };
-        rows.push(TokenRecord {
-            address: wrap.wrapper,
-            symbol,
-            decimals,
-            wraps: Some(wrap.token),
-        });
-    }
-    store.put_tokens(&rows).await
-}
-
-async fn write_token_batch<S: EntityStore>(store: &S, rpc: &Rpc) -> eyre::Result<()> {
-    let missing = store.missing_tokens(TOKEN_BATCH).await?;
-    let mut rows = Vec::new();
-    for token in missing {
-        if token == Address::ZERO {
-            continue;
-        }
-        let rpc = rpc.clone();
-        let (symbol, decimals) = block_on(move || read_erc20(&rpc, token)).await?;
-        rows.push(TokenRecord {
-            address: token,
-            symbol,
-            decimals,
-            wraps: None,
-        });
-    }
-    store.put_tokens(&rows).await
 }
 
 async fn shape_of<S: EntityStore>(
@@ -305,61 +254,6 @@ fn registry_selector() -> [u8; 4] {
     selector
 }
 
-fn read_erc20(rpc: &Rpc, token: Address) -> eyre::Result<(String, Option<u8>)> {
-    let decimals_call = rpc.eth_call(&SEL_DECIMALS, Some(token), CALL_GAS)?;
-    let symbol_call = rpc.eth_call(&SEL_SYMBOL, Some(token), CALL_GAS)?;
-    let decimals = if !decimals_call.reverted && decimals_call.bytes.len() == 32 {
-        Some(decimals_call.bytes[31])
-    } else {
-        None
-    };
-    let symbol = if symbol_call.reverted {
-        String::new()
-    } else {
-        decode_symbol(&symbol_call.bytes)
-    };
-    Ok((symbol, decimals))
-}
-
-fn decode_symbol(bytes: &[u8]) -> String {
-    if bytes.len() == 32 && (bytes[0] != 0 || bytes.iter().all(|byte| *byte == 0)) {
-        return text_of(bytes);
-    }
-    if bytes.len() >= 64 {
-        if let Some(offset) = word_usize(&bytes[..32]) {
-            if offset + 32 <= bytes.len() {
-                if let Some(len) = word_usize(&bytes[offset..offset + 32]) {
-                    let end = offset + 32 + len;
-                    if end <= bytes.len() {
-                        return text_of(&bytes[offset + 32..end]);
-                    }
-                }
-            }
-        }
-    }
-    if bytes.len() == 32 {
-        return text_of(bytes);
-    }
-    String::new()
-}
-
-fn text_of(bytes: &[u8]) -> String {
-    let end = bytes
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(bytes.len());
-    let text = String::from_utf8_lossy(&bytes[..end]);
-    text.trim().to_string()
-}
-
-fn word_usize(word: &[u8]) -> Option<usize> {
-    if word.len() < 32 || word[..24].iter().any(|byte| *byte != 0) {
-        return None;
-    }
-    let value = u64::from_be_bytes(word[24..32].try_into().ok()?);
-    usize::try_from(value).ok()
-}
-
 fn word(value: u64) -> [u8; 32] {
     let mut out = [0_u8; 32];
     out[24..].copy_from_slice(&value.to_be_bytes());
@@ -417,18 +311,6 @@ mod tests {
     fn the_registry_selector_is_get_address() {
         let hash = keccak256("get_address(uint256)");
         assert_eq!(registry_selector().as_slice(), &hash[..4]);
-    }
-
-    #[test]
-    fn a_symbol_is_a_string_or_a_word() {
-        let mut word = [0_u8; 32];
-        word[..4].copy_from_slice(b"WETH");
-        assert_eq!(decode_symbol(&word), "WETH");
-        let mut abi = vec![0_u8; 96];
-        abi[31] = 32;
-        abi[63] = 4;
-        abi[64..68].copy_from_slice(b"USDC");
-        assert_eq!(decode_symbol(&abi), "USDC");
     }
 
     #[test]

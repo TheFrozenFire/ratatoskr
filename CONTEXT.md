@@ -447,7 +447,7 @@ _Avoid_: sighting, fetch
 ### Services and work
 
 **Seed file**:
-`corpus/mainnet.yaml`. It names the wrapper, the enumeration roots, and quote contracts the chain does not point at. Ingest writes symbols, decimals, list shapes, and deploy blocks into the venue catalog, and asks the address provider for registries on each discovery start.
+`corpus/mainnet.yaml`. It names the wrapper, the enumeration roots, and quote contracts the chain does not point at. Ingest writes list shapes and deploy blocks into the venue catalog, asks the address provider for registries on each discovery start, and the token lens writes symbols and decimals onto token records.
 _Avoid_: corpus, receipt bundle
 
 **Venue catalog**:
@@ -490,6 +490,10 @@ _Avoid_: quoter, view
 The lens that reads a slice of a list.
 _Avoid_: creation event, detail lens
 
+**Token lens**:
+The lens that reads symbol and decimals for a batch of tokens.
+_Avoid_: detail lens, index lens
+
 **Detail lens**:
 The lens that reads a batch of pools for configuration and quoting state, including tick bitmaps and not tick words.
 _Avoid_: tick lens, quoter
@@ -503,7 +507,7 @@ The pipeline that appends headers.
 _Avoid_: discovery, state pipeline
 
 **Discovery**:
-The pipeline that writes pool identities. It reads enumeration roots from the seed file, walks lists and bloom hits, and folds receipt bundles the corpus already holds.
+The pipeline that writes pool identities. It reads enumeration roots from the seed file, walks lists and bloom hits, folds receipt bundles the corpus already holds, and then reads token symbol and decimals through the token lens.
 _Avoid_: state pipeline, discovery hit, enumeration, census
 
 **State pipeline**:

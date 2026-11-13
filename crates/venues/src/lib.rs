@@ -3,8 +3,10 @@
 //! A list view (`allPairs`, `allPools`, `pool_list`, `idxToPool`) is read by
 //! `eth_call`ing the creation code in `contracts/lens/IndexLens.sol` with no
 //! `to`. The constructor reverts the rows. Any client that runs a creation
-//! `eth_call` can serve it. Factories with no list are found in the local
-//! header blooms. Hits stay in the venue catalog. Receipts come from era1
+//! `eth_call` can serve it. After identities are written,
+//! `contracts/lens/TokenLens.sol` reads `symbol()` and `decimals()` for the
+//! wrapper and for the tokens those pools name. Factories with no list are
+//! found in the local header blooms. Hits stay in the venue catalog. Receipts come from era1
 //! before the merge and from the peer daemon after it, and those payloads
 //! stay in redb.
 
@@ -28,6 +30,7 @@ mod rpc;
 mod seeds;
 mod state;
 mod tick;
+mod tokens;
 mod wire;
 
 pub use wire::{
@@ -272,6 +275,37 @@ where
                     let note = format!("history: {err:#}");
                     tracing::error!(%note);
                     report.notes.push(note);
+                }
+            }
+        }
+    }
+    if job_wanted(&opts.only, "tokens") {
+        if hold_for_pause(&stop).await {
+            return Ok(report);
+        }
+        let rpc = match &calls {
+            Some(calls) => Some(calls.clone()),
+            None => match open_calls(opts).await {
+                Ok(rpc) => Some(rpc),
+                Err(err) => {
+                    let message = format!("tokens: {err:#}");
+                    tracing::error!(%message);
+                    report.list_errors.push(message);
+                    None
+                }
+            },
+        };
+        if let Some(rpc) = rpc {
+            match tokens::walk(&rpc, store, &stop).await {
+                Ok(wrote) => {
+                    let note = format!("tokens wrote {wrote}");
+                    tracing::info!(%note);
+                    report.notes.push(note);
+                }
+                Err(err) => {
+                    let message = format!("tokens: {err:#}");
+                    tracing::error!(%message);
+                    report.list_errors.push(message);
                 }
             }
         }

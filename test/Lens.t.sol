@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {DetailLens} from "lens/DetailLens.sol";
 import {IndexLens} from "lens/IndexLens.sol";
 import {TickLens} from "lens/TickLens.sol";
+import {TokenLens} from "lens/TokenLens.sol";
 
 /// Creation-code lenses revert their payload out of the constructor.
 contract LensTest is Test {
@@ -14,12 +15,14 @@ contract LensTest is Test {
         assertLt(type(IndexLens).creationCode.length, EIP3860_INITCODE);
         assertLt(type(DetailLens).creationCode.length, EIP3860_INITCODE);
         assertLt(type(TickLens).creationCode.length, EIP3860_INITCODE);
+        assertLt(type(TokenLens).creationCode.length, EIP3860_INITCODE);
     }
 
     function testCreationCodePushesTheLensMagic() public pure {
         assertTrue(_pushes(type(IndexLens).creationCode, keccak256("ratatoskr.lens.v1")));
         assertTrue(_pushes(type(DetailLens).creationCode, keccak256("ratatoskr.detail.v1")));
         assertTrue(_pushes(type(TickLens).creationCode, keccak256("ratatoskr.tick.v1")));
+        assertTrue(_pushes(type(TokenLens).creationCode, keccak256("ratatoskr.token.v1")));
     }
 
     function testIndexLensCountZeroRevertsTheMagic() public {
@@ -50,6 +53,39 @@ contract LensTest is Test {
         } catch (bytes memory data) {
             assertEq(_word(data, 0), keccak256("ratatoskr.detail.v1"));
             assertEq(_word(data, 1), bytes32(uint256(1)));
+        }
+    }
+
+    function testTokenLensReadsStringAndWordSymbols() public {
+        StringToken str = new StringToken();
+        WordToken word = new WordToken();
+        address[] memory tokens = new address[](3);
+        tokens[0] = address(str);
+        tokens[1] = address(word);
+        tokens[2] = address(0xBEEF);
+        try new TokenLens(tokens) {
+            fail();
+        } catch (bytes memory data) {
+            assertEq(_word(data, 0), keccak256("ratatoskr.token.v1"));
+            assertEq(_word(data, 1), bytes32(uint256(3)));
+            assertEq(_word(data, 2), bytes32(uint256(uint160(address(str)))));
+            assertEq(_word(data, 3), bytes32(uint256(6)));
+            assertEq(_word(data, 4), bytes32("USDC"));
+            assertEq(_word(data, 5), bytes32(uint256(uint160(address(word)))));
+            assertEq(_word(data, 6), bytes32(uint256(18)));
+            assertEq(_word(data, 7), bytes32("WETH"));
+            assertEq(_word(data, 8), bytes32(uint256(uint160(address(0xBEEF)))));
+            assertEq(_word(data, 9), bytes32(type(uint256).max));
+            assertEq(_word(data, 10), bytes32(0));
+        }
+    }
+
+    function testTokenLensRejectsTooManyTokens() public {
+        address[] memory tokens = new address[](257);
+        try new TokenLens(tokens) {
+            fail();
+        } catch (bytes memory data) {
+            assertEq(data.length, 0);
         }
     }
 
@@ -85,5 +121,25 @@ contract LensTest is Test {
         assembly {
             word := mload(add(add(data, 0x20), mul(index, 0x20)))
         }
+    }
+}
+
+contract StringToken {
+    function decimals() external pure returns (uint8) {
+        return 6;
+    }
+
+    function symbol() external pure returns (string memory) {
+        return "USDC";
+    }
+}
+
+contract WordToken {
+    function decimals() external pure returns (uint8) {
+        return 18;
+    }
+
+    function symbol() external pure returns (bytes32) {
+        return bytes32("WETH");
     }
 }
