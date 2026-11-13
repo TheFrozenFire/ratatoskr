@@ -425,7 +425,7 @@ One outbound connection to a peer.
 _Avoid_: sighting, dial
 
 **History window**:
-The earliest and latest block a peer has advertised or has served.
+The earliest and latest block a peer has advertised or has served. A block announcement after the handshake raises the latest block.
 _Avoid_: cursor, corpus
 
 **Published node**:

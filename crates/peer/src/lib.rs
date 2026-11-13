@@ -257,7 +257,7 @@ impl HistoryPeer for LocalPeer {
             .map(|slot| SessionInfo {
                 label: slot.label.clone(),
                 eth: u64::from(slot.eth),
-                head: slot.head,
+                head: slot_head(slot),
                 earliest: slot.earliest,
             })
             .collect())
@@ -293,9 +293,17 @@ struct Request {
 struct Slot {
     label: String,
     eth: u8,
-    head: Option<u64>,
+    /// Shared with the session. Announcements raise it after publish.
+    head: Arc<AtomicU64>,
     earliest: Option<u64>,
     jobs: mpsc::Sender<Job>,
+}
+
+fn slot_head(slot: &Slot) -> Option<u64> {
+    match slot.head.load(Ordering::Relaxed) {
+        0 => None,
+        number => Some(number),
+    }
 }
 
 struct Table {
@@ -761,7 +769,7 @@ async fn maintain(
                     let slot = Slot {
                         label: session.peer.to_string(),
                         eth,
-                        head: session.latest_block,
+                        head: Arc::clone(&session.head),
                         earliest: session.earliest_block,
                         jobs: job_tx,
                     };
@@ -1099,7 +1107,7 @@ async fn status_response(slots: &Mutex<Table>) -> Value {
             json!({
                 "peer": slot.label,
                 "eth": slot.eth,
-                "head": slot.head,
+                "head": slot_head(slot),
                 "earliest": slot.earliest,
             })
         })
@@ -1117,13 +1125,13 @@ async fn fetch_response(slots: &Mutex<Table>, block: Option<u64>) -> Value {
                 .iter()
                 .filter(|slot| !slot.jobs.is_closed())
                 .collect();
-            ranked.sort_by_key(|slot| std::cmp::Reverse(slot.head.unwrap_or(0)));
+            ranked.sort_by_key(|slot| std::cmp::Reverse(slot_head(slot).unwrap_or(0)));
             let Some(slot) = ranked.first() else {
                 return json!({"ok": false, "error": "no peers connected"});
             };
             let number = match block {
                 Some(number) => number,
-                None => match slot.head {
+                None => match slot_head(slot) {
                     Some(head) if head > 32 => head.saturating_sub(32),
                     Some(head) => {
                         return json!({"ok": false, "error": format!("peer head {head} is not a usable tip")});
@@ -1204,7 +1212,7 @@ async fn range_response(
                     None => 1,
                     Some(_) => 2,
                 };
-                (rank, std::cmp::Reverse(slot.head.unwrap_or(0)))
+                (rank, std::cmp::Reverse(slot_head(slot).unwrap_or(0)))
             });
             let mut receiver = None;
             for slot in ranked {
@@ -1401,7 +1409,7 @@ mod tests {
         slots.lock().await.slots.push(Slot {
             label: "fake".into(),
             eth: 69,
-            head: Some(80),
+            head: Arc::new(AtomicU64::new(80)),
             earliest: Some(0),
             jobs: tx,
         });
@@ -1448,7 +1456,7 @@ mod tests {
         slots.lock().await.slots.push(Slot {
             label: "fake".into(),
             eth: 69,
-            head: Some(80),
+            head: Arc::new(AtomicU64::new(80)),
             earliest: Some(0),
             jobs: tx,
         });
@@ -1583,7 +1591,7 @@ mod tests {
         let installed = table.lock().await.publish(Slot {
             label: "probe".into(),
             eth: 68,
-            head: Some(40),
+            head: Arc::new(AtomicU64::new(40)),
             earliest: None,
             jobs: tx,
         });

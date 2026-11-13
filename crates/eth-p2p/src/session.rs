@@ -103,7 +103,10 @@ pub struct OutboundSession {
     next_request_id: Arc<AtomicU64>,
     pub peer: NodeRecord,
     pub eth_version: EthVersion,
-    /// Peer head from the eth/69+ status message. Absent on eth/68.
+    /// Highest block the peer has advertised. The handshake sets it, and a
+    /// later announcement raises it. Zero means the peer named no block.
+    pub head: Arc<AtomicU64>,
+    /// Peer head from the eth status message at handshake. Absent on eth/68.
     pub latest_block: Option<u64>,
     /// First block the peer says it can serve. Absent on eth/68.
     pub earliest_block: Option<u64>,
@@ -213,12 +216,14 @@ impl OutboundSession {
             "outbound session ready"
         );
         let (commands, incoming) = mpsc::channel(16);
-        tokio::spawn(drive_session(stream, incoming));
+        let head = Arc::new(AtomicU64::new(their_status.latest_block.unwrap_or(0)));
+        tokio::spawn(drive_session(stream, incoming, Arc::clone(&head)));
         Ok(Self {
             commands,
             next_request_id: Arc::new(AtomicU64::new(1)),
             peer,
             eth_version,
+            head,
             latest_block: their_status.latest_block,
             earliest_block: their_status.earliest_block,
         })
@@ -249,7 +254,13 @@ impl OutboundSession {
 
 /// Own the socket. Match responses to request ids so two batches can overlap,
 /// and flush after every read so a queued pong actually leaves.
-async fn drive_session(mut stream: EthIo, mut commands: mpsc::Receiver<PendingRequest>) {
+///
+/// `head` is the block this peer has advertised. Announcements raise it.
+async fn drive_session(
+    mut stream: EthIo,
+    mut commands: mpsc::Receiver<PendingRequest>,
+    head: Arc<AtomicU64>,
+) {
     let mut waiters: HashMap<u64, Waiter> = HashMap::new();
     loop {
         sweep_waiters(&mut waiters);
@@ -267,6 +278,9 @@ async fn drive_session(mut stream: EthIo, mut commands: mpsc::Receiver<PendingRe
                         return;
                     }
                 };
+                if let Some(number) = announced_block(&message) {
+                    raise_head(&head, number);
+                }
                 if let Some(id) = response_id(&message) {
                     if let Some(waiter) = waiters.remove(&id) {
                         let _ = waiter.reply.send(Ok(message));
@@ -450,6 +464,29 @@ fn mainnet_status(version: EthVersion) -> UnifiedStatus {
     }
 }
 
+/// Block number carried by an unsolicited announcement.
+fn announced_block(message: &EthMessage) -> Option<u64> {
+    match message {
+        EthMessage::NewBlockHashes(hashes) => hashes.latest().map(|block| block.number),
+        EthMessage::NewBlock(payload) => Some(payload.block.header.number),
+        EthMessage::BlockRangeUpdate(update) => Some(update.latest),
+        _ => None,
+    }
+}
+
+fn raise_head(head: &AtomicU64, number: u64) {
+    let mut current = head.load(Ordering::Relaxed);
+    while number > current {
+        match head.compare_exchange_weak(current, number, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => {
+                info!(number, "peer head advanced");
+                return;
+            }
+            Err(observed) => current = observed,
+        }
+    }
+}
+
 fn request_id_of(message: &EthMessage) -> Option<u64> {
     match message {
         EthMessage::GetBlockHeaders(pair) => Some(pair.request_id),
@@ -505,6 +542,47 @@ mod tests {
             Some(EthVersion::Eth72)
         );
         assert_eq!(shared_eth_version(&hello(&[67])), None);
+    }
+
+    #[test]
+    fn announcements_raise_the_head_and_ignore_an_older_range() {
+        use alloy_primitives::B256;
+        use reth_eth_wire::{BlockHashNumber, BlockRangeUpdate, NewBlockHashes};
+
+        let head = AtomicU64::new(10);
+        let hashes = EthMessage::NewBlockHashes(NewBlockHashes(vec![
+            BlockHashNumber {
+                hash: B256::ZERO,
+                number: 11,
+            },
+            BlockHashNumber {
+                hash: B256::ZERO,
+                number: 12,
+            },
+        ]));
+        raise_head(&head, announced_block(&hashes).unwrap());
+        assert_eq!(head.load(Ordering::Relaxed), 12);
+
+        let older = EthMessage::BlockRangeUpdate(BlockRangeUpdate {
+            earliest: 1,
+            latest: 9,
+            latest_hash: B256::ZERO,
+        });
+        raise_head(&head, announced_block(&older).unwrap());
+        assert_eq!(head.load(Ordering::Relaxed), 12);
+
+        let newer = EthMessage::BlockRangeUpdate(BlockRangeUpdate {
+            earliest: 1,
+            latest: 40,
+            latest_hash: B256::ZERO,
+        });
+        raise_head(&head, announced_block(&newer).unwrap());
+        assert_eq!(head.load(Ordering::Relaxed), 40);
+
+        let block = EthMessage::NewBlock(Box::default());
+        assert_eq!(announced_block(&block), Some(0));
+        raise_head(&head, 0);
+        assert_eq!(head.load(Ordering::Relaxed), 40);
     }
 
     #[test]

@@ -56,13 +56,39 @@ where
                 Ok(sessions) => max_head(&sessions),
                 Err(_) => None,
             };
-            let Some(head) = head else {
+            let Some(mut head) = head else {
                 warn!(target: "headers", "waiting for a peer head");
                 if wait_or_stop(&mut stop, 2).await {
                     return Ok(());
                 }
                 continue;
             };
+            // Announcements from eth/69+ arrive about once per 32 blocks.
+            // A header that far ahead of the cursor means the cursor is safe.
+            if next > head.saturating_sub(TIP_LAG) {
+                let probe = next.saturating_add(TIP_LAG);
+                match self.peer.headers(probe, CHUNK).await {
+                    Ok(records) => {
+                        if let Some(number) = records.iter().map(|record| record.number).max() {
+                            if number > head {
+                                info!(
+                                    target: "headers",
+                                    head,
+                                    observed = number,
+                                    "peer serves a later header"
+                                );
+                                head = number;
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        let message = format!("{err:#}");
+                        if !message.contains("no header") {
+                            warn!(target: "headers", next, %err, "header probe failed");
+                        }
+                    }
+                }
+            }
             let tip = head.saturating_sub(TIP_LAG);
             if next > tip {
                 info!(target: "headers", next, head, "caught up");
@@ -437,5 +463,61 @@ mod tests {
         drop(sink);
         let store = LocalStore::open_headers(&path).unwrap();
         assert_eq!(store.header_cursor().await.unwrap(), 0);
+    }
+
+    /// The status head stays at the handshake. Blocks the peer can serve past
+    /// that head still move the cursor, and the lag still holds the tip back.
+    #[tokio::test(start_paused = true)]
+    async fn a_stale_advertised_head_still_follows_served_headers() {
+        let dir = TempDir::new();
+        let path = dir.0.join("headers.redb");
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let peer = LimitedPeer {
+            head: 64,
+            serve_until: 100,
+            calls: Arc::clone(&calls),
+            stop: stop_tx,
+        };
+        let store = LocalStore::open_headers(&path).unwrap();
+        let source = HeaderSource::new(peer, store.clone());
+        let mut sink = StoreSink::new(store.clone());
+        source.run(&mut sink, stop_rx).await.unwrap();
+        assert_eq!(store.header_cursor().await.unwrap(), 69);
+        assert_eq!(calls.lock().unwrap().as_slice(), &[0, 65, 33, 101]);
+    }
+
+    #[derive(Clone)]
+    struct LimitedPeer {
+        head: u64,
+        serve_until: u64,
+        calls: Arc<Mutex<Vec<u64>>>,
+        stop: watch::Sender<bool>,
+    }
+
+    impl HistoryPeer for LimitedPeer {
+        async fn status(&self) -> eyre::Result<Vec<SessionInfo>> {
+            Ok(vec![SessionInfo {
+                label: "limited".to_string(),
+                eth: 69,
+                head: Some(self.head),
+                earliest: Some(0),
+            }])
+        }
+
+        async fn headers(&self, start: u64, count: u64) -> eyre::Result<Vec<HeaderRecord>> {
+            self.calls.lock().unwrap().push(start);
+            if start > self.serve_until {
+                let _ = self.stop.send(true);
+                return Err(eyre::eyre!("peer has no header for block {start}"));
+            }
+            let available = self.serve_until - start + 1;
+            let count = count.min(available);
+            Ok((0..count).map(|offset| linked(start + offset)).collect())
+        }
+
+        async fn chunk(&self, _start: u64, _count: u64) -> eyre::Result<Vec<BlockRecord>> {
+            Err(eyre::eyre!("chunk is not used"))
+        }
     }
 }
