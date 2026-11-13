@@ -6,6 +6,7 @@
 use alloy_primitives::{Address, B256};
 use model::{BlockRecord, HeaderRecord};
 
+use crate::catalog::TokenRecord;
 use crate::conduit::{ConduitFail, ConduitJob};
 use crate::state::{
     CurveRecord, ImmutablePut, ImmutableRow, MutableStored, MutableWrite, PoolState, QuoteRecord,
@@ -103,5 +104,29 @@ pub trait EntityStore: Send + Sync {
     /// Merge one ordered pair. The bool asks for another pass.
     async fn build_conduit(&self, _token_in: Address, _token_out: Address) -> eyre::Result<bool> {
         Ok(false)
+    }
+
+    async fn put_tokens(&self, _rows: &[TokenRecord]) -> eyre::Result<()> {
+        Err(eyre::eyre!("token records are not open"))
+    }
+
+    async fn tokens(&self) -> eyre::Result<Vec<TokenRecord>> {
+        Err(eyre::eyre!("token records are not open"))
+    }
+
+    async fn token(&self, _address: Address) -> eyre::Result<Option<TokenRecord>> {
+        Err(eyre::eyre!("token records are not open"))
+    }
+
+    async fn missing_tokens(&self, _limit: usize) -> eyre::Result<Vec<Address>> {
+        Err(eyre::eyre!("token records are not open"))
+    }
+
+    async fn note(&self, _key: &str) -> eyre::Result<Option<u64>> {
+        Err(eyre::eyre!("discovery notes are not open"))
+    }
+
+    async fn put_note(&self, _key: &str, _value: u64) -> eyre::Result<()> {
+        Err(eyre::eyre!("discovery notes are not open"))
     }
 }

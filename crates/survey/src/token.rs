@@ -1,18 +1,11 @@
-use std::str::FromStr;
-
 use alloy_primitives::Address;
 use num_bigint::BigUint;
 use num_traits::Pow;
 use searcher::{Token, NATIVE};
-
-const WETH: &str = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
-const USDC: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
-const USDT: &str = "0xdAC17F958D2ee523a2206206994597C13D831ec7";
-const DAI: &str = "0x6B175474E89094C44Da98b954EedeAC495271d0F";
-const WBTC: &str = "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599";
+use venues::TokenRecord;
 
 pub(crate) struct Known {
-    pub(crate) name: &'static str,
+    pub(crate) name: String,
     pub(crate) token: Token,
 }
 
@@ -22,39 +15,37 @@ pub(crate) fn token_of(address: Address) -> Token {
     Token(raw)
 }
 
-pub(crate) fn known_tokens() -> Vec<Known> {
-    vec![
-        Known {
-            name: "ETH",
-            token: NATIVE,
-        },
-        named("WETH", WETH),
-        named("USDC", USDC),
-        named("USDT", USDT),
-        named("DAI", DAI),
-        named("WBTC", WBTC),
-    ]
-}
-
-pub(crate) fn named(name: &'static str, hex_addr: &str) -> Known {
-    let address = Address::from_str(hex_addr).expect("address");
-    Known {
-        name,
-        token: token_of(address),
-    }
-}
-
-pub(crate) fn known_named(known: &[Known], name: &str) -> Token {
-    known
+/// The non-zero token whose record points at native ETH.
+pub(crate) fn wrapper(records: &[TokenRecord]) -> Option<Token> {
+    records
         .iter()
-        .find(|item| item.name == name)
-        .map(|item| item.token)
-        .expect(name)
+        .find(|row| row.address != Address::ZERO && row.wraps == Some(Address::ZERO))
+        .map(|row| token_of(row.address))
+}
+
+pub(crate) fn labels(records: &[TokenRecord]) -> Vec<Known> {
+    let mut out = Vec::new();
+    if records.iter().any(|row| row.address == Address::ZERO) {
+        out.push(Known {
+            name: "ETH".into(),
+            token: NATIVE,
+        });
+    }
+    for row in records {
+        if row.symbol.is_empty() || row.address == Address::ZERO {
+            continue;
+        }
+        out.push(Known {
+            name: row.symbol.clone(),
+            token: token_of(row.address),
+        });
+    }
+    out
 }
 
 pub(crate) fn label(token: Token, known: &[Known]) -> String {
     if let Some(item) = known.iter().find(|item| item.token == token) {
-        return item.name.into();
+        return item.name.clone();
     }
     hex(token)
 }

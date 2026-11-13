@@ -4,7 +4,7 @@
 //! `PoolCreated` with Uniswap. Uniswap v4, Balancer, and Metric are accepted
 //! only from their canonical contract.
 
-use alloy_primitives::{b256, keccak256, Address, B256};
+use alloy_primitives::{keccak256, Address, B256};
 use discover::univ3_pool;
 use model::NormalizedLog;
 use std::sync::OnceLock;
@@ -14,29 +14,34 @@ use crate::catalog::{
     UNI_V3, UNI_V4, V2_FORK, V3_FORK,
 };
 
-pub const BAL_V2_POOL: B256 =
-    b256!("3c13bc30b8e878c53fd2a36b679409c073afd75950be43d8858768e956fbc20e");
-pub const BAL_V2_TOKENS: B256 =
-    b256!("f5847d3f2197b16cdcd2098ec95d0905cd1abdaf415f07bb7cef2bba8ac5dec4");
-pub const BAL_V3_POOL: B256 =
-    b256!("bc1561eeab9f40962e2fb827a7ff9c7cdb47a9d7c84caeefa4ed90e043842dad");
-/// Observed Metric creation topic. topic1 is the pool, topic2 and topic3 the tokens.
-/// The signature string was not recovered.
-pub const METRIC_CREATED: B256 =
-    b256!("4b36a0ddce54edb36597ee7d496df06c53fe875aba9d7257534a38d5177899aa");
+fn bal_v2_pool() -> B256 {
+    seed_topic("balancer-v2", 0)
+}
+
+fn bal_v2_tokens() -> B256 {
+    seed_topic("balancer-v2", 1)
+}
+
+fn bal_v3_pool() -> B256 {
+    seed_topic("balancer-v3", 0)
+}
+
+fn metric_created() -> B256 {
+    seed_topic("metric", 0)
+}
+
+fn seed_topic(name: &str, index: usize) -> B256 {
+    crate::seeds::document().by_name(name).topics[index]
+}
 
 struct Topics {
     pair: B256,
-    pool: B256,
-    v4: B256,
 }
 
 fn topics() -> &'static Topics {
     static TOPICS: OnceLock<Topics> = OnceLock::new();
     TOPICS.get_or_init(|| Topics {
         pair: keccak256("PairCreated(address,address,address,uint256)"),
-        pool: keccak256("PoolCreated(address,address,uint24,int24,address)"),
-        v4: keccak256("Initialize(bytes32,address,address,uint24,int24,address,uint160,int24)"),
     })
 }
 
@@ -47,36 +52,42 @@ pub struct Known {
     pub uni_v3: Address,
     pub pancake_v3: Address,
     pub sushi_v3: Address,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub aero: Address,
     pub pool_manager: Address,
     pub bal_v2: Address,
     pub bal_v3: Address,
     pub metric: Address,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub raw_v3_a: Address,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub raw_v3_b: Address,
 }
 
 pub fn known() -> &'static Known {
     static KNOWN: OnceLock<Known> = OnceLock::new();
-    KNOWN.get_or_init(|| Known {
-        uni_v2: parse("0x5c69bee701ef814a2b6a3edd4b1652cb9cc5aa6f"),
-        sushi_v2: parse("0xc0aee478e3658e2610c5f7a4a2e1777ce9e4f2ac"),
-        pancake_v2: parse("0x1097053fd2ea711dad45caccc45eff7548fcb362"),
-        uni_v3: parse("0x1f98431c8ad98523631ae4a59f267346ea31f984"),
-        pancake_v3: parse("0x0bfbcf9fa4f9c56b0f40a671ad40e0805a091865"),
-        sushi_v3: parse("0xbaceb8ec6b9355dfc0269c18bac9d6e2bdc29c4f"),
-        aero: parse("0xf4fd2e6c5b60c5b365cd1b96dd6245e6d60414c2"),
-        pool_manager: parse("0x000000000004444c5dc75cb358380d2e3de08a90"),
-        bal_v2: parse("0xba12222222228d8ba445958a75a0704d566bf2c8"),
-        bal_v3: parse("0xba1333333333a1ba1108e8412f11850a5c319ba9"),
-        metric: parse("0x2a53833cc95548cf52c7b159110e22d3a9018f32"),
-        raw_v3_a: parse("0x88695a239a0a3f70729c4cb30fd32f9b4978513d"),
-        raw_v3_b: parse("0x956920f97690bdd76a6a10c7ba931dec14f61169"),
+    KNOWN.get_or_init(|| {
+        let doc = crate::seeds::document();
+        let mut forks = doc
+            .roots
+            .iter()
+            .filter(|root| root.kind == V3_FORK && !root.registries);
+        Known {
+            uni_v2: doc.by_name("uni-v2").address,
+            sushi_v2: doc.by_name("sushi-v2").address,
+            pancake_v2: doc.by_name("pancake-v2").address,
+            uni_v3: doc.by_name("uni-v3").address,
+            pancake_v3: doc.by_name("pancake-v3").address,
+            sushi_v3: doc.by_name("sushi-v3").address,
+            aero: doc.by_name("aero").address,
+            pool_manager: doc.by_name("uni-v4").address,
+            bal_v2: doc.by_name("balancer-v2").address,
+            bal_v3: doc.by_name("balancer-v3").address,
+            metric: doc.by_name("metric").address,
+            raw_v3_a: forks.next().expect("v3 fork").address,
+            raw_v3_b: forks.next().expect("v3 fork").address,
+        }
     })
-}
-
-fn parse(text: &str) -> Address {
-    text.parse().unwrap_or_else(|err| panic!("{text}: {err}"))
 }
 
 pub fn v2_kind(factory: Address) -> u8 {
@@ -110,11 +121,11 @@ pub fn topic_pair() -> B256 {
 }
 
 pub fn topic_pool() -> B256 {
-    topics().pool
+    seed_topic("uni-v3", 0)
 }
 
 pub fn topic_v4() -> B256 {
-    topics().v4
+    seed_topic("uni-v4", 0)
 }
 
 pub fn rows_from_log(log: &NormalizedLog) -> Vec<VenueRow> {
@@ -122,26 +133,25 @@ pub fn rows_from_log(log: &NormalizedLog) -> Vec<VenueRow> {
         return Vec::new();
     };
     let known = known();
-    let topics = topics();
     if topic0 == topic_pair() {
         return pair_row(log).into_iter().collect();
     }
-    if topic0 == topics.pool {
+    if topic0 == topic_pool() {
         return pool_row(log).into_iter().collect();
     }
-    if topic0 == topics.v4 && log.address == known.pool_manager {
+    if topic0 == topic_v4() && log.address == known.pool_manager {
         return v4_row(log).into_iter().collect();
     }
-    if log.address == known.bal_v2 && topic0 == BAL_V2_POOL {
-        return bal_v2_pool(log).into_iter().collect();
+    if log.address == known.bal_v2 && topic0 == bal_v2_pool() {
+        return bal_v2_pool_row(log).into_iter().collect();
     }
-    if log.address == known.bal_v2 && topic0 == BAL_V2_TOKENS {
-        return bal_v2_tokens(log).into_iter().collect();
+    if log.address == known.bal_v2 && topic0 == bal_v2_tokens() {
+        return bal_v2_tokens_row(log).into_iter().collect();
     }
-    if log.address == known.bal_v3 && topic0 == BAL_V3_POOL {
+    if log.address == known.bal_v3 && topic0 == bal_v3_pool() {
         return bal_v3_row(log).into_iter().collect();
     }
-    if log.address == known.metric && topic0 == METRIC_CREATED {
+    if log.address == known.metric && topic0 == metric_created() {
         return metric_row(log).into_iter().collect();
     }
     Vec::new()
@@ -212,7 +222,7 @@ fn v4_row(log: &NormalizedLog) -> Option<VenueRow> {
     ))
 }
 
-fn bal_v2_pool(log: &NormalizedLog) -> Option<VenueRow> {
+fn bal_v2_pool_row(log: &NormalizedLog) -> Option<VenueRow> {
     if log.topics.len() < 3 {
         return None;
     }
@@ -231,7 +241,7 @@ fn bal_v2_pool(log: &NormalizedLog) -> Option<VenueRow> {
     ))
 }
 
-fn bal_v2_tokens(log: &NormalizedLog) -> Option<VenueRow> {
+fn bal_v2_tokens_row(log: &NormalizedLog) -> Option<VenueRow> {
     if log.topics.len() < 2 {
         return None;
     }
@@ -450,7 +460,7 @@ mod tests {
         let token_b = address("4444444444444444444444444444444444444444");
         let registered = bare(
             known().bal_v2,
-            vec![BAL_V2_POOL, id, addr_word(pool).into()],
+            vec![bal_v2_pool(), id, addr_word(pool).into()],
             be_word(1).to_vec(),
         );
         let row = rows_from_log(&registered);
@@ -467,7 +477,7 @@ mod tests {
         data.extend_from_slice(&addr_word(token_b));
         data.extend_from_slice(&be_word(2));
         data.extend_from_slice(&[0u8; 64]);
-        let tokens = bare(known().bal_v2, vec![BAL_V2_TOKENS, id], data);
+        let tokens = bare(known().bal_v2, vec![bal_v2_tokens(), id], data);
         let row = rows_from_log(&tokens);
         assert_eq!(row[0].tokens, vec![token_a, token_b]);
         assert_eq!(row[0].id, id);
@@ -489,7 +499,7 @@ mod tests {
         let log = bare(
             known().bal_v3,
             vec![
-                BAL_V3_POOL,
+                bal_v3_pool(),
                 addr_word(pool).into(),
                 addr_word(factory).into(),
             ],
@@ -542,7 +552,7 @@ mod tests {
         let log = bare(
             known().metric,
             vec![
-                METRIC_CREATED,
+                metric_created(),
                 addr_word(pool).into(),
                 addr_word(token0).into(),
                 addr_word(token1).into(),
@@ -600,6 +610,11 @@ mod tests {
         log.tx_index = 4;
         log.log_index = 8;
         let row = rows_from_log(&log);
+        assert_eq!(
+            known().aero,
+            crate::seeds::document().by_name("aero").address
+        );
+        assert_ne!(known().raw_v3_a, known().raw_v3_b);
         assert_eq!(row[0].kind, V3_FORK);
         assert_eq!(row[0].fee, Some(3000));
         assert_eq!(row[0].tick_spacing, Some(60));

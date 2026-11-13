@@ -1,0 +1,105 @@
+# Seeds the chain does not point at. A list root is probed for its view.
+# A log root carries the event it emits. Symbols, decimals, and pool rows
+# are read from the contracts and stored in the catalog.
+
+wraps:
+  - token: "0x0000000000000000000000000000000000000000"
+    wrapper: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+
+multicall: "0xcA11bde05977b3631167028862bE2a173976CA11"
+
+roots:
+  - name: uni-v2
+    kind: uniswap_v2
+    address: "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f"
+    quote: "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"
+  - name: sushi-v2
+    kind: sushi_v2
+    address: "0xC0AEe478e3658e2610c5F7A4A2E1777cE9e4f2Ac"
+    quote: "0xd9e1cE17f2641f24aE83637ab66a2cca9C378B9F"
+  - name: pancake-v2
+    kind: pancake_v2
+    address: "0x1097053Fd2ea711dad45caCcc45EfF7548fCB362"
+    quote: "0xEfF92A263d31888d860bD50809A8D171709b7b1c"
+  - name: "v2:0xd34971bab6e5e356fd250715f5de0492bb070452"
+    kind: v2_fork
+    address: "0xd34971BaB6E5E356fd250715F5dE0492BB070452"
+    quote: "0xb9960d9bca016e9748be75dd52f02188b9d0829f"
+  - name: "v2:0x818339b4e536e707f14980219037c5046b049dd4"
+    kind: v2_fork
+    address: "0x818339b4E536E707f14980219037c5046b049dD4"
+  - name: "v2:0x7de800467afce442019884f51a4a1b9143a34fac"
+    kind: v2_fork
+    address: "0x7de800467aFcE442019884f51A4A1B9143a34fAc"
+  - name: aero
+    kind: aero
+    address: "0xf4fd2e6c5b60c5b365cd1b96dd6245e6d60414c2"
+    quote: "0x1ddfec5058180c207f55bb77d95acdd0d8227868"
+  - name: metric
+    kind: metric
+    address: "0x2a53833cc95548cf52c7b159110e22D3a9018f32"
+    list: true
+    topic: "0x4b36a0ddce54edb36597ee7d496df06c53fe875aba9d7257534a38d5177899aa"
+    quote: "0x3B9ea79f482094323d06064E637a7F4528560fcb"
+  - name: curve-ng
+    kind: curve
+    address: "0x6A8cbed756804B16E05E741eDaBd5cB544AE21bf"
+  - name: curve-two
+    kind: curve
+    address: "0x98EE851a00abee0d95d08cf4ca2bdce32aeaaf7f"
+  - name: curve-tri
+    kind: curve
+    address: "0x0c0e5f2ff0ff18a3be9b835635039256dc4b4963"
+  - name: curve-crypto
+    kind: curve
+    address: "0xF18056Bbd320E96A48e3Fbf8bc061322531aac99"
+  - name: curve-meta
+    kind: curve
+    address: "0xB9fC157394Af804a3578134A6585C0dc9cc990d4"
+  - name: curve-crvusd
+    kind: curve
+    address: "0x4F8846Ae9380B90d2E71D5e3D042dff3E7ebb40d"
+  - name: curve-provider
+    kind: curve
+    address: "0x0000000022D53366457F9d5E68Ec105046FC4383"
+    registries: true
+  - name: uni-v3
+    kind: uniswap_v3
+    address: "0x1F98431c8aD98523631AE4a59f267346ea31F984"
+    event: "PoolCreated(address,address,uint24,int24,address)"
+    quote: "0x61fFE014bA17989E743c5F6cB21bF9697530B21e"
+  - name: pancake-v3
+    kind: pancake_v3
+    address: "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865"
+    event: "PoolCreated(address,address,uint24,int24,address)"
+    quote: "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997"
+  - name: sushi-v3
+    kind: sushi_v3
+    address: "0xbACEB8eC6b9355Dfc0269C18bac9d6E2Bdc29C4F"
+    event: "PoolCreated(address,address,uint24,int24,address)"
+    quote: "0x64e8802FE490fa7cc61d3463958199161Bb608A7"
+  - name: "v3:0x88695a239a0a3f70729c4cb30fd32f9b4978513d"
+    kind: v3_fork
+    address: "0x88695A239A0A3F70729C4CB30fd32F9b4978513D"
+    event: "PoolCreated(address,address,uint24,int24,address)"
+  - name: "v3:0x956920f97690bdd76a6a10c7ba931dec14f61169"
+    kind: v3_fork
+    address: "0x956920F97690Bdd76a6a10C7ba931DEC14f61169"
+    event: "PoolCreated(address,address,uint24,int24,address)"
+    quote: "0xE043af034c0c920994f8e3eE9aFa1173Fe8403DB"
+  - name: uni-v4
+    kind: uniswap_v4
+    address: "0x000000000004444c5dc75cB358380D2e3dE08A90"
+    event: "Initialize(bytes32,address,address,uint24,int24,address,uint160,int24)"
+    quote: "0x99bd42B2B22e531f283b7F8a86dFf631EB16A9D1"
+  - name: balancer-v2
+    kind: balancer_v2
+    address: "0xBA12222222228d8Ba445958a75a0704d566BF2C8"
+    topics:
+      - "0x3c13bc30b8e878c53fd2a36b679409c073afd75950be43d8858768e956fbc20e"
+      - "0xf5847d3f2197b16cdcd2098ec95d0905cd1abdaf415f07bb7cef2bba8ac5dec4"
+  - name: balancer-v3
+    kind: balancer_v3
+    address: "0xbA1333333333a1BA1108E8412f11850A5C319bA9"
+    topic: "0xbc1561eeab9f40962e2fb827a7ff9c7cdb47a9d7c84caeefa4ed90e043842dad"
+    quote: "0xae563e3f8219521950555f5962419c8919758ea2"

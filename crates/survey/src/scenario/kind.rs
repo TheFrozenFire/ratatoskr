@@ -242,7 +242,12 @@ pub(crate) fn split_scenarios(
     out
 }
 
-pub(crate) fn bundle_scenarios(picks: &Picks, hubs: &[Token], wrapped: Token) -> Vec<Scenario> {
+pub(crate) fn bundle_scenarios(
+    picks: &Picks,
+    known: &[Known],
+    hubs: &[Token],
+    wrapped: Token,
+) -> Vec<Scenario> {
     let mut out = Vec::new();
     if picks.into_weth.len() >= 2 {
         let inputs = picks
@@ -261,10 +266,11 @@ pub(crate) fn bundle_scenarios(picks: &Picks, hubs: &[Token], wrapped: Token) ->
             .map(|(kind, _)| kind_name(*kind))
             .collect::<Vec<_>>()
             .join(",");
+        let wrapped_name = label(wrapped, known);
         out.push(Scenario {
-            name: "kinds-into-weth".into(),
+            name: "kinds-into-wrapped".into(),
             detail: format!(
-                "{} pure conduits into WETH, one input each, amount 10^6 ({names})",
+                "{} pure conduits into {wrapped_name}, one input each, amount 10^6 ({names})",
                 picks.into_weth.len()
             ),
             trade: defined(inputs, vec![wrapped], wrapped),
@@ -302,10 +308,11 @@ pub(crate) fn bundle_scenarios(picks: &Picks, hubs: &[Token], wrapped: Token) ->
             .map(|(kind, _)| kind_name(*kind))
             .collect::<Vec<_>>()
             .join(",");
+        let wrapped_name = label(wrapped, known);
         out.push(Scenario {
-            name: "kinds-out-of-weth".into(),
+            name: "kinds-out-of-wrapped".into(),
             detail: format!(
-                "WETH in, {} pure conduit outputs ({names})",
+                "{wrapped_name} in, {} pure conduit outputs ({names})",
                 picks.out_of_weth.len()
             ),
             trade: defined(vec![(wrapped, amount(18))], outputs, wrapped),

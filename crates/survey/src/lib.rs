@@ -31,10 +31,12 @@ pub(crate) const HUB_LIMITS: [usize; 4] = [8, 16, 32, 64];
 
 /// Open the entity catalog at `data_dir` and print the search.
 pub fn run(data_dir: &Path) -> eyre::Result<()> {
-    let known = token::known_tokens();
-    let wrapped = token::known_named(&known, "WETH");
     eprintln!("opening {}", data_dir.display());
     let catalog = Catalog::open(data_dir).wrap_err("open catalog")?;
+    let records = catalog.tokens().wrap_err("tokens")?;
+    let wrapped =
+        token::wrapper(&records).ok_or_else(|| eyre::eyre!("the catalog has no wrapper token"))?;
+    let known = token::labels(&records);
     eprintln!("scanning conduits");
     let survey = scan::survey(&catalog)?;
     eprintln!(
@@ -139,7 +141,9 @@ pub fn run(data_dir: &Path) -> eyre::Result<()> {
                     &scenario.hubs,
                     &set,
                     &BTreeMap::new(),
-                    reader::catalog_swap,
+                    |token_in, token_out, key| {
+                        reader::catalog_swap(&catalog, token_in, token_out, key)
+                    },
                 ) {
                     checks
                         .failures

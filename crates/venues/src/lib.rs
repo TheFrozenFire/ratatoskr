@@ -19,11 +19,13 @@ mod fit_math;
 mod fit_select;
 mod history;
 mod import;
+mod ingest;
 mod lens;
 mod lists;
 mod logs;
 mod metrics;
 mod rpc;
+mod seeds;
 mod state;
 mod tick;
 mod wire;
@@ -36,8 +38,8 @@ pub use wire::{
 pub use catalog::{
     append_dropped_ids, append_fill_ids, decode_body, decode_row, encode_body, encode_row,
     fill_identities, kind_name, read_fill_ids, sample_identities, write_fill_ids, Catalog,
-    FillReport, Put, ReceiptBody, SampleReport, VenueRow, BALANCER_V2, BALANCER_V3, PANCAKE_V3,
-    SUSHI_V3, UNI_V3, UNI_V4, V3_FORK,
+    FillReport, Put, ReceiptBody, SampleReport, TokenRecord, VenueRow, BALANCER_V2, BALANCER_V3,
+    PANCAKE_V3, SUSHI_V3, UNI_V3, UNI_V4, V3_FORK,
 };
 pub use conduit::{ConduitFail, ConduitJob};
 pub use detail::{load_details, DetailQuery, PoolDetail, Quote};
@@ -48,6 +50,7 @@ pub use history::BloomScan;
 pub use logs::Walk;
 pub use metrics::{prometheus_text, publish_summary, status_json};
 pub use rpc::Rpc;
+pub use seeds::root_address;
 pub use state::{
     estimate, CurveRecord, ImmutablePut, ImmutableRow, MutableStored, MutableWrite, PoolState,
     QuoteRecord, StateSummary, TickPage, WatchHit, WorkFail, WorkJob,
@@ -155,7 +158,11 @@ pub fn job_wanted(only: &Option<String>, name: &str) -> bool {
 }
 
 pub fn history_selected(only: &Option<String>) -> bool {
-    logs::jobs().iter().any(|job| job_wanted(only, &job.name))
+    seeds::document()
+        .roots
+        .iter()
+        .filter(|root| root.logs())
+        .any(|root| job_wanted(only, &format!("logs:{}", root.name)))
 }
 
 pub async fn execute<S, P>(
@@ -181,28 +188,48 @@ where
         RunPhase::Corpus | RunPhase::ListsAndCorpus | RunPhase::All
     );
     let history = matches!(opts.phase, RunPhase::History | RunPhase::All);
+    let calls = if lists || history {
+        match open_calls(opts).await {
+            Ok(calls) => Some(calls),
+            Err(err) => {
+                let message = format!("seeds: {err:#}");
+                tracing::error!(%message);
+                report.list_errors.push(message);
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let planned = if let Some(calls) = &calls {
+        match ingest::plan(store, calls).await {
+            Ok(plan) => Some(plan),
+            Err(err) => {
+                let message = format!("seeds: {err:#}");
+                tracing::error!(%message);
+                report.list_errors.push(message);
+                None
+            }
+        }
+    } else {
+        None
+    };
     if lists {
-        let call_urls = if opts.rpcs.is_empty() {
-            rpc::default_call_rpcs()
-        } else {
-            opts.rpcs.clone()
-        };
-        let calls = tokio::task::spawn_blocking(move || rpc::Rpc::new(call_urls))
-            .await
-            .map_err(|err| eyre::eyre!("rpc client task: {err}"))??;
-        for job in lists::jobs() {
-            if hold_for_pause(&stop).await {
-                return Ok(report);
-            }
-            if !job_wanted(&opts.only, &job.name) {
-                continue;
-            }
-            match lists::walk(&calls, store, &job, &stop).await {
-                Ok(wrote) => tracing::info!(job = %job.name, wrote, "list finished"),
-                Err(err) => {
-                    let message = format!("{}: {err}", job.name);
-                    tracing::error!(%message, "list failed");
-                    report.list_errors.push(message);
+        if let (Some(calls), Some(plan)) = (&calls, &planned) {
+            for job in &plan.lists {
+                if hold_for_pause(&stop).await {
+                    return Ok(report);
+                }
+                if !job_wanted(&opts.only, &job.name) {
+                    continue;
+                }
+                match lists::walk(calls, store, job, &stop).await {
+                    Ok(wrote) => tracing::info!(job = %job.name, wrote, "list finished"),
+                    Err(err) => {
+                        let message = format!("{}: {err}", job.name);
+                        tracing::error!(%message, "list failed");
+                        report.list_errors.push(message);
+                    }
                 }
             }
         }
@@ -228,10 +255,16 @@ where
         if hold_for_pause(&stop).await {
             return Ok(report);
         }
-        let logs_wanted = logs::jobs()
-            .into_iter()
-            .filter(|job| job_wanted(&opts.only, &job.name))
-            .collect::<Vec<_>>();
+        let logs_wanted = planned
+            .as_ref()
+            .map(|plan| {
+                plan.logs
+                    .iter()
+                    .filter(|job| job_wanted(&opts.only, &job.name))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         if !logs_wanted.is_empty() {
             match history::ingest_all(store, peer, &logs_wanted, &stop).await {
                 Ok(notes) => report.notes.extend(notes),
@@ -254,11 +287,23 @@ pub async fn scan_blooms<S: EntityStore>(
     only: &Option<String>,
     stop: &tokio::sync::watch::Receiver<bool>,
 ) -> eyre::Result<history::BloomScan> {
-    let jobs = logs::jobs()
+    let jobs = ingest::cached_logs(store)
+        .await
         .into_iter()
         .filter(|job| job_wanted(only, &job.name))
         .collect::<Vec<_>>();
     history::scan_blooms(store, &jobs, stop).await
+}
+
+async fn open_calls(opts: &RunOpts) -> eyre::Result<rpc::Rpc> {
+    let call_urls = if opts.rpcs.is_empty() {
+        rpc::default_call_rpcs()
+    } else {
+        opts.rpcs.clone()
+    };
+    tokio::task::spawn_blocking(move || rpc::Rpc::new(call_urls))
+        .await
+        .map_err(|err| eyre::eyre!("rpc client task: {err}"))?
 }
 
 /// Receipt fetch for a finished bloom scan. Needs the corpus and the catalog,

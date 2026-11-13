@@ -72,7 +72,7 @@ pub(crate) fn scenarios(chosen: &Chosen<'_>) -> Vec<Scenario> {
     out.extend(kind::width_scenarios(survey, known, hubs, *wrapped));
     out.extend(kind::kind_scenarios(picks, known, hubs, *wrapped));
     out.extend(kind::native_kind_scenarios(survey, known, hubs, *wrapped));
-    out.extend(kind::bundle_scenarios(picks, hubs, *wrapped));
+    out.extend(kind::bundle_scenarios(picks, known, hubs, *wrapped));
     out.extend(path::via_scenarios(via, known, hubs, *wrapped));
     out.extend(kind::split_scenarios(
         via,

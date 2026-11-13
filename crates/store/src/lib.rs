@@ -12,7 +12,7 @@ use eyre::WrapErr;
 use model::{BlockRecord, HeaderRecord};
 use std::path::Path;
 use std::sync::Arc;
-use venues::{Catalog, Put, ReceiptBody, VenueRow};
+use venues::{Catalog, Put, ReceiptBody, TokenRecord, VenueRow};
 
 mod remote;
 mod serve;
@@ -323,6 +323,39 @@ impl EntityStore for LocalStore {
     async fn read_venue(&self, kind: u8, id: B256) -> eyre::Result<Option<VenueRow>> {
         let catalog = self.catalog_db()?;
         blocking(move || catalog.read_venue(kind, id)).await
+    }
+
+    async fn put_tokens(&self, rows: &[TokenRecord]) -> eyre::Result<()> {
+        let catalog = self.catalog_db()?;
+        let rows = rows.to_vec();
+        blocking(move || catalog.put_tokens(&rows)).await
+    }
+
+    async fn tokens(&self) -> eyre::Result<Vec<TokenRecord>> {
+        let catalog = self.catalog_db()?;
+        blocking(move || catalog.tokens()).await
+    }
+
+    async fn token(&self, address: Address) -> eyre::Result<Option<TokenRecord>> {
+        let catalog = self.catalog_db()?;
+        blocking(move || catalog.token(address)).await
+    }
+
+    async fn missing_tokens(&self, limit: usize) -> eyre::Result<Vec<Address>> {
+        let catalog = self.catalog_db()?;
+        blocking(move || catalog.missing_tokens(limit)).await
+    }
+
+    async fn note(&self, key: &str) -> eyre::Result<Option<u64>> {
+        let catalog = self.catalog_db()?;
+        let key = key.to_string();
+        blocking(move || catalog.note(&key)).await
+    }
+
+    async fn put_note(&self, key: &str, value: u64) -> eyre::Result<()> {
+        let catalog = self.catalog_db()?;
+        let key = key.to_string();
+        blocking(move || catalog.put_note(&key, value)).await
     }
 
     async fn reconcile(&self, now: u64) -> eyre::Result<u64> {

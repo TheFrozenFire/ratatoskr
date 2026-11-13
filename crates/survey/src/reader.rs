@@ -1,20 +1,15 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::str::FromStr;
 
-use alloy_primitives::Address;
+use alloy_primitives::{Address, B256};
 use routing::SlopeSegment;
 use searcher::{Conduits, Token};
-use venues::{Catalog, BALANCER_V2, BALANCER_V3, UNI_V4};
+use venues::{root_address, Catalog, BALANCER_V2, BALANCER_V3, UNI_V4};
 
 use crate::graph::{Graph, PathEnds};
-use crate::token::token_of;
-
-const POOL_MANAGER: &str = "0x000000000004444c5dc75cb358380d2e3de08a90";
-const BALANCER_V2_VAULT: &str = "0xBA12222222228d8Ba445958a75a0704d566BF2C8";
-const BALANCER_V3_VAULT: &str = "0xbA1333333333a1BA1108E8412f11850A5C319bA9";
 
 pub(crate) fn catalog_swap(
+    catalog: &Catalog,
     token_in: Token,
     token_out: Token,
     key: &routing::Action,
@@ -27,22 +22,39 @@ pub(crate) fn catalog_swap(
         14 => action::Invariant::Bin,
         _ => action::Invariant::Product,
     };
-    let contract = action::Address::new(contract_of(key))?;
+    let contract = action::Address::new(contract_of(catalog, key))?;
     Ok(action::Action::Swap(action::Swap::new(
         contract, key.pool, token_in, token_out, invariant,
     )?))
 }
 
-pub(crate) fn contract_of(key: &routing::Action) -> [u8; 20] {
-    let home = match key.kind {
-        UNI_V4 => Some(POOL_MANAGER),
-        BALANCER_V2 => Some(BALANCER_V2_VAULT),
-        BALANCER_V3 => Some(BALANCER_V3_VAULT),
-        _ => None,
-    };
-    if let Some(hex_addr) = home {
-        return token_of(Address::from_str(hex_addr).expect("address")).0;
+pub(crate) fn contract_of(catalog: &Catalog, key: &routing::Action) -> [u8; 20] {
+    let id = B256::from(key.pool);
+    match key.kind {
+        UNI_V4 | BALANCER_V2 => {
+            if let Ok(Some(row)) = catalog.read_venue(key.kind, id) {
+                if row.factory != Address::ZERO {
+                    return bytes_of(row.factory);
+                }
+            }
+            root_address(key.kind)
+                .map(bytes_of)
+                .unwrap_or_else(|| low20(key))
+        }
+        BALANCER_V3 => root_address(BALANCER_V3)
+            .map(bytes_of)
+            .unwrap_or_else(|| low20(key)),
+        _ => low20(key),
     }
+}
+
+fn bytes_of(address: Address) -> [u8; 20] {
+    let mut bytes = [0_u8; 20];
+    bytes.copy_from_slice(address.as_slice());
+    bytes
+}
+
+fn low20(key: &routing::Action) -> [u8; 20] {
     let mut bytes = [0_u8; 20];
     bytes.copy_from_slice(&key.pool[12..]);
     bytes

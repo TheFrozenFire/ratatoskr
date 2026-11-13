@@ -7,8 +7,7 @@
 use alloy_primitives::{Address, U256};
 use eyre::eyre;
 
-use crate::catalog::{Put, VenueRow, AERO, CURVE, METRIC, V2_FORK};
-use crate::decode::{known, v2_kind};
+use crate::catalog::{Put, VenueRow};
 use crate::lens::{self, LensHit, CALL_GAS};
 use crate::rpc::Rpc;
 use crate::EntityStore;
@@ -43,139 +42,71 @@ pub struct ListJob {
     put: Put,
 }
 
-pub fn jobs() -> Vec<ListJob> {
-    let known = known();
-    let mut jobs = vec![
-        v2("list:uni-v2", known.uni_v2, v2_kind(known.uni_v2)),
-        v2("list:sushi-v2", known.sushi_v2, v2_kind(known.sushi_v2)),
-        v2(
-            "list:pancake-v2",
-            known.pancake_v2,
-            v2_kind(known.pancake_v2),
-        ),
-        v2(
-            "list:v2:0xd34971bab6e5e356fd250715f5de0492bb070452",
-            addr("0xd34971bab6e5e356fd250715f5de0492bb070452"),
-            V2_FORK,
-        ),
-        v2(
-            "list:v2:0x818339b4e536e707f14980219037c5046b049dd4",
-            addr("0x818339b4e536e707f14980219037c5046b049dd4"),
-            V2_FORK,
-        ),
-        v2(
-            "list:v2:0x7de800467afce442019884f51a4a1b9143a34fac",
-            addr("0x7de800467afce442019884f51a4a1b9143a34fac"),
-            V2_FORK,
-        ),
-        ListJob {
-            name: "list:aero".into(),
-            factory: known.aero,
-            kind: AERO,
-            length: Length::Selector(ALL_POOLS_LEN),
-            index_sel: ALL_POOLS,
-            mode: 2,
-            origin: 0,
-            batch: 200,
-            put: Put::Merge,
-        },
-        ListJob {
-            name: "list:metric".into(),
-            factory: known.metric,
-            kind: METRIC,
-            length: Length::NextPoolIdx,
-            index_sel: IDX_TO_POOL,
-            mode: 0,
-            origin: 1,
-            batch: 190,
-            put: Put::Merge,
-        },
-    ];
-    for (name, factory) in curve_deployers() {
-        jobs.push(curve(name, factory, Put::Merge));
-    }
-    for (name, factory) in curve_registries() {
-        jobs.push(curve(name, factory, Put::IfAbsent));
-    }
-    jobs
+struct View {
+    length: Length,
+    index_sel: [u8; 4],
+    mode: u8,
+    origin: u64,
+    batch: u64,
+    probe: [u8; 4],
 }
 
-fn v2(name: &str, factory: Address, kind: u8) -> ListJob {
-    ListJob {
-        name: name.into(),
-        factory,
-        kind,
+const VIEWS: &[View] = &[
+    View {
         length: Length::Selector(ALL_PAIRS_LEN),
         index_sel: ALL_PAIRS,
         mode: 1,
         origin: 0,
         batch: 800,
-        put: Put::Merge,
-    }
-}
-
-fn curve(name: &str, factory: Address, put: Put) -> ListJob {
-    ListJob {
-        name: name.into(),
-        factory,
-        kind: CURVE,
+        probe: ALL_PAIRS_LEN,
+    },
+    View {
+        length: Length::Selector(ALL_POOLS_LEN),
+        index_sel: ALL_POOLS,
+        mode: 2,
+        origin: 0,
+        batch: 200,
+        probe: ALL_POOLS_LEN,
+    },
+    View {
+        length: Length::NextPoolIdx,
+        index_sel: IDX_TO_POOL,
+        mode: 0,
+        origin: 1,
+        batch: 190,
+        probe: NEXT_POOL_IDX,
+    },
+    View {
         length: Length::Selector(POOL_COUNT),
         index_sel: POOL_LIST,
         mode: 3,
         origin: 0,
         batch: 40,
+        probe: POOL_COUNT,
+    },
+];
+
+pub(crate) fn view_count() -> usize {
+    VIEWS.len()
+}
+
+pub(crate) fn view_probe(index: usize) -> [u8; 4] {
+    VIEWS[index].probe
+}
+
+pub(crate) fn job_from(name: &str, factory: Address, kind: u8, view: usize, put: Put) -> ListJob {
+    let view = &VIEWS[view];
+    ListJob {
+        name: name.into(),
+        factory,
+        kind,
+        length: view.length,
+        index_sel: view.index_sel,
+        mode: view.mode,
+        origin: view.origin,
+        batch: view.batch,
         put,
     }
-}
-
-fn curve_deployers() -> [(&'static str, Address); 6] {
-    [
-        (
-            "list:curve-ng",
-            addr("0x6a8cbed756804b16e05e741edabd5cb544ae21bf"),
-        ),
-        (
-            "list:curve-two",
-            addr("0x98ee851a00abee0d95d08cf4ca2bdce32aeaaf7f"),
-        ),
-        (
-            "list:curve-tri",
-            addr("0x0c0e5f2ff0ff18a3be9b835635039256dc4b4963"),
-        ),
-        (
-            "list:curve-crypto",
-            addr("0xf18056bbd320e96a48e3fbf8bc061322531aac99"),
-        ),
-        (
-            "list:curve-meta",
-            addr("0xb9fc157394af804a3578134a6585c0dc9cc990d4"),
-        ),
-        (
-            "list:curve-crvusd",
-            addr("0x4f8846ae9380b90d2e71d5e3d042dff3e7ebb40d"),
-        ),
-    ]
-}
-
-fn curve_registries() -> [(&'static str, Address); 3] {
-    [
-        (
-            "list:curve-registry",
-            addr("0x90e00ace148ca3b23ac1bc8c240c2a7dd9c2d7f5"),
-        ),
-        (
-            "list:curve-crypto-registry",
-            addr("0x8f942c20d02befc377d41445793068908e2250d0"),
-        ),
-        (
-            "list:curve-metaregistry",
-            addr("0xf98b45fa17de75fb1ad0e7afd971b0ca00e379fc"),
-        ),
-    ]
-}
-
-fn addr(text: &str) -> Address {
-    text.parse().unwrap_or_else(|err| panic!("{text}: {err}"))
 }
 
 pub async fn walk<S: EntityStore>(
@@ -321,23 +252,28 @@ fn u64_word(value: U256) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::{CURVE, METRIC};
 
     #[test]
-    fn job_names_are_unique_and_registries_do_not_overwrite() {
-        let jobs = jobs();
-        let mut names = std::collections::BTreeSet::new();
-        for job in &jobs {
-            assert!(names.insert(job.name.clone()), "duplicate {}", job.name);
-        }
-        let registry = jobs
-            .iter()
-            .find(|job| job.name == "list:curve-metaregistry")
+    fn a_registry_does_not_overwrite_and_metric_starts_at_one() {
+        let pool = (0..view_count())
+            .find(|index| view_probe(*index) == POOL_COUNT)
             .unwrap();
-        assert!(matches!(registry.put, Put::IfAbsent));
-        let ng = jobs.iter().find(|job| job.name == "list:curve-ng").unwrap();
+        let ng = job_from("list:curve-ng", Address::ZERO, CURVE, pool, Put::Merge);
         assert!(matches!(ng.put, Put::Merge));
         assert_eq!(ng.mode, 3);
-        let metric = jobs.iter().find(|job| job.name == "list:metric").unwrap();
+        let registry = job_from("list:curve-id-0", Address::ZERO, CURVE, pool, Put::IfAbsent);
+        assert!(matches!(registry.put, Put::IfAbsent));
+        let metric_view = (0..view_count())
+            .find(|index| view_probe(*index) == NEXT_POOL_IDX)
+            .unwrap();
+        let metric = job_from(
+            "list:metric",
+            Address::ZERO,
+            METRIC,
+            metric_view,
+            Put::Merge,
+        );
         assert_eq!(metric.origin, 1);
         assert_eq!(metric.mode, 0);
     }

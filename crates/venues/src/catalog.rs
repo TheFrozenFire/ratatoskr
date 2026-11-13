@@ -27,6 +27,10 @@ const HITS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("hits");
 const HIT_SCAN: TableDefinition<&str, u64> = TableDefinition::new("hit_scan");
 /// Era1 receipt payload for one block, so a retry does not range-read it again.
 const BODIES: TableDefinition<u64, &[u8]> = TableDefinition::new("bodies");
+/// Token symbol, decimals, and an optional wrap counterpart. Key is the address.
+const TOKENS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("tokens");
+/// List-view index and log-root deploy block. The value is a `u64`.
+const NOTES: TableDefinition<&str, u64> = TableDefinition::new("notes");
 const RECORD_VERSION: u8 = 1;
 const RECORD_VERSION_OBS: u8 = 2;
 const FLAG_FEE: u8 = 1;
@@ -34,6 +38,16 @@ const FLAG_TICK: u8 = 2;
 const FLAG_BLOCK: u8 = 4;
 const FLAG_EXTRA: u8 = 8;
 const FLAG_OBS: u8 = 16;
+
+/// One token the catalog has read. `decimals` is absent until `decimals()` answers.
+/// `wraps` is the other side of a wrapper pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenRecord {
+    pub address: Address,
+    pub symbol: String,
+    pub decimals: Option<u8>,
+    pub wraps: Option<Address>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Put {
@@ -340,6 +354,201 @@ impl Catalog {
             page.push(decode_row(kind, id, value.value())?);
         }
         Ok(page)
+    }
+
+    pub fn token(&self, address: Address) -> eyre::Result<Option<TokenRecord>> {
+        let read = self.entities.begin_read()?;
+        let table = match read.open_table(TOKENS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(err) => return Err(err.into()),
+        };
+        match table.get(address.as_slice())? {
+            Some(value) => Ok(Some(decode_token(address, value.value())?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn tokens(&self) -> eyre::Result<Vec<TokenRecord>> {
+        let read = self.entities.begin_read()?;
+        let table = match read.open_table(TOKENS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(err) => return Err(err.into()),
+        };
+        let mut rows = Vec::new();
+        for item in table.iter()? {
+            let (key, value) = item?;
+            let key = key.value();
+            if key.len() != 20 {
+                return Err(eyre::eyre!("token key"));
+            }
+            rows.push(decode_token(Address::from_slice(key), value.value())?);
+        }
+        Ok(rows)
+    }
+
+    /// Write token rows. An empty symbol leaves a stored symbol and its decimals.
+    pub fn put_tokens(&self, rows: &[TokenRecord]) -> eyre::Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut write = self.entities.begin_write()?;
+        write.set_durability(Durability::Immediate);
+        {
+            let mut table = write.open_table(TOKENS)?;
+            for row in rows {
+                let stored = match table.get(row.address.as_slice())? {
+                    Some(value) => Some(decode_token(row.address, value.value())?),
+                    None => None,
+                };
+                let merged = merge_token(stored, row);
+                let bytes = encode_token(&merged);
+                table.insert(row.address.as_slice(), bytes.as_slice())?;
+            }
+        }
+        write.commit()?;
+        Ok(())
+    }
+
+    /// Token addresses on venue rows that have no token record yet.
+    pub fn missing_tokens(&self, limit: usize) -> eyre::Result<Vec<Address>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let have = self.token_set()?;
+        let mut missing = Vec::new();
+        let mut seen = HashSet::new();
+        for kind in 1..=METRIC {
+            let mut after = None;
+            loop {
+                let page = self.page_venues(kind, after, 512)?;
+                if page.is_empty() {
+                    break;
+                }
+                after = page.last().map(|row| row.id);
+                for row in &page {
+                    for token in &row.tokens {
+                        if *token == Address::ZERO || have.contains(token) || !seen.insert(*token) {
+                            continue;
+                        }
+                        missing.push(*token);
+                        if missing.len() == limit {
+                            return Ok(missing);
+                        }
+                    }
+                }
+                if page.len() < 512 {
+                    break;
+                }
+            }
+        }
+        Ok(missing)
+    }
+
+    pub fn note(&self, key: &str) -> eyre::Result<Option<u64>> {
+        let read = self.discovery.begin_read()?;
+        let table = match read.open_table(NOTES) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(err) => return Err(err.into()),
+        };
+        Ok(table.get(key)?.map(|value| value.value()))
+    }
+
+    pub fn put_note(&self, key: &str, value: u64) -> eyre::Result<()> {
+        let mut write = self.discovery.begin_write()?;
+        write.set_durability(Durability::Immediate);
+        {
+            let mut notes = write.open_table(NOTES)?;
+            notes.insert(key, value)?;
+        }
+        write.commit()?;
+        Ok(())
+    }
+
+    fn token_set(&self) -> eyre::Result<HashSet<Address>> {
+        let read = self.entities.begin_read()?;
+        let table = match read.open_table(TOKENS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(HashSet::new()),
+            Err(err) => return Err(err.into()),
+        };
+        let mut have = HashSet::new();
+        for item in table.iter()? {
+            let (key, _) = item?;
+            let key = key.value();
+            if key.len() == 20 {
+                have.insert(Address::from_slice(key));
+            }
+        }
+        Ok(have)
+    }
+}
+
+fn encode_token(row: &TokenRecord) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.push(1);
+    out.push(row.decimals.unwrap_or(255));
+    let bytes = row.symbol.as_bytes();
+    let len = bytes.len().min(255);
+    out.push(len as u8);
+    out.extend_from_slice(&bytes[..len]);
+    match row.wraps {
+        Some(address) => {
+            out.push(1);
+            out.extend_from_slice(address.as_slice());
+        }
+        None => out.push(0),
+    }
+    out
+}
+
+fn decode_token(address: Address, bytes: &[u8]) -> eyre::Result<TokenRecord> {
+    if bytes.first().copied() != Some(1) || bytes.len() < 4 {
+        return Err(eyre::eyre!("token record"));
+    }
+    let decimals = match bytes[1] {
+        255 => None,
+        value => Some(value),
+    };
+    let len = bytes[2] as usize;
+    if bytes.len() < 3 + len + 1 {
+        return Err(eyre::eyre!("token record"));
+    }
+    let symbol =
+        String::from_utf8(bytes[3..3 + len].to_vec()).map_err(|_| eyre::eyre!("token symbol"))?;
+    let wraps = if bytes[3 + len] == 1 {
+        let start = 4 + len;
+        if bytes.len() < start + 20 {
+            return Err(eyre::eyre!("token record"));
+        }
+        Some(Address::from_slice(&bytes[start..start + 20]))
+    } else {
+        None
+    };
+    Ok(TokenRecord {
+        address,
+        symbol,
+        decimals,
+        wraps,
+    })
+}
+
+fn merge_token(stored: Option<TokenRecord>, incoming: &TokenRecord) -> TokenRecord {
+    let Some(stored) = stored else {
+        return incoming.clone();
+    };
+    let (symbol, decimals) = if incoming.symbol.is_empty() {
+        (stored.symbol, stored.decimals)
+    } else {
+        (incoming.symbol.clone(), incoming.decimals)
+    };
+    TokenRecord {
+        address: incoming.address,
+        symbol,
+        decimals,
+        wraps: incoming.wraps.or(stored.wraps),
     }
 }
 
@@ -1645,5 +1854,50 @@ mod tests {
         for kind in [1_u8, 2, 3, 5, 10] {
             assert!(plan.get(&kind).copied().unwrap_or(0) >= 400, "{plan:?}");
         }
+    }
+
+    #[test]
+    fn a_token_keeps_its_symbol_when_a_later_write_is_blank() {
+        let dir = TempDir::new();
+        let catalog = Catalog::open(&dir.0).unwrap();
+        let token = address!("9999999999999999999999999999999999999999");
+        catalog
+            .put_tokens(&[TokenRecord {
+                address: token,
+                symbol: "ABC".into(),
+                decimals: Some(6),
+                wraps: None,
+            }])
+            .unwrap();
+        catalog
+            .put_tokens(&[TokenRecord {
+                address: token,
+                symbol: String::new(),
+                decimals: None,
+                wraps: Some(alloy_primitives::Address::ZERO),
+            }])
+            .unwrap();
+        let stored = catalog.token(token).unwrap().unwrap();
+        assert_eq!(stored.symbol, "ABC");
+        assert_eq!(stored.decimals, Some(6));
+        assert_eq!(stored.wraps, Some(alloy_primitives::Address::ZERO));
+        catalog.put_note("shape:list:uni-v2", 1).unwrap();
+        assert_eq!(catalog.note("shape:list:uni-v2").unwrap(), Some(1));
+        assert!(catalog.note("missing").unwrap().is_none());
+        let row = sample();
+        catalog
+            .commit_chunk("list:test", 1, &[row], Put::Merge)
+            .unwrap();
+        let missing = catalog.missing_tokens(10).unwrap();
+        assert_eq!(missing.len(), 2);
+        catalog
+            .put_tokens(&[TokenRecord {
+                address: missing[0],
+                symbol: "A".into(),
+                decimals: Some(18),
+                wraps: None,
+            }])
+            .unwrap();
+        assert_eq!(catalog.missing_tokens(10).unwrap(), vec![missing[1]]);
     }
 }

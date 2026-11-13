@@ -116,7 +116,8 @@ pub(crate) fn deep_scenarios(
                     item.token,
                     NATIVE,
                     format!(
-                        "native ETH out, catalog path to WETH is {} conduits",
+                        "native ETH out, catalog path to {} is {} conduits",
+                        label(wrapped, known),
                         item.dist
                     ),
                 )
@@ -126,7 +127,8 @@ pub(crate) fn deep_scenarios(
                     NATIVE,
                     item.token,
                     format!(
-                        "native ETH in, catalog path from WETH is {} conduits",
+                        "native ETH in, catalog path from {} is {} conduits",
+                        label(wrapped, known),
                         item.dist
                     ),
                 )

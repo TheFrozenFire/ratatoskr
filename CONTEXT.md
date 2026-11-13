@@ -446,8 +446,12 @@ _Avoid_: sighting, fetch
 
 ### Services and work
 
+**Seed file**:
+`corpus/mainnet.yaml`. It names the wrapper, the enumeration roots, and quote contracts the chain does not point at. Ingest writes symbols, decimals, list shapes, and deploy blocks into the venue catalog, and asks the address provider for registries on each discovery start.
+_Avoid_: corpus, receipt bundle
+
 **Venue catalog**:
-Pool identities, configuration, quoting state, tick books, price curves, quote records, and watch marks.
+Pool identities, token records, configuration, quoting state, tick books, price curves, quote records, and watch marks.
 _Avoid_: catalog, corpus, peer directory
 
 **Discovery store**:
@@ -499,7 +503,7 @@ The pipeline that appends headers.
 _Avoid_: discovery, state pipeline
 
 **Discovery**:
-The pipeline that writes pool identities from lists, from bloom hits, and from the corpus.
+The pipeline that writes pool identities. It reads enumeration roots from the seed file, walks lists and bloom hits, and folds receipt bundles the corpus already holds.
 _Avoid_: state pipeline, discovery hit, enumeration, census
 
 **State pipeline**:
