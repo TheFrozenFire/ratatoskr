@@ -17,8 +17,21 @@ use std::path::{Path, PathBuf};
 const BLOCKS: TableDefinition<u64, &[u8]> = TableDefinition::new("blocks");
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 
+/// Receipt batches are multi-megabyte sequential reads and writes.
+const PAGE_CACHE: usize = 64 * 1024 * 1024;
+
 pub struct Corpus {
     db: Database,
+}
+
+fn open_database(path: &Path, create: bool) -> Result<Database, redb::DatabaseError> {
+    let mut builder = redb::Builder::new();
+    builder.set_cache_size(PAGE_CACHE);
+    if create {
+        builder.create(path)
+    } else {
+        builder.open(path)
+    }
 }
 
 impl Corpus {
@@ -26,12 +39,12 @@ impl Corpus {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let db = Database::create(path).wrap_err("create redb")?;
+        let db = open_database(path, true).wrap_err("create redb")?;
         Ok(Self { db })
     }
 
     pub fn open(path: &Path) -> eyre::Result<Self> {
-        let db = Database::open(path).wrap_err("open corpus")?;
+        let db = open_database(path, false).wrap_err("open corpus")?;
         Ok(Self { db })
     }
 

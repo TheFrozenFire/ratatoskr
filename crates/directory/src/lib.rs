@@ -18,6 +18,8 @@ const SIGHTINGS: TableDefinition<u64, &[u8]> = TableDefinition::new("sightings")
 const SUMMARIES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("summaries");
 const NODES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("nodes");
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
+/// Summaries load once. Later writes are single sightings.
+const PAGE_CACHE: usize = 16 * 1024 * 1024;
 
 const VERSION: u8 = 1;
 /// eth Status received. `earliest` is absent for eth/68.
@@ -88,7 +90,9 @@ impl Catalog {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let db = Database::create(path)?;
+        let mut builder = redb::Builder::new();
+        builder.set_cache_size(PAGE_CACHE);
+        let db = builder.create(path)?;
         let next_seq = meta_get(&db, "sighting_seq")?.unwrap_or(0);
         let summaries = load_summaries(&db)?;
         Ok(Self {

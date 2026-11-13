@@ -566,12 +566,33 @@ fn catalog_dir(path: &Path) -> PathBuf {
     }
 }
 
-fn open_db(path: &Path) -> eyre::Result<Database> {
-    if path.exists() {
-        Database::open(path).wrap_err_with(|| format!("open {}", path.display()))
-    } else {
-        Database::create(path).wrap_err_with(|| format!("create {}", path.display()))
+/// Page cache for one catalog file.
+///
+/// Entities serves random pool reads. Discovery walks hit lists. Work stores
+/// leases. A sequential copy of any other file keeps a small cache.
+fn cache_bytes(path: &Path) -> usize {
+    match path.file_name().and_then(|name| name.to_str()) {
+        Some("entities.redb" | "venues.redb") => 256 * 1024 * 1024,
+        Some("discovery.redb") => 128 * 1024 * 1024,
+        Some("work.redb") => 16 * 1024 * 1024,
+        _ => 64 * 1024 * 1024,
     }
+}
+
+fn open_at(path: &Path, create: bool) -> Result<Database, redb::DatabaseError> {
+    let mut builder = redb::Builder::new();
+    builder.set_cache_size(cache_bytes(path));
+    if create {
+        builder.create(path)
+    } else {
+        builder.open(path)
+    }
+}
+
+fn open_db(path: &Path) -> eyre::Result<Database> {
+    let create = !path.exists();
+    let verb = if create { "create" } else { "open" };
+    open_at(path, create).wrap_err_with(|| format!("{verb} {}", path.display()))
 }
 
 /// Move a legacy `venues.redb` onto the three-file layout.
@@ -590,25 +611,25 @@ fn migrate(dir: &Path) -> eyre::Result<()> {
             return Ok(());
         }
         if !discovery.exists() {
-            let from = Database::open(&entities).wrap_err("open entities for crawl copy")?;
+            let from = open_at(&entities, false).wrap_err("open entities for crawl copy")?;
             let to = open_db(&discovery)?;
             copy_crawl(&from, &to)?;
             drop(from);
         }
-        let entities = Database::open(&entities).wrap_err("open entities")?;
+        let entities = open_at(&entities, false).wrap_err("open entities")?;
         delete_crawl(&entities)?;
         return Ok(());
     }
     if !venues.exists() {
         return Ok(());
     }
-    let from = Database::open(&venues).wrap_err("open venues.redb")?;
+    let from = open_at(&venues, false).wrap_err("open venues.redb")?;
     let to = open_db(&discovery)?;
     copy_crawl(&from, &to)?;
     drop(from);
     drop(to);
     std::fs::rename(&venues, &entities).wrap_err("rename venues.redb to entities.redb")?;
-    let entities = Database::open(&entities).wrap_err("open renamed entities")?;
+    let entities = open_at(&entities, false).wrap_err("open renamed entities")?;
     delete_crawl(&entities)?;
     Ok(())
 }
@@ -1056,7 +1077,7 @@ pub fn sample_identities(src: &Path, dest: &Path, target: u64) -> eyre::Result<S
         ));
     }
     refuse_live_dir(&dest_dir)?;
-    let source = Database::open(src).wrap_err("open identity source")?;
+    let source = open_at(src, false).wrap_err("open identity source")?;
     let counts = count_identities(&source)?;
     let plan = allocate_sample(&counts, target);
     let catalog = Catalog::open(&dest_dir)?;
@@ -1158,7 +1179,7 @@ pub fn fill_identities(src: &Path, dest: &Path, add: u64) -> eyre::Result<FillRe
         ));
     }
     refuse_live_dir(&dest_dir)?;
-    let source = Database::open(src).wrap_err("open identity source")?;
+    let source = open_at(src, false).wrap_err("open identity source")?;
     let source_counts = count_identities(&source)?;
     let catalog = Catalog::open(&dest_dir)?;
     let mut present = identity_keys(&catalog)?;

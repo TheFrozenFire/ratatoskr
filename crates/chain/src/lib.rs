@@ -13,8 +13,21 @@ use std::path::{Path, PathBuf};
 const HEADERS: TableDefinition<u64, &[u8]> = TableDefinition::new("headers");
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 
+/// A header window is a few megabytes, and the next append reads one parent.
+const PAGE_CACHE: usize = 64 * 1024 * 1024;
+
 pub struct HeaderChain {
     db: Database,
+}
+
+fn open_database(path: &Path, create: bool) -> Result<Database, redb::DatabaseError> {
+    let mut builder = redb::Builder::new();
+    builder.set_cache_size(PAGE_CACHE);
+    if create {
+        builder.create(path)
+    } else {
+        builder.open(path)
+    }
 }
 
 impl HeaderChain {
@@ -22,7 +35,7 @@ impl HeaderChain {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let db = Database::create(path).wrap_err("create header db")?;
+        let db = open_database(path, true).wrap_err("create header db")?;
         Ok(Self { db })
     }
 
@@ -106,7 +119,7 @@ impl HeaderChain {
 
     /// Open a chain another process may be appending to. Callers only read.
     pub fn open(path: &Path) -> eyre::Result<Self> {
-        let db = Database::open(path).wrap_err("open header chain")?;
+        let db = open_database(path, false).wrap_err("open header chain")?;
         Ok(Self { db })
     }
 
