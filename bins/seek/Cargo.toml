@@ -10,10 +10,5 @@ name = "seek"
 path = "src/main.rs"
 
 [dependencies]
-alloy-primitives.workspace = true
 eyre.workspace = true
-num-bigint = "0.4"
-num-traits = "0.2"
-routing.workspace = true
-searcher.workspace = true
-venues.workspace = true
+survey.workspace = true

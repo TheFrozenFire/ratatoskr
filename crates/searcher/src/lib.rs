@@ -23,8 +23,7 @@ use num_bigint::BigUint;
 use num_traits::Zero;
 use routing::SlopeSegment;
 
-/// Native ETH. It has no contract.
-pub const NATIVE: Token = Token([0_u8; 20]);
+pub use action::{Token, NATIVE};
 
 /// The walk lists a token's conduits only when there are at most this many.
 pub const NEIGHBOR_LIMIT: usize = 64;
@@ -37,10 +36,6 @@ const WALK_NODES: usize = 16_384;
 
 /// Direct probes from a token the walk refuses to expand.
 const FAT_PROBES: usize = 64;
-
-/// One token, named by 20 bytes. Native ETH is [`NATIVE`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Token(pub [u8; 20]);
 
 /// Tokens spent, with amounts, and tokens demanded.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,7 +80,7 @@ pub struct Route {
     pub edges: Vec<usize>,
 }
 
-/// What an optimizer allocates. Each curve appears once, and only on a route.
+/// The curves the search returns. Each curve appears once, and only on a route.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RouteSet {
     pub inputs: Vec<(Token, BigUint)>,
@@ -124,6 +119,8 @@ pub enum SearchError {
     DuplicateHub,
     WrappedIsNative,
 }
+
+impl std::error::Error for SearchError {}
 
 impl fmt::Display for SearchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

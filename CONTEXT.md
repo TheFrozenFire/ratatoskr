@@ -321,12 +321,16 @@ The directed quote from a token to one hub. The opposite direction is a differen
 _Avoid_: pair conduit, route
 
 **Route set**:
-The curves a search hands an optimizer for one trade. It carries the input amounts, the output tokens, and each used curve once. The routes are the direct pair, a path through one hub, a path through two hubs, and a bounded path from an endpoint that names few conduits.
+The curves a search returns for one trade. It carries the input amounts, the output tokens, and each used curve once. The routes are the direct pair, a path through one hub, a path through two hubs, and a bounded path from an endpoint that names few conduits.
 _Avoid_: plan, basket
 
 **Searcher**:
 The build of a route set from a trade. It reads stored pair conduits, walks endpoints that name few conduits, and applies the wrap between native ETH and wrapped ETH. It does not allocate the flow.
 _Avoid_: optimizer, state pipeline
+
+**Trade**:
+The inputs, the basket weights, the wrapped token, and the gas ceiling a caller stands behind. It builds the search and turns the route set into a problem of actions.
+_Avoid_: route set, plan, request
 
 **Optimizer**:
 The allocation of input amounts across a problem of actions. It bisects the basket count and books one net input on each shared edge. It does not read the catalog.

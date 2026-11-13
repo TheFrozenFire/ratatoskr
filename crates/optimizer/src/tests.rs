@@ -1552,8 +1552,8 @@ fn from_route_set(set: &searcher::RouteSet) -> Problem {
     let mut edges = Vec::new();
     let mut expanded = Vec::new();
     for edge in &set.edges {
-        let token_in = Token(edge.token_in.0);
-        let token_out = Token(edge.token_out.0);
+        let token_in = edge.token_in;
+        let token_out = edge.token_out;
         let start = edges.len();
         match &edge.curve {
             SearchCurve::Wrap => edges.push(custody_edge(token_in, token_out)),
@@ -1599,7 +1599,7 @@ fn from_route_set(set: &searcher::RouteSet) -> Problem {
             .inputs
             .iter()
             .map(|(token, amount)| Input {
-                token: Token(token.0),
+                token: *token,
                 amount: BigInt::from(amount.clone()),
             })
             .collect(),
@@ -1607,7 +1607,7 @@ fn from_route_set(set: &searcher::RouteSet) -> Problem {
             .outputs
             .iter()
             .map(|token| Output {
-                token: Token(token.0),
+                token: *token,
                 weight: z(1),
             })
             .collect(),

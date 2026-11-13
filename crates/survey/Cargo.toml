@@ -1,0 +1,17 @@
+[package]
+name = "survey"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+alloy-primitives.workspace = true
+eyre.workspace = true
+num-bigint = "0.4"
+num-traits = "0.2"
+action.workspace = true
+routing.workspace = true
+searcher.workspace = true
+trade.workspace = true
+venues.workspace = true

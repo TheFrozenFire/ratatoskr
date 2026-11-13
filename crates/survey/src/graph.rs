@@ -11,25 +11,25 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use searcher::Token;
 
 #[derive(Clone, Copy, Debug)]
-pub struct Link {
+pub(crate) struct Link {
     pub to: Token,
     pub capacity: u128,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct Meta {
+pub(crate) struct Meta {
     pub kinds: u32,
     pub capacity: u128,
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct Graph {
+pub(crate) struct Graph {
     pub out: HashMap<Token, Vec<Link>>,
     index: HashMap<(Token, Token), Meta>,
 }
 
 impl Graph {
-    pub fn push(&mut self, from: Token, to: Token, kinds: u32, capacity: u128) {
+    pub(crate) fn push(&mut self, from: Token, to: Token, kinds: u32, capacity: u128) {
         self.index.insert((from, to), Meta { kinds, capacity });
         self.out
             .entry(from)
@@ -37,11 +37,11 @@ impl Graph {
             .push(Link { to, capacity });
     }
 
-    pub fn degree(&self, token: Token) -> usize {
+    pub(crate) fn degree(&self, token: Token) -> usize {
         self.out.get(&token).map(|links| links.len()).unwrap_or(0)
     }
 
-    pub fn capacity(&self, token: Token) -> u128 {
+    pub(crate) fn capacity(&self, token: Token) -> u128 {
         self.out
             .get(&token)
             .map(|links| {
@@ -52,11 +52,11 @@ impl Graph {
             .unwrap_or(0)
     }
 
-    pub fn meta(&self, from: Token, to: Token) -> Option<Meta> {
+    pub(crate) fn meta(&self, from: Token, to: Token) -> Option<Meta> {
         self.index.get(&(from, to)).copied()
     }
 
-    pub fn neighbors(&self, token: Token) -> HashSet<Token> {
+    pub(crate) fn neighbors(&self, token: Token) -> HashSet<Token> {
         self.out
             .get(&token)
             .map(|links| links.iter().map(|link| link.to).collect())
@@ -88,14 +88,14 @@ fn rebuild(parent: &HashMap<Token, Token>, from: Token, to: Token) -> Vec<Token>
 
 /// One token and how many stored conduits name it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct HubScore {
+pub(crate) struct HubScore {
     pub token: Token,
     pub conduits: usize,
 }
 
 /// How many tokens meet each connectivity floor, and the highest ranks.
 #[derive(Clone, Debug)]
-pub struct HubCensus {
+pub(crate) struct HubCensus {
     pub tokens: u64,
     pub at_least: BTreeMap<usize, u64>,
     pub ranked: Vec<HubScore>,
@@ -103,7 +103,7 @@ pub struct HubCensus {
 
 /// Tokens with a directed path into the hub set, out of it, both, or neither.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct HubReach {
+pub(crate) struct HubReach {
     pub both: u64,
     pub toward: u64,
     pub from_hub: u64,
@@ -117,7 +117,7 @@ const HUB_FLOORS: [usize; 4] = [3, 10, 50, 100];
 /// A conduit in each direction counts twice. `min_conduits` is the floor a
 /// token must meet before it can be a hub. `limit` is how many of those tokens
 /// the caller wants, highest count first. Equal counts keep the lower token.
-pub fn hub_census(
+pub(crate) fn hub_census(
     graph: &Graph,
     incoming: &HashMap<Token, Vec<Token>>,
     min_conduits: usize,
@@ -162,7 +162,11 @@ pub fn hub_census(
 }
 
 /// Directed reach of this hub list. Native ETH is omitted from the counts.
-pub fn reach_of(graph: &Graph, incoming: &HashMap<Token, Vec<Token>>, hubs: &[Token]) -> HubReach {
+pub(crate) fn reach_of(
+    graph: &Graph,
+    incoming: &HashMap<Token, Vec<Token>>,
+    hubs: &[Token],
+) -> HubReach {
     let hub_set: HashSet<Token> = hubs.iter().copied().collect();
     let outward = forward(graph);
     let toward = walk(hubs, incoming);
@@ -193,7 +197,7 @@ pub fn reach_of(graph: &Graph, incoming: &HashMap<Token, Vec<Token>>, hubs: &[To
 }
 
 /// Who has a conduit into this token, in token order.
-pub fn incoming(graph: &Graph) -> HashMap<Token, Vec<Token>> {
+pub(crate) fn incoming(graph: &Graph) -> HashMap<Token, Vec<Token>> {
     let mut incoming: HashMap<Token, Vec<Token>> = HashMap::new();
     let mut sources: Vec<Token> = graph.out.keys().copied().collect();
     sources.sort();
@@ -210,7 +214,7 @@ pub fn incoming(graph: &Graph) -> HashMap<Token, Vec<Token>> {
 }
 
 /// The one hub among this token's counterparties, when there is exactly one.
-pub fn sole_hub(
+pub(crate) fn sole_hub(
     graph: &Graph,
     incoming: &HashMap<Token, Vec<Token>>,
     token: Token,
@@ -245,7 +249,7 @@ pub fn sole_hub(
 }
 
 #[derive(Clone, Debug)]
-pub struct PathEnds {
+pub(crate) struct PathEnds {
     pub path: Vec<Token>,
     pub kinds: u32,
     pub tendril_kinds: u32,
@@ -254,7 +258,7 @@ pub struct PathEnds {
 }
 
 #[derive(Clone, Debug)]
-pub struct Deep {
+pub(crate) struct Deep {
     pub token: Token,
     pub hub: Token,
     pub dist: u32,
@@ -264,7 +268,7 @@ pub struct Deep {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct Selection {
+pub(crate) struct Selection {
     pub max_to_hub: u32,
     pub max_from_hub: u32,
     pub max_to_hub_small: u32,
@@ -318,7 +322,7 @@ struct Draft {
 }
 
 /// Trades whose catalog path is longer than the searcher, plus the one-hub pairs it does return.
-pub fn select(graph: &Graph, hubs: &[Token]) -> Selection {
+pub(crate) fn select(graph: &Graph, hubs: &[Token]) -> Selection {
     let hub_set: HashSet<Token> = hubs.iter().copied().collect();
     let incoming = incoming(graph);
     let mut indegree = HashMap::new();

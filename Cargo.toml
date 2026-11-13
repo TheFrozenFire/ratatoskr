@@ -19,6 +19,8 @@ members = [
     "crates/searcher",
     "crates/optimizer",
     "crates/action",
+    "crates/trade",
+    "crates/survey",
     "crates/peer",
     "bins/ratatoskr",
     "bins/seek",
@@ -55,6 +57,8 @@ routing = { path = "crates/routing" }
 searcher = { path = "crates/searcher" }
 optimizer = { path = "crates/optimizer" }
 action = { path = "crates/action" }
+trade = { path = "crates/trade" }
+survey = { path = "crates/survey" }
 univ3 = { path = "crates/univ3" }
 venues = { path = "crates/venues" }
 # Libraries for one outbound devp2p socket. Not the reth node.

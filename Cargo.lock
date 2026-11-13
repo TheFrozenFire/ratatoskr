@@ -4942,6 +4942,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 name = "searcher"
 version = "0.1.0"
 dependencies = [
+ "action",
  "num-bigint",
  "num-traits",
  "routing",
@@ -5030,13 +5031,8 @@ dependencies = [
 name = "seek"
 version = "0.1.0"
 dependencies = [
- "alloy-primitives",
  "eyre",
- "num-bigint",
- "num-traits",
- "routing",
- "searcher",
- "venues",
+ "survey",
 ]
 
 [[package]]
@@ -5395,6 +5391,21 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
+name = "survey"
+version = "0.1.0"
+dependencies = [
+ "action",
+ "alloy-primitives",
+ "eyre",
+ "num-bigint",
+ "num-traits",
+ "routing",
+ "searcher",
+ "trade",
+ "venues",
+]
 
 [[package]]
 name = "syn"
@@ -5810,6 +5821,18 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
+]
+
+[[package]]
+name = "trade"
+version = "0.1.0"
+dependencies = [
+ "action",
+ "num-bigint",
+ "num-traits",
+ "optimizer",
+ "routing",
+ "searcher",
 ]
 
 [[package]]
