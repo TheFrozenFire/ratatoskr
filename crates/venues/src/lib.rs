@@ -41,8 +41,8 @@ pub use wire::{
 pub use catalog::{
     append_dropped_ids, append_fill_ids, decode_body, decode_row, encode_body, encode_row,
     fill_identities, kind_name, read_fill_ids, sample_identities, write_fill_ids, Catalog,
-    FillReport, Put, ReceiptBody, SampleReport, TokenRecord, VenueRow, BALANCER_V2, BALANCER_V3,
-    PANCAKE_V3, SUSHI_V3, UNI_V3, UNI_V4, V3_FORK,
+    EntityRead, FillReport, Put, ReceiptBody, SampleReport, TokenRecord, VenueRow, BALANCER_V2,
+    BALANCER_V3, PANCAKE_V3, SUSHI_V3, UNI_V3, UNI_V4, V3_FORK,
 };
 pub use conduit::{ConduitFail, ConduitJob};
 pub use detail::{load_details, DetailQuery, PoolDetail, Quote};

@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
 use searcher::{Token, NATIVE};
-use venues::Catalog;
 
 use crate::graph::Graph;
 use crate::kinds::{as_u128, kind_bit, only_kind};
+use crate::source::Source;
 use crate::token::token_of;
 
 #[derive(Clone)]
@@ -29,13 +29,13 @@ pub(crate) struct Survey {
     pub(crate) by_width: HashMap<u32, Example>,
 }
 
-pub(crate) fn survey(catalog: &Catalog) -> eyre::Result<Survey> {
+pub(crate) fn survey(source: &impl Source) -> eyre::Result<Survey> {
     let mut graph = Graph::default();
     let mut conduits = 0_u64;
     let mut pure: HashMap<u8, Bag> = HashMap::new();
     let mut carrier: HashMap<u8, Example> = HashMap::new();
     let mut by_width: HashMap<u32, Example> = HashMap::new();
-    catalog.visit_conduits(|token_in, token_out, segments| {
+    source.visit_conduits(&mut |token_in, token_out, segments| {
         if segments.is_empty() {
             return Ok(());
         }

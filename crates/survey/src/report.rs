@@ -8,6 +8,7 @@ use crate::kinds::{curve_kinds, curve_label, kind_list};
 use crate::reader::Reader;
 use crate::scan::Survey;
 use crate::scenario::Scenario;
+use crate::source::Source;
 use crate::token::{label, Known};
 use crate::{HUB_LIMITS, HUB_MINIMUM, QUERY_HUBS};
 
@@ -118,14 +119,14 @@ pub(crate) fn hist_line(hist: &BTreeMap<u32, u64>) -> String {
         .join(" ")
 }
 
-pub(crate) fn push_set(
+pub(crate) fn push_set<S: Source>(
     out: &mut String,
     scenario: &Scenario,
     set: &RouteSet,
     known: &[Known],
     graph: &Graph,
     incoming: &HashMap<Token, Vec<Token>>,
-    reader: &Reader<'_>,
+    reader: &Reader<'_, S>,
 ) {
     out.push_str(&format!("== {}\n{}\n", scenario.name, scenario.detail));
     for (token, value) in &scenario.trade.inputs {
@@ -201,9 +202,9 @@ pub(crate) fn end_line(
     )
 }
 
-pub(crate) fn hop_line(
+pub(crate) fn hop_line<S: Source>(
     graph: &Graph,
-    reader: &Reader<'_>,
+    reader: &Reader<'_, S>,
     from: Token,
     to: Token,
     known: &[Known],

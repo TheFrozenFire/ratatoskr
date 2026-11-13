@@ -21,9 +21,11 @@ members = [
     "crates/action",
     "crates/trade",
     "crates/survey",
+    "crates/simulate",
     "crates/peer",
     "bins/ratatoskr",
     "bins/seek",
+    "bins/simulate",
 ]
 
 [workspace.package]
@@ -60,6 +62,7 @@ optimizer = { path = "crates/optimizer" }
 action = { path = "crates/action" }
 trade = { path = "crates/trade" }
 survey = { path = "crates/survey" }
+simulate = { path = "crates/simulate" }
 univ3 = { path = "crates/univ3" }
 venues = { path = "crates/venues" }
 # Libraries for one outbound devp2p socket. Not the reth node.

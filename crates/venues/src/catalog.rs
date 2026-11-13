@@ -136,6 +136,13 @@ pub struct Catalog {
     pub(crate) work: Database,
 }
 
+/// Read `entities.redb` while another process writes it.
+///
+/// The open uses single-writer mode. Discovery and the work queue stay closed.
+pub struct EntityRead {
+    pub(crate) entities: redb::ReadOnlyDatabase,
+}
+
 impl Catalog {
     /// Open the catalog directory.
     ///
@@ -357,35 +364,11 @@ impl Catalog {
     }
 
     pub fn token(&self, address: Address) -> eyre::Result<Option<TokenRecord>> {
-        let read = self.entities.begin_read()?;
-        let table = match read.open_table(TOKENS) {
-            Ok(table) => table,
-            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
-            Err(err) => return Err(err.into()),
-        };
-        match table.get(address.as_slice())? {
-            Some(value) => Ok(Some(decode_token(address, value.value())?)),
-            None => Ok(None),
-        }
+        read_token_row(&self.entities, address)
     }
 
     pub fn tokens(&self) -> eyre::Result<Vec<TokenRecord>> {
-        let read = self.entities.begin_read()?;
-        let table = match read.open_table(TOKENS) {
-            Ok(table) => table,
-            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
-            Err(err) => return Err(err.into()),
-        };
-        let mut rows = Vec::new();
-        for item in table.iter()? {
-            let (key, value) = item?;
-            let key = key.value();
-            if key.len() != 20 {
-                return Err(eyre::eyre!("token key"));
-            }
-            rows.push(decode_token(Address::from_slice(key), value.value())?);
-        }
-        Ok(rows)
+        read_token_rows(&self.entities)
     }
 
     /// Write token rows. An empty symbol leaves a stored symbol and its decimals.
@@ -594,6 +577,93 @@ fn open_db(path: &Path) -> eyre::Result<Database> {
     let create = !path.exists();
     let verb = if create { "create" } else { "open" };
     open_at(path, create).wrap_err_with(|| format!("{verb} {}", path.display()))
+}
+
+/// Page cache for a process that follows the writer.
+///
+/// The writer keeps the larger entity cache. This reader scans conduits and
+/// then reads the pairs a trade names.
+const READ_CACHE: usize = 64 * 1024 * 1024;
+
+impl EntityRead {
+    /// Open `entities.redb` in the catalog directory.
+    ///
+    /// A path whose file name ends in `.redb` selects that file's parent.
+    pub fn open(path: &Path) -> eyre::Result<Self> {
+        let file = catalog_dir(path).join("entities.redb");
+        let mut builder = redb::Builder::new();
+        builder.set_cache_size(READ_CACHE);
+        builder.set_concurrency_mode(redb::ConcurrencyMode::SingleWriter);
+        let entities = builder
+            .open_read_only(&file)
+            .wrap_err_with(|| format!("open {} read-only", file.display()))?;
+        Ok(Self { entities })
+    }
+
+    pub fn token(&self, address: Address) -> eyre::Result<Option<TokenRecord>> {
+        read_token_row(&self.entities, address)
+    }
+
+    pub fn tokens(&self) -> eyre::Result<Vec<TokenRecord>> {
+        read_token_rows(&self.entities)
+    }
+
+    pub fn read_venue(&self, kind: u8, id: B256) -> eyre::Result<Option<VenueRow>> {
+        read_venue_row(&self.entities, kind, id)
+    }
+}
+
+pub(crate) fn read_token_row(
+    db: &impl redb::ReadableDatabase,
+    address: Address,
+) -> eyre::Result<Option<TokenRecord>> {
+    let read = db.begin_read()?;
+    let table = match read.open_table(TOKENS) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+    match table.get(address.as_slice())? {
+        Some(value) => Ok(Some(decode_token(address, value.value())?)),
+        None => Ok(None),
+    }
+}
+
+pub(crate) fn read_token_rows(db: &impl redb::ReadableDatabase) -> eyre::Result<Vec<TokenRecord>> {
+    let read = db.begin_read()?;
+    let table = match read.open_table(TOKENS) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+        Err(err) => return Err(err.into()),
+    };
+    let mut rows = Vec::new();
+    for item in table.iter()? {
+        let (key, value) = item?;
+        let key = key.value();
+        if key.len() != 20 {
+            return Err(eyre::eyre!("token key"));
+        }
+        rows.push(decode_token(Address::from_slice(key), value.value())?);
+    }
+    Ok(rows)
+}
+
+pub(crate) fn read_venue_row(
+    db: &impl redb::ReadableDatabase,
+    kind: u8,
+    id: B256,
+) -> eyre::Result<Option<VenueRow>> {
+    let read = db.begin_read()?;
+    let table = match read.open_table(VENUES) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+    let key = entity_key(kind, &id);
+    match table.get(key.as_slice())? {
+        Some(value) => Ok(Some(decode_row(kind, id, value.value())?)),
+        None => Ok(None),
+    }
 }
 
 /// Move a legacy `venues.redb` onto the three-file layout.

@@ -1,9 +1,11 @@
-//! Basket allocation over actions.
+//! Basket allocation over pair conduits.
 //!
 //! A problem names input tokens with amounts, output tokens with positive
-//! weights, and the routes that connect them. Each edge is one [`action::Action`]
-//! and the chords of that action. A custodial wrap has no chords: it pays one
-//! token out for one token in, at any size. A route is a sequence of edges.
+//! weights, and the routes that connect them. Each edge is one pair conduit
+//! or one custodial wrap. A conduit's chords are its merged slope, steepest
+//! first, and each chord names the [`action::Action`] that receives that
+//! input. A custodial wrap has no chords: it pays one token out for one token
+//! in, at any size. A route is a sequence of these edges.
 //!
 //! [`optimize`] bisects the basket count. A count `Q` asks each output for
 //! `Q` times its weight. The search walks routes from the outputs back to
@@ -11,12 +13,11 @@
 //! edge book one tender, and the quote is [`routing::quote`] on that net.
 //! The count is the largest one whose inputs fit the amounts.
 //!
-//! Gas is the sum of the gas units of the actions that receive input. Two
-//! edges that name the same action keep two quotes, and the gas is charged
-//! once. A larger count wins. Equal counts keep the smaller gas: once the
-//! count is fixed, a fill that opens less gas replaces the plan when it still
-//! meets the count. A gas ceiling drops a candidate that would pass it. The
-//! allocator does not read a venue kind.
+//! Gas is the sum of the gas units of the actions whose chords receive input.
+//! The same action is charged once. A larger count wins. Equal counts keep
+//! the smaller gas: once the count is fixed, a fill that opens less gas
+//! replaces the plan when it still meets the count. A gas ceiling drops a
+//! candidate that would pass it. The allocator does not read a venue kind.
 
 mod solve;
 
@@ -46,23 +47,27 @@ pub struct Output {
     pub weight: BigInt,
 }
 
-/// The quote of one action.
+/// The quote of one edge.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Curve {
     /// One token out per token in, at any size. A custodial wrap or unwrap.
     Unlimited,
-    /// Chords of this action, steepest first.
+    /// Merged slope of one pair conduit, steepest first.
     Chords(Vec<Chord>),
 }
 
-/// One constant marginal of an action.
+/// One constant marginal, and the action that receives its input.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Chord {
     pub width: BigInt,
     pub output: BigInt,
+    pub action: Action,
 }
 
-/// One action a route can take. Routes share an edge by index.
+/// One pair conduit, or one custodial wrap. Routes share an edge by index.
+///
+/// `action` names the spent token and the paid token. A conduit's chords name
+/// the actions that receive input.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Edge {
     pub action: Action,
@@ -191,13 +196,29 @@ pub fn optimize(problem: &Problem) -> Result<Plan, OptimizeError> {
     let mut best = zero_plan(problem);
     while &lo + 1 < hi {
         let mid = (&lo + &hi) / 2;
-        if let Some(plan) = solve::meet(problem, &mid) {
+        let Some(plan) = solve::meet(problem, &mid) else {
+            hi = mid;
+            continue;
+        };
+        if plan.count >= mid {
             lo = plan.count.clone();
             if lo >= hi {
                 hi = &lo + 1;
             }
             best = plan;
+        } else if problem.outputs.len() == 1 {
+            // One output, and the routes ran out. That plan is the largest count.
+            if plan.count > lo {
+                lo = plan.count.clone();
+                best = plan;
+            }
+            hi = &lo + 1;
         } else {
+            // A basket can fund a larger count at a smaller ask. Keep searching.
+            if plan.count > lo {
+                lo = plan.count.clone();
+                best = plan;
+            }
             hi = mid;
         }
     }
@@ -271,6 +292,13 @@ fn check(problem: &Problem) -> Result<(), OptimizeError> {
             }
             Curve::Chords(chords) => {
                 if custodial(&edge.action) || !curve_rises_nowhere(chords) {
+                    return Err(OptimizeError::BrokenCurve);
+                }
+                let edge_pair = pair(&edge.action);
+                if chords
+                    .iter()
+                    .any(|chord| custodial(&chord.action) || pair(&chord.action) != edge_pair)
+                {
                     return Err(OptimizeError::BrokenCurve);
                 }
             }

@@ -1,8 +1,9 @@
 //! Backward fill of one basket count.
 //!
 //! A candidate count fixes the output each token must reach. Each step sends
-//! the source prefix whose realized sink output per input is highest, and the
-//! longest prefix when those rates match. A prefix that would pass the
+//! the longest source that still sits on the current slope segment of every
+//! edge, and keeps that span when its sink output per input beats the whole
+//! budget. The longer prefix wins a tie. A prefix that would pass the
 //! remaining demand is cut to the least input that meets the demand. Output
 //! above the next edge's take stays on that token. Two routes that share an
 //! edge add to one tender, and the output of that edge is the quote of the sum.
@@ -50,6 +51,9 @@ pub(crate) fn meet(problem: &Problem, count: &BigInt) -> Option<Plan> {
 }
 
 /// Keeps the count and replaces the plan when another fill opens less gas.
+///
+/// Ten routes or fewer are searched as subsets. A larger set drops one open
+/// action at a time, then takes one cheap fill.
 pub(crate) fn polish(problem: &Problem, mut best: Plan) -> Plan {
     if best.count.is_zero() || !gas_can_move(problem) {
         return best;
@@ -59,8 +63,6 @@ pub(crate) fn polish(problem: &Problem, mut best: Plan) -> Plan {
         let gas = best.gas.clone();
         if problem.routes.len() <= 10 {
             improve_subsets(problem, &mut best);
-        } else {
-            improve_pairs(problem, &mut best);
         }
         improve_without(problem, &mut best);
         if let Some(plan) = meet_ranked(problem, &best.count, Rank::Cheap, None) {
@@ -75,6 +77,14 @@ pub(crate) fn polish(problem: &Problem, mut best: Plan) -> Plan {
     best
 }
 
+#[derive(Clone)]
+struct Saved {
+    step: Step,
+    take: BigInt,
+    need: BigInt,
+    tenders: Vec<BigInt>,
+}
+
 fn meet_ranked(
     problem: &Problem,
     count: &BigInt,
@@ -86,6 +96,7 @@ fn meet_ranked(
     }
     let mut state = Live::open(problem, count);
     let hubs: HashSet<Token> = problem.hubs.iter().copied().collect();
+    let mut saved: Vec<Option<Saved>> = vec![None; problem.routes.len()];
     loop {
         if state.met() {
             break;
@@ -101,8 +112,34 @@ fn meet_ranked(
             if need.is_zero() {
                 continue;
             }
-            let Some(step) = offer(problem, &state, index, &need, room.as_ref()) else {
-                continue;
+            let budget = source_budget(problem, &state, index).unwrap_or_else(BigInt::zero);
+            let step = if let Some(step) = reused_step(
+                saved[index].as_ref(),
+                problem,
+                &state,
+                index,
+                &need,
+                &budget,
+                room.as_ref(),
+            ) {
+                step
+            } else {
+                let Some(step) = offer(problem, &state, index, &need, room.as_ref()) else {
+                    saved[index] = None;
+                    continue;
+                };
+                let route = &problem.routes[index];
+                saved[index] = Some(Saved {
+                    take: step.takes.first().cloned().unwrap_or_else(BigInt::zero),
+                    need: need.clone(),
+                    tenders: route
+                        .edges
+                        .iter()
+                        .map(|edge| state.tender[*edge].clone())
+                        .collect(),
+                    step: step.clone(),
+                });
+                step
             };
             open.push(Candidate {
                 index,
@@ -120,14 +157,114 @@ fn meet_ranked(
                 best = Some(candidate.clone());
             }
         }
-        let candidate = best?;
+        let Some(candidate) = best else {
+            break;
+        };
+        let touched = touched_tokens(problem, candidate.index, &candidate.step);
+        let before: Vec<BigInt> = touched
+            .iter()
+            .map(|token| state.got.get(token).cloned().unwrap_or_else(BigInt::zero))
+            .collect();
+        let dirty_edges = dirty_edge_flags(problem, candidate.index, &candidate.step);
         state.apply(problem, candidate.index, &candidate.step);
+        let mut dirty_tokens = HashSet::new();
+        for (token, prev) in touched.iter().zip(before) {
+            let now = state.got.get(token).cloned().unwrap_or_else(BigInt::zero);
+            if now != prev {
+                dirty_tokens.insert(*token);
+            }
+        }
+        invalidate_saved(&mut saved, problem, &dirty_edges, &dirty_tokens);
     }
-    let plan = state.plan(problem);
-    if &plan.count < count {
+    Some(state.plan(problem))
+}
+
+fn reused_step(
+    saved: Option<&Saved>,
+    problem: &Problem,
+    state: &Live,
+    route_index: usize,
+    need: &BigInt,
+    budget: &BigInt,
+    room: Option<&BigInt>,
+) -> Option<Step> {
+    let saved = saved?;
+    if &saved.need != need && &saved.step.delivered >= need {
         return None;
     }
-    Some(plan)
+    let route = &problem.routes[route_index];
+    if saved.tenders.len() != route.edges.len() {
+        return None;
+    }
+    for (tender, edge_index) in saved.tenders.iter().zip(&route.edges) {
+        if tender != &state.tender[*edge_index] {
+            return None;
+        }
+    }
+    if &saved.take > budget {
+        return None;
+    }
+    let mut step = saved.step.clone();
+    step.gas = step_gas(problem, state, route, &step.takes);
+    if let Some(room) = room {
+        if &step.gas > room {
+            return None;
+        }
+    }
+    if problem.gas_ceiling.is_some() && step.gas < saved.step.gas {
+        return None;
+    }
+    Some(step)
+}
+
+fn touched_tokens(problem: &Problem, route_index: usize, step: &Step) -> Vec<Token> {
+    let route = &problem.routes[route_index];
+    let mut tokens = Vec::new();
+    for (index, take) in step.takes.iter().enumerate() {
+        if take.is_zero() {
+            continue;
+        }
+        let edge = &problem.edges[route.edges[index]];
+        if index > 0 {
+            tokens.push(spent(edge));
+        }
+        if let Some(token) = edge.token_out() {
+            tokens.push(token);
+        }
+    }
+    tokens.sort();
+    tokens.dedup();
+    tokens
+}
+
+fn dirty_edge_flags(problem: &Problem, route_index: usize, step: &Step) -> Vec<bool> {
+    let mut dirty = vec![false; problem.edges.len()];
+    let route = &problem.routes[route_index];
+    for (index, take) in step.takes.iter().enumerate() {
+        if !take.is_zero() {
+            dirty[route.edges[index]] = true;
+        }
+    }
+    dirty
+}
+
+fn invalidate_saved(
+    saved: &mut [Option<Saved>],
+    problem: &Problem,
+    dirty_edges: &[bool],
+    dirty_tokens: &HashSet<Token>,
+) {
+    for (index, slot) in saved.iter_mut().enumerate() {
+        if slot.is_none() {
+            continue;
+        }
+        let stale = problem.routes[index].edges.iter().any(|edge_index| {
+            dirty_edges[*edge_index] || dirty_tokens.contains(&spent(&problem.edges[*edge_index]))
+        });
+        if stale {
+            *slot = None;
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -156,26 +293,6 @@ fn improve_subsets(problem: &Problem, best: &mut Plan) {
             continue;
         }
         adopt(problem, best, Rank::Slope, Some(&allow));
-    }
-}
-
-fn improve_pairs(problem: &Problem, best: &mut Plan) {
-    let n = problem.routes.len();
-    let mut allow = vec![false; n];
-    for left in 0..n {
-        allow.fill(false);
-        allow[left] = true;
-        if covers(problem, &allow) {
-            adopt(problem, best, Rank::Slope, Some(&allow));
-        }
-        for right in left + 1..n {
-            allow.fill(false);
-            allow[left] = true;
-            allow[right] = true;
-            if covers(problem, &allow) {
-                adopt(problem, best, Rank::Slope, Some(&allow));
-            }
-        }
     }
 }
 
@@ -215,8 +332,13 @@ fn covers(problem: &Problem, allow: &[bool]) -> bool {
 fn mute_action(problem: &Problem, action: &Action) -> Problem {
     let mut muted = problem.clone();
     for edge in &mut muted.edges {
-        if &edge.action == action {
+        let clear = matches!(edge.curve, Curve::Unlimited) && edge.action == *action;
+        if clear {
             edge.curve = Curve::Chords(Vec::new());
+            continue;
+        }
+        if let Curve::Chords(chords) = &mut edge.curve {
+            chords.retain(|chord| &chord.action != action);
         }
     }
     muted
@@ -318,7 +440,9 @@ impl Live {
             self.tender[*edge_index] += take;
             let actual = produce(edge, &old, take);
             *self.got.entry(token_out).or_default() += &actual;
-            self.opened.insert(edge.action.clone());
+            for (action, _) in paid_shares(edge, &old, take) {
+                self.opened.insert(action);
+            }
         }
         self.route_in[route_index] += &step.takes[0];
         self.route_out[route_index] += &step.delivered;
@@ -630,7 +754,15 @@ fn fallback_prefix(
     let mut best_take = BigInt::from(1);
     let mut best_gain =
         spent_gain(problem, state, route_index, &best_take).unwrap_or_else(BigInt::zero);
-    if let Some((take, gain)) = head_candidate(problem, state, route_index, limit) {
+    if problem.routes[route_index].edges.len() > 1 {
+        // A one-unit prefix has the best average on a diminishing curve, and
+        // filling the budget one unit at a time does not finish. The current
+        // slope segment is one marginal, so the step is the rest of it.
+        if let Some((take, gain)) = span_candidate(problem, state, route_index, limit) {
+            best_take = take;
+            best_gain = gain;
+        }
+    } else if let Some((take, gain)) = head_candidate(problem, state, route_index, limit) {
         if ratio_beats(&gain, &take, &best_gain, Some(&best_take)) {
             best_take = take;
             best_gain = gain;
@@ -649,6 +781,186 @@ fn fallback_prefix(
         return Some((take, gain));
     }
     Some((best_take, best_gain))
+}
+
+/// Largest source that keeps every edge on its current slope segment.
+fn span_candidate(
+    problem: &Problem,
+    state: &Live,
+    route_index: usize,
+    limit: &BigInt,
+) -> Option<(BigInt, BigInt)> {
+    let one = BigInt::from(1);
+    if limit < &one {
+        return None;
+    }
+    let take = match span_take(problem, state, route_index, limit) {
+        Some(take) if span_exact(problem, state, route_index, limit, &take) => take,
+        _ if stays_on_heads(problem, state, route_index, &one) => {
+            span_search(problem, state, route_index, limit)?
+        }
+        _ => return None,
+    };
+    let gain = spent_gain(problem, state, route_index, &take)?;
+    Some((take, gain))
+}
+
+fn span_exact(
+    problem: &Problem,
+    state: &Live,
+    route_index: usize,
+    limit: &BigInt,
+    take: &BigInt,
+) -> bool {
+    if !stays_on_heads(problem, state, route_index, take) {
+        return false;
+    }
+    take == limit || !stays_on_heads(problem, state, route_index, &(take + 1))
+}
+
+fn span_search(
+    problem: &Problem,
+    state: &Live,
+    route_index: usize,
+    limit: &BigInt,
+) -> Option<BigInt> {
+    let one = BigInt::from(1);
+    if stays_on_heads(problem, state, route_index, limit) {
+        return Some(limit.clone());
+    }
+    let mut lo = one;
+    let mut hi = limit.clone();
+    while &lo + 1 < hi {
+        let mid = (&lo + &hi) / 2;
+        if stays_on_heads(problem, state, route_index, &mid) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    Some(lo)
+}
+
+/// Source bound from the head of each edge, inverted back along the route.
+fn span_take(
+    problem: &Problem,
+    state: &Live,
+    route_index: usize,
+    limit: &BigInt,
+) -> Option<BigInt> {
+    let route = &problem.routes[route_index];
+    let mut cap = limit.clone();
+    for (index, edge_index) in route.edges.iter().enumerate() {
+        let edge = &problem.edges[*edge_index];
+        let tender = &state.tender[*edge_index];
+        let Some(enter_cap) = enter_cap(edge, tender) else {
+            continue;
+        };
+        if enter_cap.is_zero() {
+            return None;
+        }
+        let Some(allowed) = source_for_enter(problem, state, route, index, &enter_cap) else {
+            continue;
+        };
+        if allowed < cap {
+            cap = allowed;
+        }
+    }
+    if cap.is_zero() {
+        None
+    } else {
+        Some(cap)
+    }
+}
+
+/// Largest input that still lands on this edge's current slope segment.
+///
+/// `None` means a larger input cannot leave the segment.
+fn enter_cap(edge: &Edge, tender: &BigInt) -> Option<BigInt> {
+    let Curve::Chords(segments) = &edge.curve else {
+        return None;
+    };
+    let remaining = remaining_input(edge, tender).unwrap_or_else(BigInt::zero);
+    if remaining.is_zero() {
+        return None;
+    }
+    let Some(head) = head(segments, tender) else {
+        return Some(BigInt::from(0));
+    };
+    if remaining <= head.rem_w {
+        None
+    } else {
+        Some(head.rem_w)
+    }
+}
+
+/// Largest source whose flow into `index` is at most `enter_cap`.
+///
+/// `None` means the cap does not bind before the upstream edges are exhausted.
+fn source_for_enter(
+    problem: &Problem,
+    state: &Live,
+    route: &Route,
+    index: usize,
+    enter_cap: &BigInt,
+) -> Option<BigInt> {
+    let mut max_enter = enter_cap.clone();
+    for cursor in (0..=index).rev() {
+        if cursor == 0 {
+            return Some(max_enter);
+        }
+        let edge_index = route.edges[cursor];
+        let excess = state.excess(&spent(&problem.edges[edge_index]));
+        let max_produce = if excess >= max_enter {
+            BigInt::from(0)
+        } else {
+            &max_enter - &excess
+        };
+        let prev_index = route.edges[cursor - 1];
+        let prev = &problem.edges[prev_index];
+        let prev_tender = &state.tender[prev_index];
+        let max_take = max_take_for_output(prev, prev_tender, &max_produce);
+        match remaining_input(prev, prev_tender) {
+            Some(rem) if max_take >= rem => return None,
+            _ => max_enter = max_take,
+        }
+    }
+    None
+}
+
+/// Largest take whose quote is at most `max_out`.
+fn max_take_for_output(edge: &Edge, tender: &BigInt, max_out: &BigInt) -> BigInt {
+    let need = max_out + 1;
+    match least_take(edge, tender, &need) {
+        Some(take) if take > BigInt::from(0) => take - 1,
+        None => remaining_input(edge, tender).unwrap_or_else(|| max_out.clone()),
+        Some(_) => BigInt::from(0),
+    }
+}
+
+fn stays_on_heads(problem: &Problem, state: &Live, route_index: usize, source: &BigInt) -> bool {
+    let sim = simulate(problem, state, route_index, source);
+    let Some(sim) = sim else {
+        return false;
+    };
+    if sim.takes.first() != Some(source) {
+        return false;
+    }
+    let route = &problem.routes[route_index];
+    sim.takes.iter().enumerate().all(|(index, take)| {
+        let edge_index = route.edges[index];
+        on_current_piece(&problem.edges[edge_index], &state.tender[edge_index], take)
+    })
+}
+
+fn on_current_piece(edge: &Edge, tender: &BigInt, take: &BigInt) -> bool {
+    if take.is_zero() {
+        return true;
+    }
+    match &edge.curve {
+        Curve::Unlimited => true,
+        Curve::Chords(segments) => head(segments, tender).is_some_and(|head| take <= &head.rem_w),
+    }
 }
 
 fn head_candidate(
@@ -1135,15 +1447,57 @@ fn step_gas(problem: &Problem, state: &Live, route: &Route, takes: &[BigInt]) ->
         if take.is_zero() {
             continue;
         }
-        let edge = &problem.edges[route.edges[index]];
-        if state.opened.contains(&edge.action) || !seen.insert(edge.action.clone()) {
-            continue;
-        }
-        if let Some(cost) = problem.gas.get(&edge.action) {
-            gas += cost;
+        let edge_index = route.edges[index];
+        let edge = &problem.edges[edge_index];
+        for (action, _) in paid_shares(edge, &state.tender[edge_index], take) {
+            if state.opened.contains(&action) || !seen.insert(action.clone()) {
+                continue;
+            }
+            if let Some(cost) = problem.gas.get(&action) {
+                gas += cost;
+            }
         }
     }
     gas
+}
+
+/// Input of `take` that lands on each action, starting after `tender`.
+fn paid_shares(edge: &Edge, tender: &BigInt, take: &BigInt) -> Vec<(Action, BigInt)> {
+    if take.sign() != num_bigint::Sign::Plus {
+        return Vec::new();
+    }
+    match &edge.curve {
+        Curve::Unlimited => vec![(edge.action.clone(), take.clone())],
+        Curve::Chords(chords) => {
+            let mut shares: Vec<(Action, BigInt)> = Vec::new();
+            let mut skip = tender.clone();
+            let mut left = take.clone();
+            for chord in chords {
+                if skip >= chord.width {
+                    skip -= &chord.width;
+                    continue;
+                }
+                let room = &chord.width - &skip;
+                let used = std::cmp::min(left.clone(), room);
+                if !used.is_zero() {
+                    if let Some((_, amount)) = shares
+                        .iter_mut()
+                        .find(|(action, _)| action == &chord.action)
+                    {
+                        *amount += &used;
+                    } else {
+                        shares.push((chord.action.clone(), used.clone()));
+                    }
+                }
+                left -= &used;
+                skip = BigInt::from(0);
+                if left.is_zero() {
+                    break;
+                }
+            }
+            shares
+        }
+    }
 }
 
 fn tenders(problem: &Problem, edge_tender: &[BigInt]) -> Vec<Tender> {
@@ -1156,8 +1510,9 @@ fn tenders(problem: &Problem, edge_tender: &[BigInt]) -> Vec<Tender> {
         let Some((token_in, token_out)) = edge.token_in().zip(edge.token_out()) else {
             continue;
         };
-        *acc.entry((edge.action.clone(), token_in, token_out))
-            .or_default() += tender;
+        for (action, input) in paid_shares(edge, &BigInt::from(0), tender) {
+            *acc.entry((action, token_in, token_out)).or_default() += input;
+        }
     }
     acc.into_iter()
         .map(|((action, token_in, token_out), input)| Tender {
@@ -1208,6 +1563,8 @@ fn paid(edge: &Edge) -> Token {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
 
     fn chord_edge(width: i64, output: i64) -> Edge {
@@ -1220,11 +1577,13 @@ mod tests {
             action::Invariant::Product,
         )
         .expect("swap");
+        let action = Action::Swap(swap);
         Edge {
-            action: Action::Swap(swap),
+            action: action.clone(),
             curve: Curve::Chords(vec![Chord {
                 width: BigInt::from(width),
                 output: BigInt::from(output),
+                action,
             }]),
         }
     }
@@ -1251,6 +1610,97 @@ mod tests {
                         need += 1;
                     }
                 }
+            }
+        }
+    }
+
+    fn hop(input: u8, output: u8, pool: u8, chords: &[(i64, i64)]) -> Edge {
+        let contract = action::Address::new([pool; 20]).expect("contract");
+        let swap = action::Swap::new(
+            contract,
+            contract.pool_id(),
+            Token([input; 20]),
+            Token([output; 20]),
+            action::Invariant::Product,
+        )
+        .expect("swap");
+        let action = Action::Swap(swap);
+        Edge {
+            action: action.clone(),
+            curve: Curve::Chords(
+                chords
+                    .iter()
+                    .map(|(width, output)| Chord {
+                        width: BigInt::from(*width),
+                        output: BigInt::from(*output),
+                        action: action.clone(),
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
+    fn two_hop(second: &[(i64, i64)]) -> Problem {
+        Problem {
+            inputs: vec![crate::Input {
+                token: Token([1; 20]),
+                amount: BigInt::from(100),
+            }],
+            outputs: vec![crate::Output {
+                token: Token([3; 20]),
+                weight: BigInt::from(1),
+            }],
+            edges: vec![hop(1, 2, 1, &[(8, 13), (8, 5)]), hop(2, 3, 2, second)],
+            routes: vec![Route { edges: vec![0, 1] }],
+            hubs: Vec::new(),
+            gas: BTreeMap::new(),
+            gas_ceiling: None,
+        }
+    }
+
+    fn scanned_span(problem: &Problem, state: &Live, limit: &BigInt) -> Option<BigInt> {
+        let one = BigInt::from(1);
+        if !stays_on_heads(problem, state, 0, &one) {
+            return None;
+        }
+        let mut best = one.clone();
+        let mut take = BigInt::from(2);
+        while &take <= limit {
+            if !stays_on_heads(problem, state, 0, &take) {
+                break;
+            }
+            best = take.clone();
+            take += 1;
+        }
+        Some(best)
+    }
+
+    #[test]
+    fn the_span_matches_the_head_boundary() {
+        for second in [
+            &[(10, 9), (10, 4)][..],
+            &[(4, 5), (10, 3)][..],
+            &[(6, 6)][..],
+        ] {
+            let problem = two_hop(second);
+            let mut state = Live::open(&problem, &BigInt::from(1));
+            for limit in 1..36 {
+                let limit = BigInt::from(limit);
+                assert_eq!(
+                    span_take(&problem, &state, 0, &limit),
+                    scanned_span(&problem, &state, &limit),
+                    "limit {limit}"
+                );
+            }
+            state.tender[0] = BigInt::from(3);
+            state.tender[1] = BigInt::from(2);
+            for limit in 1..36 {
+                let limit = BigInt::from(limit);
+                assert_eq!(
+                    span_take(&problem, &state, 0, &limit),
+                    scanned_span(&problem, &state, &limit),
+                    "tendered {limit}"
+                );
             }
         }
     }

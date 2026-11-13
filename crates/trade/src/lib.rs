@@ -3,13 +3,14 @@
 //! A trade names the tokens it spends, the amount of each, the tokens it
 //! wants back, and the weight of each. It names the wrapped token when an
 //! input is native ETH, and it can name a gas ceiling. [`query`] checks that
-//! definition and hands it to the searcher. [`problem`] reads the curves the
-//! search returns, splits each pair conduit into one action per pool, and
-//! builds the problem the allocator runs. [`allocate`] returns the plan.
+//! definition and hands it to the searcher. [`problem`] hands each pair
+//! conduit to the allocator as one edge. The chords stay in the stored merge,
+//! and each chord names the action that receives that input. [`allocate`]
+//! returns the plan.
 //!
-//! The caller names each pool key as an [`Action`]. A custodial wrap is built
-//! here, from native ETH on one side of the wrap curve. This crate does not
-//! read a venue kind and does not open the catalog.
+//! The caller names each pool key as an [`Action`]. A custodial wrap is one
+//! unlimited edge, built from native ETH on one side of the wrap curve. This
+//! crate does not read a venue kind and does not open the catalog.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -112,11 +113,12 @@ pub fn query(trade: &Trade, hubs: &[Token]) -> Result<Query, TradeError> {
     )?)
 }
 
-/// Split the route set into one edge per action and build the problem.
+/// Hand each pair conduit to the allocator as one edge.
 ///
 /// `name` turns a pool key into the action that spends `token_in` and pays
-/// `token_out`. Gas is copied from `gas`. A missing key is left missing, and
-/// the allocator charges it as zero.
+/// `token_out`. A chord keeps that action. Gas is copied from `gas`. A missing
+/// key is left missing, and the allocator charges it as zero. The routes are
+/// the searcher's indexes.
 pub fn problem(
     trade: &Trade,
     hubs: &[Token],
@@ -129,12 +131,20 @@ pub fn problem(
     if !same_trade(trade, set) {
         return Err(TradeError::RouteSet);
     }
-    let mut edges = Vec::new();
-    let mut expanded = Vec::with_capacity(set.edges.len());
+    let mut edges = Vec::with_capacity(set.edges.len());
     for edge in &set.edges {
-        let start = edges.len();
-        edges.extend(split(trade, edge, &mut name)?);
-        expanded.push((start..edges.len()).collect::<Vec<_>>());
+        edges.push(conduit_edge(trade, edge, &mut name)?);
+    }
+    let mut routes = Vec::with_capacity(set.routes.len());
+    for route in &set.routes {
+        for index in &route.edges {
+            if *index >= set.edges.len() {
+                return Err(TradeError::RouteSet);
+            }
+        }
+        routes.push(Route {
+            edges: route.edges.clone(),
+        });
     }
     Ok(Problem {
         inputs: trade
@@ -154,7 +164,7 @@ pub fn problem(
             })
             .collect(),
         edges,
-        routes: expand(&set.routes, &expanded)?,
+        routes,
         hubs: hubs.to_vec(),
         gas,
         gas_ceiling: trade.gas_ceiling.clone(),
@@ -230,55 +240,37 @@ fn same_trade(trade: &Trade, set: &RouteSet) -> bool {
         .all(|((token, _), set_token)| token == set_token)
 }
 
-fn split(
+fn conduit_edge(
     trade: &Trade,
     edge: &searcher::Edge,
     name: &mut impl FnMut(Token, Token, &routing::Action) -> Result<Action, TradeError>,
-) -> Result<Vec<Edge>, TradeError> {
+) -> Result<Edge, TradeError> {
     match &edge.curve {
-        searcher::Curve::Wrap => Ok(vec![Edge {
+        searcher::Curve::Wrap => Ok(Edge {
             action: custodial(trade, edge.token_in, edge.token_out)?,
             curve: Curve::Unlimited,
-        }]),
+        }),
         searcher::Curve::Conduit(segments) => {
-            let mut edges = Vec::new();
-            for (key, group) in take_groups(segments)? {
-                let chords = group
-                    .iter()
-                    .map(|segment| Chord {
-                        width: segment.width.clone(),
-                        output: segment.output.clone(),
-                    })
-                    .collect();
-                edges.push(Edge {
-                    action: name(edge.token_in, edge.token_out, &key)?,
-                    curve: Curve::Chords(chords),
+            let mut chords = Vec::new();
+            for segment in segments {
+                if segment.width <= BigInt::from(0) || segment.output <= BigInt::from(0) {
+                    continue;
+                }
+                chords.push(Chord {
+                    width: segment.width.clone(),
+                    output: segment.output.clone(),
+                    action: name(edge.token_in, edge.token_out, &segment.action)?,
                 });
             }
-            Ok(edges)
+            let Some(action) = chords.first().map(|chord| chord.action.clone()) else {
+                return Err(TradeError::Curve);
+            };
+            Ok(Edge {
+                action,
+                curve: Curve::Chords(chords),
+            })
         }
     }
-}
-
-/// Chords of one pool stay in the order the conduit stored them.
-fn take_groups(
-    segments: &[SlopeSegment],
-) -> Result<Vec<(routing::Action, Vec<SlopeSegment>)>, TradeError> {
-    let mut groups: Vec<(routing::Action, Vec<SlopeSegment>)> = Vec::new();
-    for segment in segments {
-        if segment.width <= BigInt::from(0) || segment.output <= BigInt::from(0) {
-            continue;
-        }
-        if let Some((_, chords)) = groups.iter_mut().find(|(key, _)| *key == segment.action) {
-            chords.push(segment.clone());
-        } else {
-            groups.push((segment.action, vec![segment.clone()]));
-        }
-    }
-    if groups.is_empty() {
-        return Err(TradeError::Curve);
-    }
-    Ok(groups)
 }
 
 fn custodial(trade: &Trade, token_in: Token, token_out: Token) -> Result<Action, TradeError> {
@@ -295,34 +287,6 @@ fn custodial(trade: &Trade, token_in: Token, token_out: Token) -> Result<Action,
     } else {
         Err(TradeError::Wrap)
     }
-}
-
-fn expand(routes: &[searcher::Route], expanded: &[Vec<usize>]) -> Result<Vec<Route>, TradeError> {
-    let mut out = Vec::new();
-    for route in routes {
-        let mut choices = vec![Vec::new()];
-        for index in &route.edges {
-            let Some(alts) = expanded.get(*index) else {
-                return Err(TradeError::RouteSet);
-            };
-            if alts.is_empty() {
-                return Err(TradeError::Curve);
-            }
-            let mut grown = Vec::new();
-            for prefix in &choices {
-                for edge_index in alts {
-                    let mut path = prefix.clone();
-                    path.push(*edge_index);
-                    grown.push(path);
-                }
-            }
-            choices = grown;
-        }
-        for path in choices {
-            out.push(Route { edges: path });
-        }
-    }
-    Ok(out)
 }
 
 #[cfg(test)]
@@ -457,24 +421,42 @@ mod tests {
         ));
     }
 
+    fn pool_byte(action: &Action) -> u8 {
+        match action {
+            Action::Swap(swap) => swap.contract.0[0],
+            other => panic!("{other:?}"),
+        }
+    }
+
     #[test]
-    fn a_merged_conduit_becomes_parallel_edges() {
+    fn a_merged_conduit_stays_one_edge() {
         let set = route_set(
             vec![conduit(
                 token(1),
                 token(2),
-                vec![segment(4, 2, 1, 4), segment(4, 1, 2, 4)],
+                vec![segment(4, 2, 1, 4), segment(4, 1, 1, 5)],
             )],
             vec![vec![0]],
         );
         let built = problem(&sample(), &[], &set, &BTreeMap::new(), name_pool).expect("problem");
-        assert_eq!(built.edges.len(), 2);
-        assert_eq!(built.routes.len(), 2);
-        assert!(built.routes.iter().all(|route| route.edges.len() == 1));
+        assert_eq!(built.edges.len(), 1);
+        assert_eq!(built.routes.len(), 1);
+        assert_eq!(built.routes[0].edges, vec![0]);
+        let Curve::Chords(chords) = &built.edges[0].curve else {
+            panic!("chords");
+        };
+        assert_eq!(chords.len(), 2);
+        assert_eq!(chords[0].width, BigInt::from(4));
+        assert_eq!(chords[0].output, BigInt::from(2));
+        assert_eq!(pool_byte(&chords[0].action), 4);
+        assert_eq!(chords[1].width, BigInt::from(4));
+        assert_eq!(chords[1].output, BigInt::from(1));
+        assert_eq!(pool_byte(&chords[1].action), 5);
+        assert_eq!(built.edges[0].action, chords[0].action);
     }
 
     #[test]
-    fn one_action_keeps_its_chords_in_appearance_order() {
+    fn one_conduit_keeps_chords_in_stored_order() {
         let set = route_set(
             vec![conduit(
                 token(1),
@@ -488,29 +470,31 @@ mod tests {
             vec![vec![0]],
         );
         let built = problem(&sample(), &[], &set, &BTreeMap::new(), name_pool).expect("problem");
-        assert_eq!(built.edges.len(), 2);
-        assert_eq!(built.routes.len(), 2);
-        assert!(built.routes.iter().all(|route| route.edges.len() == 1));
+        assert_eq!(built.edges.len(), 1);
+        assert_eq!(built.routes.len(), 1);
+        assert_eq!(built.routes[0].edges, vec![0]);
         let Curve::Chords(chords) = &built.edges[0].curve else {
             panic!("chords");
         };
         assert_eq!(
-            chords,
-            &vec![
-                Chord {
-                    width: BigInt::from(10),
-                    output: BigInt::from(7),
-                },
-                Chord {
-                    width: BigInt::from(3),
-                    output: BigInt::from(1),
-                },
+            chords
+                .iter()
+                .map(|chord| (
+                    chord.width.clone(),
+                    chord.output.clone(),
+                    pool_byte(&chord.action)
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (BigInt::from(10), BigInt::from(7), 4),
+                (BigInt::from(5), BigInt::from(1), 5),
+                (BigInt::from(3), BigInt::from(1), 4),
             ]
         );
     }
 
     #[test]
-    fn a_split_edge_keeps_the_following_edge() {
+    fn a_path_keeps_each_conduit() {
         let set = RouteSet {
             inputs: vec![(token(1), BigUint::from(10_u8))],
             outputs: vec![token(3)],
@@ -531,11 +515,14 @@ mod tests {
             gas_ceiling: None,
         };
         let built = problem(&trade, &[], &set, &BTreeMap::new(), name_pool).expect("problem");
-        assert_eq!(built.edges.len(), 3);
-        assert_eq!(built.routes.len(), 2);
-        assert!(built.routes.iter().all(|route| route.edges.len() == 2));
-        assert_eq!(built.routes[0].edges[1], built.routes[1].edges[1]);
-        assert_ne!(built.routes[0].edges[0], built.routes[1].edges[0]);
+        assert_eq!(built.edges.len(), 2);
+        assert_eq!(built.routes.len(), 1);
+        assert_eq!(built.routes[0].edges, vec![0, 1]);
+        let Curve::Chords(first) = &built.edges[0].curve else {
+            panic!("chords");
+        };
+        assert_eq!(pool_byte(&first[0].action), 1);
+        assert_eq!(pool_byte(&first[1].action), 2);
     }
 
     #[test]
@@ -722,5 +709,30 @@ mod tests {
         let plan = allocate(&sample(), &[], &book, &BTreeMap::new(), name_pool).expect("plan");
         assert_eq!(plan.count, BigInt::from(7));
         assert_eq!(plan.gas, BigInt::from(0));
+    }
+
+    #[test]
+    fn allocate_funds_both_pools_of_one_conduit() {
+        let book = Direct(vec![segment(1, 4, 1, 1), segment(3, 3, 1, 2)]);
+        let mut gas = BTreeMap::new();
+        gas.insert(
+            name_pool(token(1), token(2), &key(1, 1)).expect("swap"),
+            BigInt::from(5),
+        );
+        gas.insert(
+            name_pool(token(1), token(2), &key(1, 2)).expect("swap"),
+            BigInt::from(7),
+        );
+        let plan = allocate(&sample(), &[], &book, &gas, name_pool).expect("plan");
+        assert_eq!(plan.count, BigInt::from(7));
+        assert_eq!(plan.gas, BigInt::from(12));
+        assert_eq!(plan.tenders.len(), 2);
+        let mut inputs: Vec<(u8, BigInt)> = plan
+            .tenders
+            .iter()
+            .map(|tender| (pool_byte(&tender.action), tender.input.clone()))
+            .collect();
+        inputs.sort();
+        assert_eq!(inputs, vec![(1, BigInt::from(1)), (2, BigInt::from(3))]);
     }
 }

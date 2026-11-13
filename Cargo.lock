@@ -5271,6 +5271,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
+name = "simulate"
+version = "0.1.0"
+dependencies = [
+ "action",
+ "num-bigint",
+ "num-traits",
+ "routing",
+]
+
+[[package]]
+name = "simulate-bin"
+version = "0.1.0"
+dependencies = [
+ "eyre",
+ "survey",
+]
+
+[[package]]
 name = "siphasher"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5401,8 +5419,10 @@ dependencies = [
  "eyre",
  "num-bigint",
  "num-traits",
+ "optimizer",
  "routing",
  "searcher",
+ "simulate",
  "trade",
  "venues",
 ]

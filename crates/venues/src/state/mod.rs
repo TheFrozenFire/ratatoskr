@@ -27,8 +27,7 @@ use crate::detail::{
 use crate::rpc::Rpc;
 use crate::tick::{self, TickWordRead};
 use crate::{
-    decode_row, Catalog, EntityStore, RunOpts, RunReport, VenueRow, PANCAKE_V3, SUSHI_V3, UNI_V3,
-    V3_FORK,
+    Catalog, EntityStore, RunOpts, RunReport, VenueRow, PANCAKE_V3, SUSHI_V3, UNI_V3, V3_FORK,
 };
 use alloy_primitives::{keccak256, Address, B256, U256};
 use eyre::WrapErr;
@@ -639,17 +638,7 @@ impl Catalog {
     }
 
     pub fn read_venue(&self, kind: u8, id: B256) -> eyre::Result<Option<VenueRow>> {
-        let read = self.entities.begin_read()?;
-        let table = match read.open_table(VENUES) {
-            Ok(table) => table,
-            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
-            Err(err) => return Err(err.into()),
-        };
-        let key = entity_key(kind, &id);
-        match table.get(key.as_slice())? {
-            Some(value) => Ok(Some(decode_row(kind, id, value.value())?)),
-            None => Ok(None),
-        }
+        crate::catalog::read_venue_row(&self.entities, kind, id)
     }
 
     pub fn watch_through(&self) -> eyre::Result<Option<u64>> {

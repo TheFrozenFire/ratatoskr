@@ -329,16 +329,20 @@ The build of a route set from a trade. It reads stored pair conduits, walks endp
 _Avoid_: optimizer, state pipeline
 
 **Trade**:
-The inputs, the basket weights, the wrapped token, and the gas ceiling a caller stands behind. It builds the search and turns the route set into a problem of actions.
+The inputs, the basket weights, the wrapped token, and the gas ceiling a caller stands behind. It builds the search and hands each pair conduit to the allocator as one edge.
 _Avoid_: route set, plan, request
 
 **Optimizer**:
-The allocation of input amounts across a problem of actions. It bisects the basket count and books one net input on each shared edge. It does not read the catalog.
+The allocation of input amounts across pair conduits. It bisects the basket count and books one net input on each shared conduit. Gas is charged on the action whose chord receives input. It does not read the catalog.
 _Avoid_: searcher, state pipeline
 
 **Plan**:
-The basket count a problem can fund, the input spent on each route, and the gas of the actions that receive input.
+The basket count a problem can fund, the input spent on each route, and the gas of the actions whose chords receive input.
 _Avoid_: route set, quote
+
+**Score**:
+The numeraire value of what a finished plan spent, the numeraire value of what it received, and the gas the plan opened. The price of a token is the first slope segment of a pair conduit into the numeraire. The gap is the input value minus the output value. The prices are read after the plan exists.
+_Avoid_: acceptance bar, price impact
 
 **Acceptance bar**:
 The worst relative error a stored formula is allowed on its labels: ten basis points.
@@ -662,6 +666,7 @@ _Avoid_: live catalog, quote record, grid
 - **"The function"** is not a name for a **Price curve** or a **Formula**.
 - **Quote stage.** Older work named a stage that fetched chain quotes. That stage is not claimed. Chain quotes already stored remain **Quote records**.
 - **"Route"** and **"hop"** are not names for a **Pair conduit**. The conduit is one ordered pair of tokens. A path through a third token is a composition of pair conduits. A **Basket** is the count of fixed-weight outputs. It is not a pair conduit.
+- A **Score** marks a finished **Plan** in one numeraire. The **Searcher** and the **Optimizer** quote in the tokens' own units. The prices are read after the plan exists. An **Acceptance bar** is the formula error of a stored price curve, and it is a different number.
 - **Unequal-weight Balancer.** The local quote and the stored weighted formula are both determined by balances, weights, and the pool fee, and they are different evaluations. Selection can store a **Sample formula** instead. Do not treat the local quote and the stored formula as one object.
 - **Crypto pool.** Its local quote is a spot line on the price scales. That line is not the crypto invariant and not a chain quote.
 - **Kind and shape.** Kind is the family on the pool identity. Shape is the quoting rule of the pool.

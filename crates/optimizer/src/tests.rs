@@ -44,12 +44,13 @@ fn swap_action(token_in: Token, token_out: Token, pool: u8) -> action::Action {
     )
 }
 
-fn chords_of(segments: &[SlopeSegment]) -> Vec<Chord> {
+fn chords_of(token_in: u8, token_out: u8, segments: &[SlopeSegment]) -> Vec<Chord> {
     segments
         .iter()
         .map(|segment| Chord {
             width: segment.width.clone(),
             output: segment.output.clone(),
+            action: swap_action(token(token_in), token(token_out), segment.action.pool[0]),
         })
         .collect()
 }
@@ -59,15 +60,9 @@ fn conduit(token_in: u8, token_out: u8, segments: Vec<SlopeSegment>) -> Edge {
         .first()
         .map(|segment| segment.action.pool[0])
         .unwrap_or(1);
-    assert!(
-        segments
-            .iter()
-            .all(|segment| segment.action.pool[0] == pool),
-        "one edge holds one action"
-    );
     Edge {
         action: swap_action(token(token_in), token(token_out), pool),
-        curve: Curve::Chords(chords_of(&segments)),
+        curve: Curve::Chords(chords_of(token_in, token_out, &segments)),
     }
 }
 
@@ -97,12 +92,21 @@ fn is_pool(action: &action::Action, pool: u8) -> bool {
 }
 
 fn set_gas(problem: &mut Problem, pool: u8, gas: i64) {
-    let keys: Vec<action::Action> = problem
-        .edges
-        .iter()
-        .filter(|edge| is_pool(&edge.action, pool))
-        .map(|edge| edge.action.clone())
-        .collect();
+    let mut keys = Vec::new();
+    for edge in &problem.edges {
+        if is_pool(&edge.action, pool) {
+            keys.push(edge.action.clone());
+        }
+        if let Curve::Chords(chords) = &edge.curve {
+            for chord in chords {
+                if is_pool(&chord.action, pool) {
+                    keys.push(chord.action.clone());
+                }
+            }
+        }
+    }
+    keys.sort();
+    keys.dedup();
     for key in keys {
         problem.gas.insert(key, z(gas));
     }
@@ -328,6 +332,159 @@ fn two_legs_pay_more_than_the_direct_conduit() {
     assert_eq!(received(&plan, 3), z(40));
     assert_eq!(plan.flows.len(), 1);
     assert_eq!(plan.flows[0].route, 1);
+}
+
+#[test]
+fn a_wide_multi_edge_piece_is_taken_whole() {
+    let problem = problem(
+        &[(1, 2_000_000)],
+        &[(3, 1)],
+        vec![
+            conduit(
+                1,
+                2,
+                vec![
+                    segment(1_000_000, 1_500_000, 1),
+                    segment(1_000_000, 100_000, 1),
+                ],
+            ),
+            conduit(2, 3, vec![segment(2_000_000, 2_000_000, 2)]),
+        ],
+        vec![vec![0, 1]],
+    );
+    let plan = optimize(&problem).expect("curves");
+    funded(&problem, &plan);
+    assert_eq!(plan.count, z(1_600_000));
+    assert_eq!(spent(&plan, 1), z(2_000_000));
+    assert_eq!(received(&plan, 3), z(1_600_000));
+}
+
+#[test]
+fn a_one_unit_piece_is_spent_before_the_shallower_pool() {
+    // The unit pays 1_000_000. The other pool pays 50 across 100.
+    // Input 98 and input 99 both pay 49, so the fill spends 98 of that pool.
+    let problem = problem(
+        &[(1, 100)],
+        &[(2, 1)],
+        vec![
+            conduit(1, 2, vec![segment(1, 1_000_000, 1)]),
+            conduit(1, 2, vec![segment(100, 50, 2)]),
+        ],
+        vec![vec![0], vec![1]],
+    );
+    let plan = optimize(&problem).expect("curves");
+    funded(&problem, &plan);
+    assert_eq!(plan.count, z(1_000_049));
+    assert_eq!(spent(&plan, 1), z(99));
+    assert_eq!(received(&plan, 2), z(1_000_049));
+    let steep = plan
+        .tenders
+        .iter()
+        .find(|tender| is_pool(&tender.action, 1))
+        .expect("one-unit piece");
+    let shallow = plan
+        .tenders
+        .iter()
+        .find(|tender| is_pool(&tender.action, 2))
+        .expect("shallower pool");
+    assert_eq!(steep.input, z(1));
+    assert_eq!(shallow.input, z(98));
+}
+
+#[test]
+fn shared_paths_spend_the_budget_once() {
+    let mut edges = Vec::new();
+    let mut routes = Vec::new();
+    for pool in 1..=8 {
+        edges.push(conduit(1, 2, vec![segment(10, 10, pool)]));
+        routes.push(vec![edges.len() - 1]);
+    }
+    let problem = problem(&[(1, 10)], &[(2, 1)], edges, routes);
+    let plan = optimize(&problem).expect("curves");
+    funded(&problem, &plan);
+    assert_eq!(plan.count, z(10));
+    assert_eq!(spent(&plan, 1), z(10));
+    assert_eq!(received(&plan, 2), z(10));
+    assert_eq!(plan.tenders.len(), 1);
+}
+
+#[test]
+fn eleven_cheap_slices_keep_the_count_for_less_gas() {
+    // Twelve routes, so the subset search does not run. Dropping the wide
+    // action still leaves eleven slices that fund the same count.
+    let mut edges = vec![conduit(1, 2, vec![segment(11, 11, 12)])];
+    let mut routes = vec![vec![0]];
+    for pool in 1..=11_u8 {
+        edges.push(conduit(1, 2, vec![segment(1, 1, pool)]));
+        routes.push(vec![edges.len() - 1]);
+    }
+    let mut problem = problem(&[(1, 11)], &[(2, 1)], edges, routes);
+    set_gas(&mut problem, 12, 50);
+    for pool in 1..=11_u8 {
+        set_gas(&mut problem, pool, 1);
+    }
+    let plan = optimize(&problem).expect("curves");
+    funded(&problem, &plan);
+    assert_eq!(plan.count, z(11));
+    assert_eq!(plan.gas, z(11));
+    assert!(plan
+        .tenders
+        .iter()
+        .all(|tender| !is_pool(&tender.action, 12)));
+}
+
+#[test]
+fn leftover_intermediate_balance_funds_the_other_path() {
+    // Input 1 pays 2 into the intermediate, and the next edge takes 1.
+    // Nothing of the source budget remains. The other path spends the 1
+    // that is left, and its own producer stays closed.
+    let problem = problem(
+        &[(1, 1)],
+        &[(4, 1)],
+        vec![
+            conduit(1, 2, vec![segment(2, 4, 1)]),
+            conduit(2, 4, vec![segment(1, 1, 2)]),
+            conduit(1, 2, vec![segment(1, 1, 3)]),
+            conduit(2, 4, vec![segment(10, 10, 4)]),
+        ],
+        vec![vec![0, 1], vec![2, 3]],
+    );
+    let plan = optimize(&problem).expect("curves");
+    funded(&problem, &plan);
+    assert_eq!(plan.count, z(2));
+    assert_eq!(spent(&plan, 1), z(1));
+    assert_eq!(received(&plan, 4), z(2));
+    let funded_by_leftover = plan
+        .tenders
+        .iter()
+        .find(|tender| is_pool(&tender.action, 4))
+        .expect("path that spends the intermediate");
+    assert_eq!(funded_by_leftover.input, z(1));
+    assert!(plan
+        .tenders
+        .iter()
+        .all(|tender| !is_pool(&tender.action, 3)));
+    let other = plan
+        .flows
+        .iter()
+        .find(|flow| flow.route == 1)
+        .expect("other path");
+    assert_eq!(other.input, z(0));
+    assert_eq!(other.output, z(1));
+}
+
+#[test]
+fn a_count_above_the_curves_returns_the_reachable_plan() {
+    let problem = problem(
+        &[(1, 100)],
+        &[(2, 1)],
+        vec![conduit(1, 2, vec![segment(10, 10, 1)])],
+        vec![vec![0]],
+    );
+    let plan = crate::solve::meet(&problem, &z(40)).expect("reachable");
+    assert_eq!(plan.count, z(10));
+    assert_eq!(spent(&plan, 1), z(10));
+    assert_eq!(received(&plan, 2), z(10));
 }
 
 #[test]
@@ -769,11 +926,30 @@ fn the_searcher_wrap_is_one_for_one_into_the_conduit() {
     assert_eq!(plan.gas, z(7));
 }
 
+fn actions_of(edge: &Edge) -> Vec<action::Action> {
+    match &edge.curve {
+        Curve::Unlimited => vec![edge.action.clone()],
+        Curve::Chords(chords) => {
+            let mut actions = Vec::new();
+            for chord in chords {
+                if !actions.contains(&chord.action) {
+                    actions.push(chord.action.clone());
+                }
+            }
+            actions
+        }
+    }
+}
+
 fn settled(problem: &Problem, plan: &crate::Plan) {
-    let mut owners = BTreeSet::new();
-    for edge in &problem.edges {
-        if !owners.insert(edge.action.clone()) {
-            return;
+    let mut owners = BTreeMap::new();
+    for (index, edge) in problem.edges.iter().enumerate() {
+        for action in actions_of(edge) {
+            if let Some(previous) = owners.insert(action, index) {
+                if previous != index {
+                    return;
+                }
+            }
         }
     }
     let mut incoming: HashMap<Token, BigInt> = HashMap::new();
@@ -782,12 +958,12 @@ fn settled(problem: &Problem, plan: &crate::Plan) {
         let Some((token_in, token_out)) = edge.token_in().zip(edge.token_out()) else {
             return;
         };
+        let actions = actions_of(edge);
         let input = plan
             .tenders
             .iter()
-            .find(|tender| tender.action == edge.action)
-            .map(|tender| tender.input.clone())
-            .unwrap_or_else(BigInt::zero);
+            .filter(|tender| actions.iter().any(|action| action == &tender.action))
+            .fold(BigInt::zero(), |sum, tender| sum + &tender.input);
         *outgoing.entry(token_in).or_default() += &input;
         *incoming.entry(token_out).or_default() += crate::quote_curve(&edge.curve, &input);
     }
@@ -892,6 +1068,53 @@ fn the_tail_action_funds_the_count_when_the_prefix_is_closed() {
     assert_eq!(plan.gas, z(1));
     assert_eq!(plan.tenders.len(), 1);
     assert!(is_pool(&plan.tenders[0].action, 2));
+}
+
+#[test]
+fn a_conduit_attributes_input_along_the_merged_slope() {
+    let problem = problem(
+        &[(1, 4)],
+        &[(2, 1)],
+        vec![conduit(1, 2, vec![segment(1, 4, 1), segment(3, 3, 2)])],
+        vec![vec![0]],
+    );
+    let plan = optimize(&problem).expect("conduit");
+    funded(&problem, &plan);
+    assert_eq!(plan.count, z(7));
+    assert_eq!(spent(&plan, 1), z(4));
+    assert_eq!(received(&plan, 2), z(7));
+    assert_eq!(plan.tenders.len(), 2);
+    let mut inputs: Vec<(u8, BigInt)> = plan
+        .tenders
+        .iter()
+        .map(|tender| {
+            let action::Action::Swap(swap) = &tender.action else {
+                panic!("{:?}", tender.action);
+            };
+            (swap.contract.0[0], tender.input.clone())
+        })
+        .collect();
+    inputs.sort();
+    assert_eq!(inputs, vec![(1, z(1)), (2, z(3))]);
+}
+
+#[test]
+fn a_conduit_drops_the_expensive_pool_when_the_count_holds() {
+    let mut problem = problem(
+        &[(1, 2)],
+        &[(2, 1)],
+        vec![conduit(1, 2, vec![segment(2, 2, 1), segment(2, 2, 2)])],
+        vec![vec![0]],
+    );
+    set_gas(&mut problem, 1, 50);
+    set_gas(&mut problem, 2, 1);
+    let plan = optimize(&problem).expect("conduit");
+    funded(&problem, &plan);
+    assert_eq!(plan.count, z(2));
+    assert_eq!(plan.gas, z(1));
+    assert_eq!(plan.tenders.len(), 1);
+    assert!(is_pool(&plan.tenders[0].action, 2));
+    assert_eq!(plan.tenders[0].input, z(2));
 }
 
 #[test]
@@ -1028,6 +1251,7 @@ fn a_wide_budget_funds_the_last_count() {
     wide.edges[0].curve = Curve::Chords(vec![Chord {
         width: amount.clone(),
         output: amount.clone(),
+        action: wide.edges[0].action.clone(),
     }]);
     let plan = optimize(&wide).expect("curve");
     funded(&wide, &plan);
@@ -1149,6 +1373,7 @@ fn rejected_problems_name_the_fault() {
     chorded.edges[0].curve = Curve::Chords(vec![Chord {
         width: z(2),
         output: z(2),
+        action: chorded.edges[0].action.clone(),
     }]);
     assert_eq!(optimize(&chorded), Err(OptimizeError::BrokenCurve));
     let contract = action::Address::new([8; 20]).expect("contract");
@@ -1165,10 +1390,11 @@ fn rejected_problems_name_the_fault() {
             &[(1, 10)],
             &[(9, 1)],
             vec![Edge {
-                action: action::Action::MintLiquidity(wide),
+                action: action::Action::MintLiquidity(wide.clone()),
                 curve: Curve::Chords(vec![Chord {
                     width: z(10),
                     output: z(7),
+                    action: action::Action::MintLiquidity(wide),
                 }]),
             }],
             vec![vec![0]],
@@ -1192,10 +1418,11 @@ fn a_single_token_mint_quotes_like_its_chords() {
         &[(1, 10)],
         &[(9, 1)],
         vec![Edge {
-            action: action::Action::MintLiquidity(mint),
+            action: action::Action::MintLiquidity(mint.clone()),
             curve: Curve::Chords(vec![Chord {
                 width: z(10),
                 output: z(7),
+                action: action::Action::MintLiquidity(mint),
             }]),
         }],
         vec![vec![0]],
@@ -1217,6 +1444,7 @@ fn a_rate_wrap_uses_its_chords() {
             curve: Curve::Chords(vec![Chord {
                 width: z(10),
                 output: z(7),
+                action: action::Action::RateWrap(rate),
             }]),
         }],
         vec![vec![0]],
@@ -1527,71 +1755,31 @@ impl Conduits for Catalog {
     }
 }
 
-fn group_by_pool(segments: &[SlopeSegment]) -> Vec<(u8, Vec<SlopeSegment>)> {
-    let mut order = Vec::new();
-    let mut groups: BTreeMap<routing::Action, Vec<SlopeSegment>> = BTreeMap::new();
-    for segment in segments {
-        if !groups.contains_key(&segment.action) {
-            order.push(segment.action);
-        }
-        groups
-            .entry(segment.action)
-            .or_default()
-            .push(segment.clone());
-    }
-    order
-        .into_iter()
-        .filter_map(|key| {
-            let group = groups.remove(&key)?;
-            Some((key.pool[0], group))
-        })
-        .collect()
-}
-
 fn from_route_set(set: &searcher::RouteSet) -> Problem {
     let mut edges = Vec::new();
-    let mut expanded = Vec::new();
     for edge in &set.edges {
         let token_in = edge.token_in;
         let token_out = edge.token_out;
-        let start = edges.len();
         match &edge.curve {
             SearchCurve::Wrap => edges.push(custody_edge(token_in, token_out)),
             SearchCurve::Conduit(segments) => {
-                let groups = group_by_pool(segments);
-                if groups.is_empty() {
-                    edges.push(Edge {
-                        action: swap_action(token_in, token_out, 1),
-                        curve: Curve::Chords(Vec::new()),
-                    });
-                } else {
-                    for (pool, group) in groups {
-                        edges.push(Edge {
-                            action: swap_action(token_in, token_out, pool),
-                            curve: Curve::Chords(chords_of(&group)),
-                        });
-                    }
-                }
+                let chords: Vec<Chord> = segments
+                    .iter()
+                    .map(|segment| Chord {
+                        width: segment.width.clone(),
+                        output: segment.output.clone(),
+                        action: swap_action(token_in, token_out, segment.action.pool[0]),
+                    })
+                    .collect();
+                let action = chords
+                    .first()
+                    .map(|chord| chord.action.clone())
+                    .unwrap_or_else(|| swap_action(token_in, token_out, 1));
+                edges.push(Edge {
+                    action,
+                    curve: Curve::Chords(chords),
+                });
             }
-        }
-        expanded.push((start..edges.len()).collect::<Vec<_>>());
-    }
-    let mut routes = Vec::new();
-    for route in &set.routes {
-        let mut choices = vec![Vec::new()];
-        for index in &route.edges {
-            let mut grown = Vec::new();
-            for prefix in &choices {
-                for edge_index in &expanded[*index] {
-                    let mut path = prefix.clone();
-                    path.push(*edge_index);
-                    grown.push(path);
-                }
-            }
-            choices = grown;
-        }
-        for path in choices {
-            routes.push(Route { edges: path });
         }
     }
     Problem {
@@ -1612,7 +1800,13 @@ fn from_route_set(set: &searcher::RouteSet) -> Problem {
             })
             .collect(),
         edges,
-        routes,
+        routes: set
+            .routes
+            .iter()
+            .map(|route| Route {
+                edges: route.edges.clone(),
+            })
+            .collect(),
         hubs: Vec::new(),
         gas: BTreeMap::new(),
         gas_ceiling: None,

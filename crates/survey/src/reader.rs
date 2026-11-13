@@ -4,12 +4,13 @@ use std::collections::{HashMap, HashSet};
 use alloy_primitives::{Address, B256};
 use routing::SlopeSegment;
 use searcher::{Conduits, Token};
-use venues::{root_address, Catalog, BALANCER_V2, BALANCER_V3, UNI_V4};
+use venues::{root_address, BALANCER_V2, BALANCER_V3, UNI_V4};
 
 use crate::graph::{Graph, PathEnds};
+use crate::source::Source;
 
 pub(crate) fn catalog_swap(
-    catalog: &Catalog,
+    source: &impl Source,
     token_in: Token,
     token_out: Token,
     key: &routing::Action,
@@ -22,17 +23,17 @@ pub(crate) fn catalog_swap(
         14 => action::Invariant::Bin,
         _ => action::Invariant::Product,
     };
-    let contract = action::Address::new(contract_of(catalog, key))?;
+    let contract = action::Address::new(contract_of(source, key))?;
     Ok(action::Action::Swap(action::Swap::new(
         contract, key.pool, token_in, token_out, invariant,
     )?))
 }
 
-pub(crate) fn contract_of(catalog: &Catalog, key: &routing::Action) -> [u8; 20] {
+pub(crate) fn contract_of(source: &impl Source, key: &routing::Action) -> [u8; 20] {
     let id = B256::from(key.pool);
     match key.kind {
         UNI_V4 | BALANCER_V2 => {
-            if let Ok(Some(row)) = catalog.read_venue(key.kind, id) {
+            if let Ok(Some(row)) = source.read_venue(key.kind, id) {
                 if row.factory != Address::ZERO {
                     return bytes_of(row.factory);
                 }
@@ -60,10 +61,10 @@ fn low20(key: &routing::Action) -> [u8; 20] {
     bytes
 }
 
-pub(crate) fn keep_disjoint(
+pub(crate) fn keep_disjoint<S: Source>(
     graph: &Graph,
     incoming: &HashMap<Token, Vec<Token>>,
-    reader: &Reader<'_>,
+    reader: &Reader<'_, S>,
     paths: &[PathEnds],
     limit: usize,
 ) -> Vec<PathEnds> {
@@ -82,10 +83,10 @@ pub(crate) fn keep_disjoint(
     kept
 }
 
-pub(crate) fn path_pools_ok(
+pub(crate) fn path_pools_ok<S: Source>(
     graph: &Graph,
     incoming: &HashMap<Token, Vec<Token>>,
-    reader: &Reader<'_>,
+    reader: &Reader<'_, S>,
     path: &[Token],
 ) -> bool {
     if path.len() < 2 {
@@ -128,10 +129,10 @@ pub(crate) fn shares_foreign(
         .any(|(index, hop)| index != own && !side.is_disjoint(hop))
 }
 
-pub(crate) fn incident_pools(
+pub(crate) fn incident_pools<S: Source>(
     graph: &Graph,
     incoming: &HashMap<Token, Vec<Token>>,
-    reader: &Reader<'_>,
+    reader: &Reader<'_, S>,
     token: Token,
 ) -> Option<HashSet<[u8; 32]>> {
     let indeg = incoming.get(&token).map(|preds| preds.len()).unwrap_or(0);
@@ -152,7 +153,11 @@ pub(crate) fn incident_pools(
     Some(pools)
 }
 
-pub(crate) fn pools_of(reader: &Reader<'_>, from: Token, to: Token) -> Option<HashSet<[u8; 32]>> {
+pub(crate) fn pools_of<S: Source>(
+    reader: &Reader<'_, S>,
+    from: Token,
+    to: Token,
+) -> Option<HashSet<[u8; 32]>> {
     let segments = reader.conduit(from, to)?;
     let pools: HashSet<_> = segments.iter().map(|segment| segment.action.pool).collect();
     if pools.is_empty() {
@@ -164,29 +169,27 @@ pub(crate) fn pools_of(reader: &Reader<'_>, from: Token, to: Token) -> Option<Ha
 
 pub(crate) type CurveCache = HashMap<(Token, Token), Option<Vec<SlopeSegment>>>;
 
-pub(crate) struct Reader<'a> {
-    pub(crate) catalog: &'a Catalog,
+pub(crate) struct Reader<'a, S> {
+    pub(crate) source: &'a S,
     pub(crate) cache: RefCell<CurveCache>,
     pub(crate) graph: &'a Graph,
     pub(crate) incoming: &'a HashMap<Token, Vec<Token>>,
 }
 
-impl Conduits for Reader<'_> {
+impl<S: Source> searcher::Conduits for Reader<'_, S> {
     fn conduit(&self, token_in: Token, token_out: Token) -> Option<Vec<SlopeSegment>> {
         let key = (token_in, token_out);
         if let Some(hit) = self.cache.borrow().get(&key) {
             return hit.clone();
         }
         let loaded = self
-            .catalog
-            .read_conduit(
+            .source
+            .conduit_segments(
                 Address::from_slice(&token_in.0),
                 Address::from_slice(&token_out.0),
             )
             .ok()
-            .flatten()
-            .map(|stored| stored.segments)
-            .filter(|segments| !segments.is_empty());
+            .flatten();
         self.cache.borrow_mut().insert(key, loaded.clone());
         loaded
     }

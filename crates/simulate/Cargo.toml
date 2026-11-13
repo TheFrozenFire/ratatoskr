@@ -1,0 +1,12 @@
+[package]
+name = "simulate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+num-bigint = "0.4"
+num-traits = "0.2"
+action.workspace = true
+routing.workspace = true
