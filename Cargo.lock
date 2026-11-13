@@ -3567,6 +3567,7 @@ dependencies = [
 name = "optimizer"
 version = "0.1.0"
 dependencies = [
+ "action",
  "num-bigint",
  "num-traits",
  "routing",

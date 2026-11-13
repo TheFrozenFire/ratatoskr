@@ -9,11 +9,11 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use action::Action;
 use num_bigint::BigInt;
 use num_traits::Zero;
-use routing::{quote, Action, SlopeSegment};
 
-use crate::{Curve, Edge, Flow, Plan, Problem, Route, Tender, Token};
+use crate::{quote_curve, Chord, Curve, Edge, Flow, Plan, Problem, Route, Tender, Token};
 
 pub(crate) fn output_bound(problem: &Problem) -> BigInt {
     let budgets: HashMap<Token, BigInt> = problem
@@ -141,9 +141,7 @@ fn lex_better(plan: &Plan, best: &Plan) -> bool {
 }
 
 fn gas_can_move(problem: &Problem) -> bool {
-    !problem.wrap_gas.is_zero()
-        || problem.gas_ceiling.is_some()
-        || problem.gas.values().any(|gas| !gas.is_zero())
+    problem.gas_ceiling.is_some() || problem.gas.values().any(|gas| !gas.is_zero())
 }
 
 fn improve_subsets(problem: &Problem, best: &mut Plan) {
@@ -182,16 +180,15 @@ fn improve_pairs(problem: &Problem, best: &mut Plan) {
 }
 
 fn improve_without(problem: &Problem, best: &mut Plan) {
-    let mut actions: Vec<Action> = best.tenders.iter().map(|tender| tender.action).collect();
+    let mut actions: Vec<Action> = best
+        .tenders
+        .iter()
+        .map(|tender| tender.action.clone())
+        .collect();
     actions.sort();
     actions.dedup();
     for action in actions {
-        let muted = mute_action(problem, action);
-        adopt(&muted, best, Rank::Slope, None);
-        adopt(&muted, best, Rank::Cheap, None);
-    }
-    for edge in used_wraps(problem, best) {
-        let muted = mute_edge(problem, edge);
+        let muted = mute_action(problem, &action);
         adopt(&muted, best, Rank::Slope, None);
         adopt(&muted, best, Rank::Cheap, None);
     }
@@ -215,39 +212,14 @@ fn covers(problem: &Problem, allow: &[bool]) -> bool {
     })
 }
 
-fn mute_action(problem: &Problem, action: Action) -> Problem {
+fn mute_action(problem: &Problem, action: &Action) -> Problem {
     let mut muted = problem.clone();
     for edge in &mut muted.edges {
-        if let Curve::Conduit(segments) = &mut edge.curve {
-            segments.retain(|segment| segment.action != action);
+        if &edge.action == action {
+            edge.curve = Curve::Chords(Vec::new());
         }
     }
     muted
-}
-
-fn mute_edge(problem: &Problem, index: usize) -> Problem {
-    let mut muted = problem.clone();
-    if let Some(edge) = muted.edges.get_mut(index) {
-        edge.curve = Curve::Conduit(Vec::new());
-    }
-    muted
-}
-
-fn used_wraps(problem: &Problem, plan: &Plan) -> Vec<usize> {
-    let mut wraps = Vec::new();
-    for flow in &plan.flows {
-        if flow.input.is_zero() && flow.output.is_zero() {
-            continue;
-        }
-        for index in &problem.routes[flow.route].edges {
-            if matches!(problem.edges[*index].curve, Curve::Wrap) {
-                wraps.push(*index);
-            }
-        }
-    }
-    wraps.sort_unstable();
-    wraps.dedup();
-    wraps
 }
 
 fn gas_room(problem: &Problem, spent: &BigInt) -> Option<BigInt> {
@@ -323,7 +295,7 @@ impl Live {
 
     fn apply(&mut self, problem: &Problem, route_index: usize, step: &Step) {
         let route = &problem.routes[route_index];
-        let source = problem.edges[route.edges[0]].token_in;
+        let source = spent(&problem.edges[route.edges[0]]);
         if !step.takes[0].is_zero() {
             let budget = self.budget.entry(source).or_default();
             debug_assert!(*budget >= step.takes[0]);
@@ -335,20 +307,18 @@ impl Live {
                 continue;
             }
             let edge = &problem.edges[*edge_index];
+            let token_in = spent(edge);
+            let token_out = paid(edge);
             if index > 0 {
-                let got = self.got.entry(edge.token_in).or_default();
+                let got = self.got.entry(token_in).or_default();
                 debug_assert!(*got >= *take);
                 *got -= take;
             }
             let old = self.tender[*edge_index].clone();
             self.tender[*edge_index] += take;
             let actual = produce(edge, &old, take);
-            *self.got.entry(edge.token_out).or_default() += &actual;
-            if let Curve::Conduit(segments) = &edge.curve {
-                for action in actions_in_delta(segments, &old, take) {
-                    self.opened.insert(action);
-                }
-            }
+            *self.got.entry(token_out).or_default() += &actual;
+            self.opened.insert(edge.action.clone());
         }
         self.route_in[route_index] += &step.takes[0];
         self.route_out[route_index] += &step.delivered;
@@ -631,7 +601,7 @@ fn exact_chord(
         return None;
     }
     let edge_index = *route.edges.first()?;
-    let Curve::Conduit(segments) = &problem.edges.get(edge_index)?.curve else {
+    let Curve::Chords(segments) = &problem.edges.get(edge_index)?.curve else {
         return None;
     };
     let head = head(segments, &state.tender[edge_index])?;
@@ -692,7 +662,7 @@ fn head_candidate(
         return None;
     }
     let edge_index = *route.edges.first()?;
-    let Curve::Conduit(segments) = &problem.edges.get(edge_index)?.curve else {
+    let Curve::Chords(segments) = &problem.edges.get(edge_index)?.curve else {
         return None;
     };
     let head = head(segments, &state.tender[edge_index])?;
@@ -731,12 +701,12 @@ fn linear_source(
     let mut out_per_source = BigInt::from(1);
     for (index, edge_index) in route.edges.iter().enumerate() {
         let edge = &problem.edges[*edge_index];
-        if index > 0 && !state.excess(&edge.token_in).is_zero() {
+        if index > 0 && !state.excess(&spent(edge)).is_zero() {
             return None;
         }
         match &edge.curve {
-            Curve::Wrap => {}
-            Curve::Conduit(segments) => {
+            Curve::Unlimited => {}
+            Curve::Chords(segments) => {
                 let head = head(segments, &state.tender[*edge_index])?;
                 if !(&head.output % &head.width).is_zero() {
                     return None;
@@ -761,7 +731,7 @@ fn linear_source(
     }
 }
 
-fn linear_input(segments: &[SlopeSegment], tender: &BigInt, rate: &BigInt) -> BigInt {
+fn linear_input(segments: &[Chord], tender: &BigInt, rate: &BigInt) -> BigInt {
     let mut skip = tender.clone();
     let mut allow = BigInt::from(0);
     for segment in segments {
@@ -786,7 +756,7 @@ fn source_budget(problem: &Problem, state: &Live, route_index: usize) -> Option<
     Some(
         state
             .budget
-            .get(&edge.token_in)
+            .get(&spent(edge))
             .cloned()
             .unwrap_or_else(BigInt::zero),
     )
@@ -907,12 +877,12 @@ fn simulate(problem: &Problem, state: &Live, route_index: usize, source: &BigInt
         let edge = problem.edges.get(*edge_index)?;
         let mut enter = carry.clone();
         if index > 0 {
-            enter += state.excess(&edge.token_in);
+            enter += state.excess(&spent(edge));
         }
         if index == 0 {
             let budget = state
                 .budget
-                .get(&edge.token_in)
+                .get(&spent(edge))
                 .cloned()
                 .unwrap_or_else(BigInt::zero);
             if enter > budget {
@@ -974,8 +944,8 @@ fn stamp(takes: Vec<BigInt>, delivered: BigInt, gas: BigInt) -> Step {
 
 fn remaining_input(edge: &Edge, tender: &BigInt) -> Option<BigInt> {
     match &edge.curve {
-        Curve::Wrap => None,
-        Curve::Conduit(segments) => {
+        Curve::Unlimited => None,
+        Curve::Chords(segments) => {
             let total: BigInt = segments.iter().map(|segment| &segment.width).sum();
             if tender >= &total {
                 Some(BigInt::from(0))
@@ -1014,7 +984,7 @@ fn try_ask(
         let cover = if is_sink {
             BigInt::from(0)
         } else {
-            std::cmp::min(need.clone(), state.excess(&edge.token_out))
+            std::cmp::min(need.clone(), state.excess(&paid(edge)))
         };
         let produce_need = &need - &cover;
         if produce_need.is_zero() {
@@ -1025,7 +995,7 @@ fn try_ask(
         takes[index] = take.clone();
         need = take;
     }
-    let source = problem.edges[route.edges[0]].token_in;
+    let source = spent(&problem.edges[route.edges[0]]);
     let budget = state
         .budget
         .get(&source)
@@ -1061,12 +1031,12 @@ fn least_take(edge: &Edge, tender: &BigInt, need: &BigInt) -> Option<BigInt> {
         return Some(BigInt::from(0));
     }
     match &edge.curve {
-        Curve::Wrap => Some(need.clone()),
-        Curve::Conduit(segments) => least_across(segments, tender, need),
+        Curve::Unlimited => Some(need.clone()),
+        Curve::Chords(segments) => least_across(segments, tender, need),
     }
 }
 
-fn least_across(segments: &[SlopeSegment], tender: &BigInt, need: &BigInt) -> Option<BigInt> {
+fn least_across(segments: &[Chord], tender: &BigInt, need: &BigInt) -> Option<BigInt> {
     let mut skip = tender.clone();
     let mut need = need.clone();
     let mut spent = BigInt::from(0);
@@ -1107,7 +1077,7 @@ struct Head {
     width: BigInt,
 }
 
-fn head(segments: &[SlopeSegment], tender: &BigInt) -> Option<Head> {
+fn head(segments: &[Chord], tender: &BigInt) -> Option<Head> {
     let mut left = tender.clone();
     for segment in segments {
         if left >= segment.width {
@@ -1154,13 +1124,8 @@ fn produce(edge: &Edge, tender: &BigInt, take: &BigInt) -> BigInt {
     if take.is_zero() {
         return BigInt::from(0);
     }
-    match &edge.curve {
-        Curve::Wrap => take.clone(),
-        Curve::Conduit(segments) => {
-            let next = tender + take;
-            quote(segments, &next) - quote(segments, tender)
-        }
-    }
+    let next = tender + take;
+    quote_curve(&edge.curve, &next) - quote_curve(&edge.curve, tender)
 }
 
 fn step_gas(problem: &Problem, state: &Live, route: &Route, takes: &[BigInt]) -> BigInt {
@@ -1170,50 +1135,15 @@ fn step_gas(problem: &Problem, state: &Live, route: &Route, takes: &[BigInt]) ->
         if take.is_zero() {
             continue;
         }
-        let edge_index = route.edges[index];
-        let edge = &problem.edges[edge_index];
-        match &edge.curve {
-            Curve::Wrap => {
-                if state.tender[edge_index].is_zero() {
-                    gas += &problem.wrap_gas;
-                }
-            }
-            Curve::Conduit(segments) => {
-                for action in actions_in_delta(segments, &state.tender[edge_index], take) {
-                    if state.opened.contains(&action) || !seen.insert(action) {
-                        continue;
-                    }
-                    if let Some(cost) = problem.gas.get(&action) {
-                        gas += cost;
-                    }
-                }
-            }
+        let edge = &problem.edges[route.edges[index]];
+        if state.opened.contains(&edge.action) || !seen.insert(edge.action.clone()) {
+            continue;
+        }
+        if let Some(cost) = problem.gas.get(&edge.action) {
+            gas += cost;
         }
     }
     gas
-}
-
-fn actions_in_delta(segments: &[SlopeSegment], tender: &BigInt, take: &BigInt) -> Vec<Action> {
-    let mut skip = tender.clone();
-    let mut left = take.clone();
-    let mut actions = Vec::new();
-    for segment in segments {
-        if left.is_zero() {
-            break;
-        }
-        if skip >= segment.width {
-            skip -= &segment.width;
-            continue;
-        }
-        let room = &segment.width - &skip;
-        let used = std::cmp::min(room, left.clone());
-        if !used.is_zero() {
-            actions.push(segment.action);
-        }
-        left -= used;
-        skip = BigInt::from(0);
-    }
-    actions
 }
 
 fn tenders(problem: &Problem, edge_tender: &[BigInt]) -> Vec<Tender> {
@@ -1223,19 +1153,11 @@ fn tenders(problem: &Problem, edge_tender: &[BigInt]) -> Vec<Tender> {
             continue;
         }
         let edge = &problem.edges[index];
-        let Curve::Conduit(segments) = &edge.curve else {
+        let Some((token_in, token_out)) = edge.token_in().zip(edge.token_out()) else {
             continue;
         };
-        let mut left = tender.clone();
-        for segment in segments {
-            if left.is_zero() {
-                break;
-            }
-            let take = std::cmp::min(left.clone(), segment.width.clone());
-            *acc.entry((segment.action, edge.token_in, edge.token_out))
-                .or_default() += &take;
-            left -= &take;
-        }
+        *acc.entry((edge.action.clone(), token_in, token_out))
+            .or_default() += tender;
     }
     acc.into_iter()
         .map(|((action, token_in, token_out), input)| Tender {
@@ -1250,18 +1172,19 @@ fn tenders(problem: &Problem, edge_tender: &[BigInt]) -> Vec<Tender> {
 fn route_touches(route: &Route, problem: &Problem, hubs: &HashSet<Token>) -> bool {
     route.edges.iter().any(|index| {
         let edge = &problem.edges[*index];
-        hubs.contains(&edge.token_in) || hubs.contains(&edge.token_out)
+        edge.token_in().is_some_and(|token| hubs.contains(&token))
+            || edge.token_out().is_some_and(|token| hubs.contains(&token))
     })
 }
 
 fn source(problem: &Problem, route: &Route) -> Option<Token> {
     let index = *route.edges.first()?;
-    Some(problem.edges.get(index)?.token_in)
+    problem.edges.get(index)?.token_in()
 }
 
 fn sink(problem: &Problem, route: &Route) -> Option<Token> {
     let index = *route.edges.last()?;
-    Some(problem.edges.get(index)?.token_out)
+    problem.edges.get(index)?.token_out()
 }
 
 fn forward(problem: &Problem, route: &Route, budget: &BigInt) -> BigInt {
@@ -1270,22 +1193,39 @@ fn forward(problem: &Problem, route: &Route, budget: &BigInt) -> BigInt {
         let Some(edge) = problem.edges.get(*index) else {
             return BigInt::from(0);
         };
-        flow = match &edge.curve {
-            Curve::Wrap => flow,
-            Curve::Conduit(segments) => quote(segments, &flow),
-        };
+        flow = quote_curve(&edge.curve, &flow);
     }
     flow
+}
+
+fn spent(edge: &Edge) -> Token {
+    edge.token_in().expect("a checked edge spends one token")
+}
+
+fn paid(edge: &Edge) -> Token {
+    edge.token_out().expect("a checked edge pays one token")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn act(byte: u8) -> Action {
-        Action {
-            kind: 1,
-            pool: [byte; 32],
+    fn chord_edge(width: i64, output: i64) -> Edge {
+        let contract = action::Address::new([1; 20]).expect("contract");
+        let swap = action::Swap::new(
+            contract,
+            contract.pool_id(),
+            Token([0; 20]),
+            Token([1; 20]),
+            action::Invariant::Product,
+        )
+        .expect("swap");
+        Edge {
+            action: Action::Swap(swap),
+            curve: Curve::Chords(vec![Chord {
+                width: BigInt::from(width),
+                output: BigInt::from(output),
+            }]),
         }
     }
 
@@ -1294,16 +1234,7 @@ mod tests {
         for width in 1..8 {
             for output in 1..8 {
                 for offset in 0..width {
-                    let built = SlopeSegment {
-                        width: BigInt::from(width),
-                        output: BigInt::from(output),
-                        action: act(1),
-                    };
-                    let edge = Edge {
-                        token_in: crate::Token([0; 20]),
-                        token_out: crate::Token([1; 20]),
-                        curve: Curve::Conduit(vec![built]),
-                    };
+                    let edge = chord_edge(width, output);
                     let paid =
                         (&BigInt::from(output) * &BigInt::from(offset)) / &BigInt::from(width);
                     let remaining = BigInt::from(output) - paid;

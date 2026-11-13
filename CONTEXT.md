@@ -329,7 +329,7 @@ The build of a route set from a trade. It reads stored pair conduits, walks endp
 _Avoid_: optimizer, state pipeline
 
 **Optimizer**:
-The allocation of input amounts across a route set. It bisects the basket count and books one net input on each shared edge. It does not read the catalog.
+The allocation of input amounts across a problem of actions. It bisects the basket count and books one net input on each shared edge. It does not read the catalog.
 _Avoid_: searcher, state pipeline
 
 **Plan**:
