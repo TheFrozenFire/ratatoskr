@@ -116,7 +116,7 @@ A pool identity with no observation stays version 1. An observation appends the 
 
 ### Flock
 
-`Database::open` takes an exclusive lock. A second open fails with "Database already open." Header sync, discovery, and the state pipeline cannot share a file with a second process. redb commits through two header slots. Header append uses eventual durability. Venue commits, hit commits, era1 receipt bytes, state writes, corpus bundle writes, and cursor writes use immediate durability.
+The writer opens each database in single-writer mode. One process writes a file. Other processes may open that file read-only and follow its commits. A second writer fails with "Database already open." redb commits through two header slots. Header append, peer sightings, venue commits, hit commits, era1 receipt bytes, state writes, corpus writes, and cursor writes use immediate durability.
 
 `peers.redb` stays with the dialer. A peer-only process leaves the entity files closed.
 

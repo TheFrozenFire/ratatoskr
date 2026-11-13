@@ -60,12 +60,12 @@ pub struct PeerConfig {
     /// How many outbound sessions to keep.
     pub peers: usize,
     pub socket: PathBuf,
-    /// `peers.redb`. Opened once. A held flock is returned, not retried.
+    /// `peers.redb`. Opened once. A held writer lock is returned, not retried.
     pub catalog: PathBuf,
     pub egress: Option<Egress>,
 }
 
-/// Catalog owner. Dropping it releases the flock. The socket is not touched.
+/// Catalog owner. Dropping it releases the writer lock. The socket is not touched.
 pub struct OpenedPeer {
     catalog: catalog::Catalog,
     local: LocalPeer,
@@ -78,7 +78,7 @@ impl OpenedPeer {
     }
 }
 
-/// Open `peers.redb` and keep the flock. Does not unlink or bind a socket.
+/// Open `peers.redb` and keep the writer lock. Does not unlink or bind a socket.
 pub fn open(path: &Path) -> eyre::Result<OpenedPeer> {
     let catalog = catalog::Catalog::open(path)?;
     Ok(OpenedPeer {
@@ -113,7 +113,7 @@ pub struct PreparedPeer {
     opened: OpenedPeer,
 }
 
-/// Load the node key and bind. `open` has already taken the catalog flock.
+/// Load the node key and bind. `open` has already taken the catalog writer lock.
 pub fn prepare(opened: OpenedPeer, config: &PeerConfig) -> eyre::Result<PreparedPeer> {
     let key = load_node_key()?;
     let id = pk2id(&key.public_key(SECP256K1));
@@ -215,7 +215,7 @@ pub async fn run(prepared: PreparedPeer, mut stop: watch::Receiver<bool>) -> eyr
     drop(listener);
     drop(catalog_tx);
     // Closed before maintain returns, so a probe still in flight cannot publish
-    // after the catalog flock is released.
+    // after the catalog writer lock is released.
     slots.lock().await.close();
     if accept_result.is_err() {
         maintain_task.abort();

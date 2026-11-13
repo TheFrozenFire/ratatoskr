@@ -13,7 +13,7 @@ use crate::state::{decode_curve_record, join_detail, unix_now, CurveRecord, CURV
 use crate::Catalog;
 use alloy_primitives::{Address, B256};
 use num_bigint::{BigInt, Sign};
-use redb::{Durability, ReadableTable, TableDefinition};
+use redb::{Durability, ReadableDatabase, ReadableTable, TableDefinition};
 use routing::{segments_from_knots, Action, SlopeSegment};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -109,7 +109,7 @@ pub(crate) fn retarget(
     let mut gone = Vec::new();
     {
         let mut write = catalog.entities.begin_write()?;
-        write.set_durability(Durability::Immediate);
+        write.set_durability(Durability::Immediate)?;
         {
             let mut members = write.open_table(MEMBERS)?;
             let mut conduits = write.open_table(CONDUITS)?;
@@ -150,7 +150,7 @@ impl Catalog {
         let mut dirty = BTreeSet::new();
         {
             let mut write = self.entities.begin_write()?;
-            write.set_durability(Durability::Immediate);
+            write.set_durability(Durability::Immediate)?;
             {
                 let mut members = write.open_table(MEMBERS)?;
                 let mut stale = Vec::new();
@@ -236,7 +236,7 @@ impl Catalog {
         drop(read);
         if !gone.is_empty() {
             let mut write = self.entities.begin_write()?;
-            write.set_durability(Durability::Immediate);
+            write.set_durability(Durability::Immediate)?;
             {
                 let mut conduits = write.open_table(CONDUITS)?;
                 for pair in &gone {
@@ -259,7 +259,7 @@ impl Catalog {
             return Ok(Vec::new());
         }
         let mut write = self.work.begin_write()?;
-        write.set_durability(Durability::Immediate);
+        write.set_durability(Durability::Immediate)?;
         let jobs = {
             let mut table = write.open_table(JOBS)?;
             let mut picked = Vec::new();
@@ -298,7 +298,7 @@ impl Catalog {
     ) -> eyre::Result<()> {
         let again_set: BTreeSet<(Address, Address)> = again.iter().copied().collect();
         let mut write = self.work.begin_write()?;
-        write.set_durability(Durability::Immediate);
+        write.set_durability(Durability::Immediate)?;
         {
             let mut table = write.open_table(JOBS)?;
             for pair in done {
@@ -367,7 +367,7 @@ impl Catalog {
         }
         let merged = routing::merge(&parts);
         let mut write = self.entities.begin_write()?;
-        write.set_durability(Durability::Immediate);
+        write.set_durability(Durability::Immediate)?;
         let again = {
             let mut members = write.open_table(MEMBERS)?;
             let live = write_members(&members, &pair)?;
@@ -527,7 +527,7 @@ fn sync_jobs(
         return Ok(());
     }
     let mut write = catalog.work.begin_write()?;
-    write.set_durability(Durability::Immediate);
+    write.set_durability(Durability::Immediate)?;
     {
         let mut table = write.open_table(JOBS)?;
         for pair in gone {

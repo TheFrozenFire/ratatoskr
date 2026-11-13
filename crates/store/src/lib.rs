@@ -1,9 +1,8 @@
 //! Owner of the header chain, the receipt corpus, and the venue catalog.
 //!
-//! The catalog is `discovery.redb`, `entities.redb`, and `work.redb`. Header
-//! append and `write_records` stay Eventual. Venue commits, hit commits, era
-//! bodies, state writes, `put_blocks`, `put_meta`, and `write_hole` stay
-//! Immediate. Those choices live in `HeaderChain`, `Corpus`, and `Catalog`.
+//! The catalog is `discovery.redb`, `entities.redb`, and `work.redb`. Commits
+//! use immediate durability. Those choices live in `HeaderChain`, `Corpus`,
+//! and `Catalog`.
 
 use alloy_primitives::{Address, B256};
 use chain::HeaderChain;
@@ -28,6 +27,7 @@ const BLOCK_PAGE: usize = 8 * 1024 * 1024;
 
 /// Which corpus file to open. Ingest uses [`CorpusOpen::Create`]. A venue
 /// import uses [`CorpusOpen::Open`] so a missing path still fails.
+/// [`CorpusOpen::OpenOrCreate`] writes, including when the file already exists.
 pub enum CorpusOpen<'a> {
     Open(&'a Path),
     Create(&'a Path),
@@ -64,8 +64,8 @@ impl LocalStore {
         })
     }
 
-    /// Open only the files this process already opens. `None` does not create
-    /// that database, so a list walk does not take the header lock.
+    /// Open only the files this process already opens. `None` leaves that file
+    /// closed. A header path is opened read-only and follows a writer.
     pub fn parts(
         headers: Option<&Path>,
         corpus: Option<CorpusOpen<'_>>,
@@ -148,13 +148,7 @@ fn open_corpus(mode: CorpusOpen<'_>) -> eyre::Result<Corpus> {
     match mode {
         CorpusOpen::Open(path) => Corpus::open(path),
         CorpusOpen::Create(path) => Corpus::create(path),
-        CorpusOpen::OpenOrCreate(path) => {
-            if path.exists() {
-                Corpus::open(path).wrap_err("receipt cache")
-            } else {
-                Corpus::create(path).wrap_err("receipt cache")
-            }
-        }
+        CorpusOpen::OpenOrCreate(path) => Corpus::create(path).wrap_err("receipt cache"),
     }
 }
 
@@ -752,13 +746,14 @@ mod tests {
         drop(created);
         let corpus = LocalStore::corpus(&dir.0.join("corpus.redb")).unwrap();
         let scan = LocalStore::parts(Some(&headers), None, Some(&venues)).unwrap();
-        let err = LocalStore::parts(Some(&headers), None, None)
-            .map(|_| ())
-            .unwrap_err();
+        let again = LocalStore::parts(Some(&headers), None, None).unwrap();
+        let writer = LocalStore::open_headers(&headers).unwrap();
+        let err = LocalStore::open_headers(&headers).map(|_| ()).unwrap_err();
         let err = format!("{err:#}");
         assert!(err.contains("already open"), "{err}");
+        drop(writer);
+        drop(again);
         drop(scan);
-        LocalStore::parts(Some(&headers), None, None).unwrap();
         drop(corpus);
     }
 

@@ -13,7 +13,7 @@
 
 use alloy_primitives::{Address, B256};
 use eyre::WrapErr;
-use redb::{Database, Durability, ReadableTable, TableDefinition};
+use redb::{Database, Durability, ReadableDatabase, ReadableTable, TableDefinition};
 use std::collections::{BTreeMap, HashSet};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
@@ -184,7 +184,7 @@ impl Catalog {
         }
         let written = write_identities(&self.entities, rows, put)?;
         let mut write = self.discovery.begin_write()?;
-        write.set_durability(Durability::Immediate);
+        write.set_durability(Durability::Immediate)?;
         {
             let mut cursors = write.open_table(CURSORS)?;
             if let Some(stored) = cursors.get(job)?.map(|value| value.value()) {
@@ -251,7 +251,7 @@ impl Catalog {
     /// A later call with a smaller `scanned_to` does not rewind the scan.
     pub fn commit_hits(&self, job: &str, scanned_to: u64, hits: &[u64]) -> eyre::Result<()> {
         let mut write = self.discovery.begin_write()?;
-        write.set_durability(Durability::Immediate);
+        write.set_durability(Durability::Immediate)?;
         {
             let mut table = write.open_table(HITS)?;
             let mut scan = write.open_table(HIT_SCAN)?;
@@ -293,7 +293,7 @@ impl Catalog {
             return Ok(());
         }
         let mut write = self.discovery.begin_write()?;
-        write.set_durability(Durability::Immediate);
+        write.set_durability(Durability::Immediate)?;
         {
             let mut table = write.open_table(BODIES)?;
             for (number, body) in bodies {
@@ -394,7 +394,7 @@ impl Catalog {
             return Ok(());
         }
         let mut write = self.entities.begin_write()?;
-        write.set_durability(Durability::Immediate);
+        write.set_durability(Durability::Immediate)?;
         {
             let mut table = write.open_table(TOKENS)?;
             for row in rows {
@@ -458,7 +458,7 @@ impl Catalog {
 
     pub fn put_note(&self, key: &str, value: u64) -> eyre::Result<()> {
         let mut write = self.discovery.begin_write()?;
-        write.set_durability(Durability::Immediate);
+        write.set_durability(Durability::Immediate)?;
         {
             let mut notes = write.open_table(NOTES)?;
             notes.insert(key, value)?;
@@ -582,6 +582,7 @@ fn cache_bytes(path: &Path) -> usize {
 fn open_at(path: &Path, create: bool) -> Result<Database, redb::DatabaseError> {
     let mut builder = redb::Builder::new();
     builder.set_cache_size(cache_bytes(path));
+    builder.set_concurrency_mode(redb::ConcurrencyMode::SingleWriter);
     if create {
         builder.create(path)
     } else {
@@ -654,7 +655,7 @@ fn copy_str_u64(
         Err(err) => return Err(err.into()),
     };
     let mut write = to.begin_write()?;
-    write.set_durability(Durability::Immediate);
+    write.set_durability(Durability::Immediate)?;
     {
         let mut dest = write.open_table(table)?;
         for item in source.iter()? {
@@ -678,7 +679,7 @@ fn copy_bytes(
         Err(err) => return Err(err.into()),
     };
     let mut write = to.begin_write()?;
-    write.set_durability(Durability::Immediate);
+    write.set_durability(Durability::Immediate)?;
     {
         let mut dest = write.open_table(table)?;
         for item in source.iter()? {
@@ -702,7 +703,7 @@ fn copy_u64_bytes(
         Err(err) => return Err(err.into()),
     };
     let mut write = to.begin_write()?;
-    write.set_durability(Durability::Immediate);
+    write.set_durability(Durability::Immediate)?;
     {
         let mut dest = write.open_table(table)?;
         for item in source.iter()? {
@@ -716,7 +717,7 @@ fn copy_u64_bytes(
 
 fn delete_crawl(db: &Database) -> eyre::Result<()> {
     let mut write = db.begin_write()?;
-    write.set_durability(Durability::Immediate);
+    write.set_durability(Durability::Immediate)?;
     write
         .delete_table(CURSORS)
         .map_err(|err| eyre::eyre!("delete cursors: {err}"))?;
@@ -738,7 +739,7 @@ fn write_identities(db: &Database, rows: &[VenueRow], put: Put) -> eyre::Result<
         return Ok(0);
     }
     let mut write = db.begin_write()?;
-    write.set_durability(Durability::Immediate);
+    write.set_durability(Durability::Immediate)?;
     let written = {
         let mut venues = write.open_table(VENUES)?;
         let mut n = 0_u64;
@@ -1707,7 +1708,7 @@ mod tests {
         let db = Database::create(&legacy).unwrap();
         {
             let mut write = db.begin_write().unwrap();
-            write.set_durability(Durability::Immediate);
+            write.set_durability(Durability::Immediate).unwrap();
             {
                 let mut cursors = write.open_table(CURSORS).unwrap();
                 cursors.insert("logs:old", 42_u64).unwrap();

@@ -7,7 +7,9 @@
 use alloy_primitives::B256;
 use eyre::WrapErr;
 use model::{decode_header_record, encode_header_record, HeaderRecord, MAINNET_GENESIS_HASH};
-use redb::{Database, Durability, ReadableTable, TableDefinition};
+use redb::{
+    Database, Durability, ReadOnlyDatabase, ReadableDatabase, ReadableTable, TableDefinition,
+};
 use std::path::{Path, PathBuf};
 
 const HEADERS: TableDefinition<u64, &[u8]> = TableDefinition::new("headers");
@@ -16,17 +18,39 @@ const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 /// A header window is a few megabytes, and the next append reads one parent.
 const PAGE_CACHE: usize = 64 * 1024 * 1024;
 
-pub struct HeaderChain {
-    db: Database,
+enum Db {
+    Write(Database),
+    Read(ReadOnlyDatabase),
 }
 
-fn open_database(path: &Path, create: bool) -> Result<Database, redb::DatabaseError> {
+impl Db {
+    fn begin_read(&self) -> Result<redb::ReadTransaction, redb::TransactionError> {
+        match self {
+            Db::Write(db) => db.begin_read(),
+            Db::Read(db) => db.begin_read(),
+        }
+    }
+
+    fn begin_write(&self) -> eyre::Result<redb::WriteTransaction> {
+        match self {
+            Db::Write(db) => Ok(db.begin_write()?),
+            Db::Read(_) => Err(eyre::eyre!("header chain is open read-only")),
+        }
+    }
+}
+
+pub struct HeaderChain {
+    db: Db,
+}
+
+fn open_database(path: &Path, create: bool) -> Result<Db, redb::DatabaseError> {
     let mut builder = redb::Builder::new();
     builder.set_cache_size(PAGE_CACHE);
+    builder.set_concurrency_mode(redb::ConcurrencyMode::SingleWriter);
     if create {
-        builder.create(path)
+        Ok(Db::Write(builder.create(path)?))
     } else {
-        builder.open(path)
+        Ok(Db::Read(builder.open_read_only(path)?))
     }
 }
 
@@ -92,7 +116,7 @@ impl HeaderChain {
         }
         let last = records[records.len() - 1].clone();
         let mut txn = self.db.begin_write()?;
-        txn.set_durability(Durability::Eventual);
+        txn.set_durability(Durability::Immediate)?;
         {
             let mut headers = txn.open_table(HEADERS)?;
             let mut meta = txn.open_table(META)?;
@@ -190,7 +214,7 @@ impl HeaderChain {
     }
 }
 
-fn meta_get(db: &Database, key: &str) -> eyre::Result<Option<u64>> {
+fn meta_get(db: &Db, key: &str) -> eyre::Result<Option<u64>> {
     let txn = db.begin_read()?;
     let table = match txn.open_table(META) {
         Ok(table) => table,

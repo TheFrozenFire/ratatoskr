@@ -5,7 +5,7 @@
 //! because a peer can change what it claims. Sightings are the history.
 //! Summaries are the dial hint derived from that history.
 
-use redb::{Database, Durability, ReadableTable, TableDefinition};
+use redb::{Database, Durability, ReadableDatabase, ReadableTable, TableDefinition};
 use reth_network_peers::{NodeRecord, PeerId};
 use std::{
     collections::HashMap,
@@ -92,6 +92,7 @@ impl Catalog {
         }
         let mut builder = redb::Builder::new();
         builder.set_cache_size(PAGE_CACHE);
+        builder.set_concurrency_mode(redb::ConcurrencyMode::SingleWriter);
         let db = builder.create(path)?;
         let next_seq = meta_get(&db, "sighting_seq")?.unwrap_or(0);
         let summaries = load_summaries(&db)?;
@@ -119,7 +120,7 @@ impl Catalog {
         append: bool,
     ) -> eyre::Result<()> {
         let mut txn = self.db.begin_write()?;
-        txn.set_durability(Durability::Eventual);
+        txn.set_durability(Durability::Immediate)?;
         {
             let mut summaries = txn.open_table(SUMMARIES)?;
             let encoded = encode_summary(summary);
@@ -142,7 +143,7 @@ impl Catalog {
     pub fn write_published(&self, peers: &[PublishedPeer]) -> eyre::Result<()> {
         let seen = unix_now();
         let mut txn = self.db.begin_write()?;
-        txn.set_durability(Durability::Immediate);
+        txn.set_durability(Durability::Immediate)?;
         {
             let mut table = txn.open_table(NODES)?;
             for peer in peers {

@@ -36,7 +36,7 @@ use ipc::HistoryPeer;
 use model::{BlockRecord, NormalizedLog};
 use num_bigint::{BigInt, Sign};
 use num_traits::Zero;
-use redb::{Durability, ReadableTable, TableDefinition};
+use redb::{Durability, ReadableDatabase, ReadableTable, TableDefinition};
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -682,7 +682,7 @@ impl Catalog {
             ));
         }
         let mut write = self.entities.begin_write()?;
-        write.set_durability(Durability::Immediate);
+        write.set_durability(Durability::Immediate)?;
         let bumped = {
             let mut dirty_table = write.open_table(DIRTY)?;
             let mutable_table = write.open_table(MUTABLE)?;
@@ -724,7 +724,7 @@ impl Catalog {
 
     pub fn put_immutable(&self, rows: &[ImmutableRow]) -> eyre::Result<Vec<ImmutablePut>> {
         let mut write = self.entities.begin_write()?;
-        write.set_durability(Durability::Immediate);
+        write.set_durability(Durability::Immediate)?;
         let mut puts = Vec::with_capacity(rows.len());
         {
             let mut table = write.open_table(IMMUTABLE)?;
@@ -780,7 +780,7 @@ impl Catalog {
     /// The dirty flag is removed only when it does not name a newer block.
     pub fn put_mutable(&self, row: &MutableWrite) -> eyre::Result<MutableStored> {
         let mut write = self.entities.begin_write()?;
-        write.set_durability(Durability::Immediate);
+        write.set_durability(Durability::Immediate)?;
         let (stored, previous_curve) = {
             let mut mutable_table = write.open_table(MUTABLE)?;
             let mut ticks = write.open_table(TICK_PAGES)?;
@@ -845,7 +845,7 @@ impl Catalog {
             return Ok(());
         }
         let mut write = self.entities.begin_write()?;
-        write.set_durability(Durability::Immediate);
+        write.set_durability(Durability::Immediate)?;
         {
             let mutable_table = write.open_table(MUTABLE)?;
             let mut ticks = write.open_table(TICK_PAGES)?;
@@ -871,7 +871,7 @@ impl Catalog {
 
     pub fn put_curve(&self, curve: &CurveRecord) -> eyre::Result<()> {
         let mut write = self.entities.begin_write()?;
-        write.set_durability(Durability::Immediate);
+        write.set_durability(Durability::Immediate)?;
         let previous = {
             let mutable_table = write.open_table(MUTABLE)?;
             let mut curves = write.open_table(CURVES)?;
@@ -902,7 +902,7 @@ impl Catalog {
             return Ok(());
         }
         let mut write = self.entities.begin_write()?;
-        write.set_durability(Durability::Immediate);
+        write.set_durability(Durability::Immediate)?;
         let mut replaced = Vec::with_capacity(curves.len());
         {
             let mutable_table = write.open_table(MUTABLE)?;
@@ -934,7 +934,7 @@ impl Catalog {
 
     pub fn put_quote(&self, quote: &QuoteRecord) -> eyre::Result<()> {
         let mut write = self.entities.begin_write()?;
-        write.set_durability(Durability::Immediate);
+        write.set_durability(Durability::Immediate)?;
         {
             let mutable_table = write.open_table(MUTABLE)?;
             let mut quotes = write.open_table(QUOTES)?;
@@ -959,7 +959,7 @@ impl Catalog {
             return Ok(());
         }
         let mut write = self.entities.begin_write()?;
-        write.set_durability(Durability::Immediate);
+        write.set_durability(Durability::Immediate)?;
         {
             let mutable_table = write.open_table(MUTABLE)?;
             for quote in quotes {
@@ -1048,7 +1048,7 @@ impl Catalog {
         let mut removed = 0_u64;
         for chunk in ids.chunks(128) {
             let mut write = self.entities.begin_write()?;
-            write.set_durability(Durability::Immediate);
+            write.set_durability(Durability::Immediate)?;
             let mut dropped_curves = Vec::new();
             {
                 let mut venues = write.open_table(VENUES)?;
@@ -1083,7 +1083,7 @@ impl Catalog {
                 crate::conduit::retarget(self, curve.kind, curve.id, Some(curve), None)?;
             }
             let mut work = self.work.begin_write()?;
-            work.set_durability(Durability::Immediate);
+            work.set_durability(Durability::Immediate)?;
             {
                 let mut jobs = work.open_table(JOBS)?;
                 let mut ranks = work.open_table(JOB_RANK)?;
@@ -1101,7 +1101,7 @@ impl Catalog {
     /// Remove one quote row. The snapshot and the curve stay.
     pub fn delete_quote(&self, kind: u8, id: B256) -> eyre::Result<bool> {
         let mut write = self.entities.begin_write()?;
-        write.set_durability(Durability::Immediate);
+        write.set_durability(Durability::Immediate)?;
         let removed = {
             let mut quotes = write.open_table(QUOTES)?;
             let key = entity_key(kind, &id);
@@ -1183,7 +1183,7 @@ impl Catalog {
             return Ok(Vec::new());
         }
         let mut write = self.work.begin_write()?;
-        write.set_durability(Durability::Immediate);
+        write.set_durability(Durability::Immediate)?;
         let jobs = {
             let mut table = write.open_table(JOBS)?;
             let mut ranks = write.open_table(JOB_RANK)?;
@@ -1257,7 +1257,7 @@ impl Catalog {
 
     pub fn finish_work(&self, done: &[(u8, u8, B256)], failed: &[WorkFail]) -> eyre::Result<()> {
         let mut write = self.work.begin_write()?;
-        write.set_durability(Durability::Immediate);
+        write.set_durability(Durability::Immediate)?;
         {
             let mut table = write.open_table(JOBS)?;
             let mut ranks = write.open_table(JOB_RANK)?;
@@ -1405,7 +1405,7 @@ impl Catalog {
 
     fn sync_jobs(&self, drop: &[(u8, u8, B256)], jobs: &[WorkJob], now: u64) -> eyre::Result<u64> {
         let mut write = self.work.begin_write()?;
-        write.set_durability(Durability::Immediate);
+        write.set_durability(Durability::Immediate)?;
         let written = {
             let mut table = write.open_table(JOBS)?;
             let mut ranks = write.open_table(JOB_RANK)?;
@@ -1473,7 +1473,7 @@ impl Catalog {
             return Ok(());
         }
         let mut write = self.work.begin_write()?;
-        write.set_durability(Durability::Immediate);
+        write.set_durability(Durability::Immediate)?;
         {
             let mut ranks = write.open_table(JOB_RANK)?;
             for key in &missing {

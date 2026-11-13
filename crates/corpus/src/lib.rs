@@ -11,7 +11,9 @@ pub use logs::{decode_receipt_bundle, encode_receipt_bundle, flatten_logs, logs_
 
 use eyre::WrapErr;
 use model::{decode_block_record, encode_block_record, BlockRecord};
-use redb::{Database, Durability, ReadableTable, TableDefinition};
+use redb::{
+    Database, Durability, ReadOnlyDatabase, ReadableDatabase, ReadableTable, TableDefinition,
+};
 use std::path::{Path, PathBuf};
 
 const BLOCKS: TableDefinition<u64, &[u8]> = TableDefinition::new("blocks");
@@ -20,17 +22,39 @@ const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 /// Receipt batches are multi-megabyte sequential reads and writes.
 const PAGE_CACHE: usize = 64 * 1024 * 1024;
 
-pub struct Corpus {
-    db: Database,
+enum Db {
+    Write(Database),
+    Read(ReadOnlyDatabase),
 }
 
-fn open_database(path: &Path, create: bool) -> Result<Database, redb::DatabaseError> {
+impl Db {
+    fn begin_read(&self) -> Result<redb::ReadTransaction, redb::TransactionError> {
+        match self {
+            Db::Write(db) => db.begin_read(),
+            Db::Read(db) => db.begin_read(),
+        }
+    }
+
+    fn begin_write(&self) -> eyre::Result<redb::WriteTransaction> {
+        match self {
+            Db::Write(db) => Ok(db.begin_write()?),
+            Db::Read(_) => Err(eyre::eyre!("corpus is open read-only")),
+        }
+    }
+}
+
+pub struct Corpus {
+    db: Db,
+}
+
+fn open_database(path: &Path, create: bool) -> Result<Db, redb::DatabaseError> {
     let mut builder = redb::Builder::new();
     builder.set_cache_size(PAGE_CACHE);
+    builder.set_concurrency_mode(redb::ConcurrencyMode::SingleWriter);
     if create {
-        builder.create(path)
+        Ok(Db::Write(builder.create(path)?))
     } else {
-        builder.open(path)
+        Ok(Db::Read(builder.open_read_only(path)?))
     }
 }
 
@@ -43,6 +67,7 @@ impl Corpus {
         Ok(Self { db })
     }
 
+    /// Open a corpus another process may be writing. Callers only read.
     pub fn open(path: &Path) -> eyre::Result<Self> {
         let db = open_database(path, false).wrap_err("open corpus")?;
         Ok(Self { db })
@@ -68,7 +93,7 @@ impl Corpus {
     /// shorter record can add nothing.
     pub fn write_records(&self, cursor_key: &str, records: &[BlockRecord]) -> eyre::Result<u64> {
         let mut txn = self.db.begin_write()?;
-        txn.set_durability(Durability::Eventual);
+        txn.set_durability(Durability::Immediate)?;
         let delta = {
             let mut blocks = txn.open_table(BLOCKS)?;
             let mut meta = txn.open_table(META)?;
@@ -142,7 +167,7 @@ impl Corpus {
             return Ok(0);
         }
         let mut txn = self.db.begin_write()?;
-        txn.set_durability(Durability::Immediate);
+        txn.set_durability(Durability::Immediate)?;
         let delta = {
             let mut blocks = txn.open_table(BLOCKS)?;
             let mut meta = txn.open_table(META)?;
@@ -256,7 +281,7 @@ impl Corpus {
     }
 }
 
-fn meta_get(db: &Database, key: &str) -> eyre::Result<Option<u64>> {
+fn meta_get(db: &Db, key: &str) -> eyre::Result<Option<u64>> {
     let txn = db.begin_read()?;
     let table = match txn.open_table(META) {
         Ok(table) => table,

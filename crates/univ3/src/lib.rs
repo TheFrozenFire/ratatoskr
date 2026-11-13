@@ -8,7 +8,7 @@ use corpus::{logs_in_block, Corpus};
 use discover::univ3_pool;
 use eyre::WrapErr;
 use model::decode_block_record;
-use redb::{Database, Durability, TableDefinition};
+use redb::{Durability, TableDefinition};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -114,9 +114,12 @@ impl PoolScan {
         if path.exists() {
             std::fs::remove_file(path).wrap_err("replace previous catalog")?;
         }
-        let out = Database::create(path).wrap_err("create pool catalog")?;
+        let mut builder = redb::Builder::new();
+        builder.set_cache_size(16 * 1024 * 1024);
+        builder.set_concurrency_mode(redb::ConcurrencyMode::SingleWriter);
+        let out = builder.create(path).wrap_err("create pool catalog")?;
         let mut write = out.begin_write()?;
-        write.set_durability(Durability::Immediate);
+        write.set_durability(Durability::Immediate)?;
         {
             let mut pools = write.open_table(POOLS)?;
             for (pool, row) in &self.pools {
