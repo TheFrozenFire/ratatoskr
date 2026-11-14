@@ -31,6 +31,7 @@ The lenses are a Foundry project. `foundry.toml` pins solc 0.8.28, the optimizer
 
 ```
 cargo run -p ratatoskr --release -- --pipeline venues
+cargo run -p ratatoskr --release -- --data-dir data/ratatoskr --pipeline oracles
 ```
 
 Header sync asks the peer service for header ranges and appends them. Each row is the block hash, parent hash, receipts root, and logs bloom. The chain has to link back to mainnet genesis. A restart continues from the saved cursor. Receipts are not downloaded.

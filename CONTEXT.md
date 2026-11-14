@@ -565,7 +565,7 @@ The chain phase id of one aggregator a feed proxy has used. The first stored pha
 _Avoid_: stage, generation
 
 **Answer**:
-The scaled integer a feed phase reports for one round. A zero left after the feed shuts down is not an answer.
+The scaled integer a feed phase reports for one round, taken from the aggregator's `AnswerUpdated` log. A zero left after the feed shuts down is not an answer.
 _Avoid_: price, quote, spot
 
 ## Relationships

@@ -14,11 +14,14 @@ const IDENTITY: TableDefinition<&[u8], &[u8]> = TableDefinition::new("identity")
 const CONFIG: TableDefinition<&[u8], &[u8]> = TableDefinition::new("config");
 const PHASES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("phases");
 const JOBS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("jobs");
+const ANSWERS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("answers");
 const MISMATCHES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("mismatches");
 const FAILURES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("failures");
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 
 const LISTING: &str = "listing";
+const FOLLOW: &str = "follow";
+const LOOKBACK: &str = "lookback";
 const IDENTITY_VERSION: u8 = 1;
 
 #[derive(Debug, thiserror::Error)]
@@ -67,6 +70,29 @@ pub struct HistoryJob {
     pub proxy: Address,
     pub phase_id: u16,
     pub aggregator: Address,
+}
+
+/// One answer taken from an aggregator `AnswerUpdated` log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Answer {
+    pub proxy: Address,
+    pub phase_id: u16,
+    pub round_id: u64,
+    pub value: I256,
+    pub updated_at: u64,
+    pub block: u64,
+    pub log_index: u64,
+}
+
+/// A log the follow pass has already decoded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedAnswer {
+    pub aggregator: Address,
+    pub round_id: u64,
+    pub value: I256,
+    pub updated_at: u64,
+    pub block: u64,
+    pub log_index: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -392,7 +418,118 @@ impl Feeds {
         Ok(())
     }
 
-    /// Drop history jobs. Feeds, configuration, and phases stay.
+    pub fn answers(&self, proxy: Address) -> Result<Vec<Answer>, Error> {
+        let read = self.db.begin_read().map_err(db_err)?;
+        let table = match read.open_table(ANSWERS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(err) => return Err(db_err(err)),
+        };
+        let start = answer_key(proxy, 0, 0);
+        let end = answer_key(proxy, u16::MAX, u64::MAX);
+        let mut out = Vec::new();
+        for item in table
+            .range(start.as_slice()..=end.as_slice())
+            .map_err(db_err)?
+        {
+            let (key, value) = item.map_err(db_err)?;
+            out.push(decode_answer(key.value(), value.value())?);
+        }
+        Ok(out)
+    }
+
+    /// Next block the answer follow has not scanned. `None` means it has not started.
+    pub fn follow_block(&self) -> Result<Option<u64>, Error> {
+        let read = self.db.begin_read().map_err(db_err)?;
+        let table = match read.open_table(META) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(err) => return Err(db_err(err)),
+        };
+        Ok(table
+            .get(FOLLOW)
+            .map_err(db_err)?
+            .map(|value| value.value()))
+    }
+
+    pub fn lookback_done(&self) -> Result<bool, Error> {
+        let read = self.db.begin_read().map_err(db_err)?;
+        let table = match read.open_table(META) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(false),
+            Err(err) => return Err(db_err(err)),
+        };
+        Ok(table.get(LOOKBACK).map_err(db_err)?.is_some())
+    }
+
+    pub fn mark_lookback(&self) -> Result<(), Error> {
+        let mut write = self.db.begin_write().map_err(db_err)?;
+        write
+            .set_durability(Durability::Immediate)
+            .map_err(db_err)?;
+        {
+            let mut meta = write.open_table(META).map_err(db_err)?;
+            meta.insert(LOOKBACK, 1u64).map_err(db_err)?;
+        }
+        write.commit().map_err(db_err)?;
+        Ok(())
+    }
+
+    /// Store answers for phases whose aggregator emitted them, and advance the follow cursor.
+    ///
+    /// A zero value is not an answer. A repeated round stays as the first row.
+    /// The cursor does not move backward.
+    pub fn commit_follow(
+        &self,
+        next_block: u64,
+        observed: &[ObservedAnswer],
+    ) -> Result<usize, Error> {
+        let mut write = self.db.begin_write().map_err(db_err)?;
+        write
+            .set_durability(Durability::Immediate)
+            .map_err(db_err)?;
+        let written = {
+            let mut meta = write.open_table(META).map_err(db_err)?;
+            if let Some(current) = meta.get(FOLLOW).map_err(db_err)?.map(|value| value.value()) {
+                if next_block < current {
+                    return Err(Error::Store(format!(
+                        "follow cursor is {current}; {next_block} is below it"
+                    )));
+                }
+            }
+            meta.insert(FOLLOW, next_block).map_err(db_err)?;
+            drop(meta);
+            let phases = write.open_table(PHASES).map_err(db_err)?;
+            let owners = phase_owners(&phases)?;
+            drop(phases);
+            let mut answers = write.open_table(ANSWERS).map_err(db_err)?;
+            let mut written = 0usize;
+            for observed in observed {
+                if observed.value == I256::ZERO {
+                    continue;
+                }
+                let Some(pairs) = owners.get(&observed.aggregator) else {
+                    continue;
+                };
+                for (proxy, phase_id) in pairs {
+                    let key = answer_key(*proxy, *phase_id, observed.round_id);
+                    if answers.get(key.as_slice()).map_err(db_err)?.is_some() {
+                        continue;
+                    }
+                    let value = encode_answer(observed);
+                    answers
+                        .insert(key.as_slice(), value.as_slice())
+                        .map_err(db_err)?;
+                    written += 1;
+                }
+            }
+            written
+        };
+        write.commit().map_err(db_err)?;
+        Ok(written)
+    }
+
+    /// Drop history jobs. Feeds, configuration, phases, and answers stay.
     pub fn clear_history_jobs(&self) -> Result<(), Error> {
         let mut write = self.db.begin_write().map_err(db_err)?;
         write
@@ -758,6 +895,64 @@ fn address_of(bytes: &[u8]) -> Result<Address, Error> {
         return Err(Error::Store("aggregator is short".into()));
     }
     Ok(Address::from_slice(bytes))
+}
+
+fn phase_owners(
+    table: &impl ReadableTable<&'static [u8], &'static [u8]>,
+) -> Result<std::collections::HashMap<Address, Vec<(Address, u16)>>, Error> {
+    let mut owners = std::collections::HashMap::<Address, Vec<(Address, u16)>>::new();
+    for item in table.iter().map_err(db_err)? {
+        let (key, value) = item.map_err(db_err)?;
+        let (proxy, phase_id) = split_phase_key(key.value())?;
+        let (aggregator, _, _) = decode_phase(value.value())?;
+        owners
+            .entry(aggregator)
+            .or_default()
+            .push((proxy, phase_id));
+    }
+    Ok(owners)
+}
+
+fn answer_key(proxy: Address, phase_id: u16, round_id: u64) -> [u8; 30] {
+    let mut key = [0u8; 30];
+    key[..20].copy_from_slice(proxy.as_slice());
+    key[20..22].copy_from_slice(&phase_id.to_be_bytes());
+    key[22..].copy_from_slice(&round_id.to_be_bytes());
+    key
+}
+
+fn encode_answer(observed: &ObservedAnswer) -> [u8; 56] {
+    let mut out = [0u8; 56];
+    out[..32].copy_from_slice(&observed.value.to_be_bytes::<32>());
+    out[32..40].copy_from_slice(&observed.updated_at.to_le_bytes());
+    out[40..48].copy_from_slice(&observed.block.to_le_bytes());
+    out[48..].copy_from_slice(&observed.log_index.to_le_bytes());
+    out
+}
+
+fn decode_answer(key: &[u8], value: &[u8]) -> Result<Answer, Error> {
+    if key.len() != 30 || value.len() != 56 {
+        return Err(Error::Store("answer row".into()));
+    }
+    let mut round = [0u8; 8];
+    round.copy_from_slice(&key[22..30]);
+    let mut word = [0u8; 32];
+    word.copy_from_slice(&value[..32]);
+    let mut updated = [0u8; 8];
+    updated.copy_from_slice(&value[32..40]);
+    let mut block = [0u8; 8];
+    block.copy_from_slice(&value[40..48]);
+    let mut log_index = [0u8; 8];
+    log_index.copy_from_slice(&value[48..56]);
+    Ok(Answer {
+        proxy: Address::from_slice(&key[..20]),
+        phase_id: u16::from_be_bytes([key[20], key[21]]),
+        round_id: u64::from_be_bytes(round),
+        value: I256::from_be_bytes(word),
+        updated_at: u64::from_le_bytes(updated),
+        block: u64::from_le_bytes(block),
+        log_index: u64::from_le_bytes(log_index),
+    })
 }
 
 fn phase_key(proxy: Address, phase_id: u16) -> [u8; 22] {

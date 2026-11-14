@@ -3,7 +3,7 @@
 //! A lens call omits `to` and passes creation code in `data`. A revert whose
 //! `error.data` carries the lens magic is a successful read.
 
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, B256, U256};
 use eyre::{eyre, WrapErr};
 use serde_json::{json, Value};
 use std::cell::Cell;
@@ -43,6 +43,15 @@ impl RpcResponse {
                 .to_lowercase()
                 .contains("too many request")
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RpcLog {
+    pub address: Address,
+    pub block: u64,
+    pub log_index: u64,
+    pub topics: Vec<B256>,
+    pub data: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -227,6 +236,30 @@ impl Rpc {
         Ok(hex.len() / 2)
     }
 
+    /// Logs in `from..=to` whose first topic is `topic` and whose address is in `addresses`.
+    pub fn get_logs(
+        &self,
+        from: u64,
+        to: u64,
+        addresses: &[Address],
+        topic: B256,
+    ) -> eyre::Result<Vec<RpcLog>> {
+        if addresses.is_empty() || from > to {
+            return Ok(Vec::new());
+        }
+        let filter = json!({
+            "fromBlock": format!("0x{from:x}"),
+            "toBlock": format!("0x{to:x}"),
+            "address": addresses.iter().map(|address| address.to_string()).collect::<Vec<_>>(),
+            "topics": [topic.to_string()],
+        });
+        let response = self.exchange("eth_getLogs", json!([filter]))?;
+        let Some(result) = response.result.as_ref() else {
+            return Err(eyre!("eth_getLogs: {}", response.error_message));
+        };
+        parse_logs(result)
+    }
+
     pub fn block_number(&self) -> eyre::Result<u64> {
         let response = self.exchange("eth_blockNumber", json!([]))?;
         let Some(text) = response.result.as_ref().and_then(Value::as_str) else {
@@ -402,6 +435,68 @@ impl Rpc {
 pub enum StorageError {
     Unsupported,
     Failed(eyre::Report),
+}
+
+fn parse_logs(result: &Value) -> eyre::Result<Vec<RpcLog>> {
+    let Value::Array(rows) = result else {
+        return Err(eyre!("eth_getLogs result"));
+    };
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let Value::Object(map) = row else {
+            return Err(eyre!("eth_getLogs row"));
+        };
+        let address = map
+            .get("address")
+            .and_then(Value::as_str)
+            .ok_or_else(|| eyre!("eth_getLogs address"))?
+            .parse()
+            .map_err(|_| eyre!("eth_getLogs address"))?;
+        let block = hex_u64(
+            map.get("blockNumber")
+                .and_then(Value::as_str)
+                .ok_or_else(|| eyre!("eth_getLogs block"))?,
+        )?;
+        let log_index = hex_u64(
+            map.get("logIndex")
+                .and_then(Value::as_str)
+                .ok_or_else(|| eyre!("eth_getLogs index"))?,
+        )?;
+        let topics = map
+            .get("topics")
+            .and_then(Value::as_array)
+            .ok_or_else(|| eyre!("eth_getLogs topics"))?;
+        let mut parsed_topics = Vec::with_capacity(topics.len());
+        for topic in topics {
+            let text = topic.as_str().ok_or_else(|| eyre!("eth_getLogs topic"))?;
+            let bytes = unhex(text)?;
+            if bytes.len() != 32 {
+                return Err(eyre!("eth_getLogs topic"));
+            }
+            parsed_topics.push(B256::from_slice(&bytes));
+        }
+        let data = unhex(
+            map.get("data")
+                .and_then(Value::as_str)
+                .ok_or_else(|| eyre!("eth_getLogs data"))?,
+        )?;
+        out.push(RpcLog {
+            address,
+            block,
+            log_index,
+            topics: parsed_topics,
+            data,
+        });
+    }
+    Ok(out)
+}
+
+fn hex_u64(text: &str) -> eyre::Result<u64> {
+    let text = text.strip_prefix("0x").unwrap_or(text);
+    if text.is_empty() {
+        return Ok(0);
+    }
+    u64::from_str_radix(text, 16).wrap_err("hex quantity")
 }
 
 fn block_tag(block: Option<u64>) -> Value {
@@ -596,6 +691,16 @@ pub fn unhex(text: &str) -> eyre::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_log_keeps_its_block_and_topics() {
+        let text = r#"[{"address":"0x00000000000000000000000000000000000000aa","blockNumber":"0x10","logIndex":"0x2","topics":["0x0559884fd3a460db3073b7fc896cc77986f16e378210ded43186175bf646fc5f"],"data":"0x01"}]"#;
+        let logs = parse_logs(&serde_json::from_str(text).unwrap()).unwrap();
+        assert_eq!(logs[0].block, 16);
+        assert_eq!(logs[0].log_index, 2);
+        assert_eq!(logs[0].data, vec![1]);
+        assert_eq!(logs[0].topics.len(), 1);
+    }
 
     #[test]
     fn storage_values_keep_slot_order_per_address() {
