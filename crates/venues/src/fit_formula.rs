@@ -248,7 +248,10 @@ impl<'a> Cursor<'a> {
     }
 
     fn take(&mut self, len: usize) -> Result<&'a [u8], String> {
-        let end = self.at.checked_add(len).ok_or_else(|| "short".to_string())?;
+        let end = self
+            .at
+            .checked_add(len)
+            .ok_or_else(|| "short".to_string())?;
         if end > self.bytes.len() {
             return Err("short".to_string());
         }
@@ -499,7 +502,15 @@ impl Formula {
                 push_bi(out, denom);
                 push_bool(out, *fee_on_input);
             }
-            Self::StableOutput { xp, amp, i, j, fee, rates, ppm } => {
+            Self::StableOutput {
+                xp,
+                amp,
+                i,
+                j,
+                fee,
+                rates,
+                ppm,
+            } => {
                 push_u8(out, 7);
                 push_bis(out, xp);
                 push_bi(out, amp);
@@ -509,7 +520,15 @@ impl Formula {
                 push_bis(out, rates);
                 push_bi(out, ppm);
             }
-            Self::StablePpms { xp, amp, i, j, fee, rates, ppms } => {
+            Self::StablePpms {
+                xp,
+                amp,
+                i,
+                j,
+                fee,
+                rates,
+                ppms,
+            } => {
                 push_u8(out, 8);
                 push_bis(out, xp);
                 push_bi(out, amp);
@@ -549,7 +568,12 @@ impl Formula {
                 push_bi(out, prec_j);
                 push_bi(out, out_ppm);
             }
-            Self::Product { reserve_in, reserve_out, fee, denom } => {
+            Self::Product {
+                reserve_in,
+                reserve_out,
+                fee,
+                denom,
+            } => {
                 push_u8(out, 10);
                 push_bi(out, reserve_in);
                 push_bi(out, reserve_out);
@@ -570,7 +594,15 @@ impl Formula {
                 push_bi(out, weight_out);
                 push_bi(out, fee);
             }
-            Self::BalancerStable { xp, amp, i, j, fee, prec_i, prec_j } => {
+            Self::BalancerStable {
+                xp,
+                amp,
+                i,
+                j,
+                fee,
+                prec_i,
+                prec_j,
+            } => {
                 push_u8(out, 12);
                 push_bis(out, xp);
                 push_bi(out, amp);
@@ -580,7 +612,14 @@ impl Formula {
                 push_bi(out, prec_i);
                 push_bi(out, prec_j);
             }
-            Self::Ladder { sqrt_price, liquidity, tick, fee, ticks, zero_for_one } => {
+            Self::Ladder {
+                sqrt_price,
+                liquidity,
+                tick,
+                fee,
+                ticks,
+                zero_for_one,
+            } => {
                 push_u8(out, 13);
                 push_bi(out, sqrt_price);
                 push_bi(out, liquidity);
@@ -648,7 +687,13 @@ impl Formula {
                 base.encode(out);
                 push_i64(out, *ppm);
             }
-            Self::Wave { base, cap, x_last, a_ppm, b_ppm } => {
+            Self::Wave {
+                base,
+                cap,
+                x_last,
+                a_ppm,
+                b_ppm,
+            } => {
                 push_u8(out, 23);
                 base.encode(out);
                 push_bi(out, cap);
@@ -811,9 +856,15 @@ impl Formula {
                 scaled_out: read_bi(cursor)?,
                 scale_out: read_bi(cursor)?,
             },
-            15 => Self::Chord { knots: read_pairs(cursor)? },
-            16 => Self::Cubic { knots: read_pairs(cursor)? },
-            17 => Self::HyperResidual { knots: read_pairs(cursor)? },
+            15 => Self::Chord {
+                knots: read_pairs(cursor)?,
+            },
+            16 => Self::Cubic {
+                knots: read_pairs(cursor)?,
+            },
+            17 => Self::HyperResidual {
+                knots: read_pairs(cursor)?,
+            },
             18 => Self::Added {
                 base: Box::new(Self::decode_from(cursor, depth + 1)?),
                 knots: read_pairs(cursor)?,
@@ -846,7 +897,9 @@ impl Formula {
                 b_ppm: cursor.i64()?,
             },
             24 => Self::Identity,
-            25 => Self::Lookup { pairs: read_pairs(cursor)? },
+            25 => Self::Lookup {
+                pairs: read_pairs(cursor)?,
+            },
             _ => return Err("formula".to_string()),
         })
     }
