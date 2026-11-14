@@ -5,11 +5,19 @@
 //! history job. Deleting the job table leaves the feeds and the phases.
 
 use alloy_primitives::{Address, I256, U256};
-use oracles::{
-    parse_directory, Answer, Configuration, DirectoryRow, Error, Feed, Gauges, HistoryJob, Listing,
-    Mismatch, ObservedAnswer, Phase, ProxyHead, Read,
-};
 use redb::{Durability, ReadableDatabase, ReadableTable, TableDefinition};
+use store_model::{
+    Answer, Configuration, DirectoryRow, Feed, Gauges, HistoryJob, Listing, Mismatch,
+    ObservedAnswer, Phase, ProxyHead, Read,
+};
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("proxy {proxy} is not listed")]
+    Unknown { proxy: Address },
+    #[error("{0}")]
+    Store(String),
+}
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -85,8 +93,8 @@ impl Feeds {
         Ok(Self { db })
     }
 
-    pub fn apply_directory(&self, body: &str) -> Result<Listing, Error> {
-        let rows = parse_directory(body)?;
+    /// Replace the directory rows. The caller has already parsed the document.
+    pub fn apply_directory(&self, rows: &[DirectoryRow]) -> Result<Listing, Error> {
         let mut write = self.db.begin_write().map_err(db_err)?;
         write
             .set_durability(Durability::Immediate)
@@ -104,7 +112,7 @@ impl Feeds {
         };
         {
             let mut identity = write.open_table(IDENTITY).map_err(db_err)?;
-            for row in &rows {
+            for row in rows {
                 let value = encode_identity(row, generation)?;
                 identity
                     .insert(row.proxy.as_slice(), value.as_slice())
@@ -1056,55 +1064,5 @@ impl Cursor<'_> {
         let text =
             std::str::from_utf8(bytes).map_err(|_| Error::Store("field is not utf-8".into()))?;
         Ok(text.to_string())
-    }
-}
-
-impl oracles::FeedBook for Feeds {
-    fn apply_directory(&self, body: &str) -> Result<Listing, Error> {
-        Feeds::apply_directory(self, body)
-    }
-
-    fn remember_answers(&self) -> Result<u64, Error> {
-        Feeds::remember_answers(self)
-    }
-
-    fn gauges(&self) -> Result<Gauges, Error> {
-        Feeds::gauges(self)
-    }
-
-    fn proxies(&self) -> Result<Vec<Address>, Error> {
-        Feeds::proxies(self)
-    }
-
-    fn apply_read(&self, proxy: Address, read: Read) -> Result<(), Error> {
-        Feeds::apply_read(self, proxy, read)
-    }
-
-    fn follow_block(&self) -> Result<Option<u64>, Error> {
-        Feeds::follow_block(self)
-    }
-
-    fn lookback_done(&self) -> Result<bool, Error> {
-        Feeds::lookback_done(self)
-    }
-
-    fn mark_lookback(&self) -> Result<(), Error> {
-        Feeds::mark_lookback(self)
-    }
-
-    fn commit_follow(&self, next_block: u64, observed: &[ObservedAnswer]) -> Result<usize, Error> {
-        Feeds::commit_follow(self, next_block, observed)
-    }
-
-    fn answers(&self, proxy: Address) -> Result<Vec<Answer>, Error> {
-        Feeds::answers(self, proxy)
-    }
-
-    fn phases(&self, proxy: Address) -> Result<Vec<Phase>, Error> {
-        Feeds::phases(self, proxy)
-    }
-
-    fn feed(&self, proxy: Address) -> Result<Option<Feed>, Error> {
-        Feeds::feed(self, proxy)
     }
 }

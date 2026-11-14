@@ -6,9 +6,15 @@
 use alloy_primitives::Address;
 use num_bigint::BigInt;
 use redb::{Durability, ReadableDatabase, ReadableTable, TableDefinition};
-use spots::{Error, Spot};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use store_model::Spot;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("{0}")]
+    Store(String),
+}
 
 /// One pass replaces the table. The cache holds that write.
 const PAGE_CACHE: usize = 8 * 1024 * 1024;
@@ -99,12 +105,6 @@ impl Spots {
                 .then(left.numeraire.cmp(&right.numeraire))
         });
         Ok(spots)
-    }
-}
-
-impl spots::SpotBook for Spots {
-    fn replace(&self, spots: &[Spot]) -> Result<(), Error> {
-        Spots::replace(self, spots)
     }
 }
 

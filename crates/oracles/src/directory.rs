@@ -4,35 +4,10 @@ use alloy_primitives::Address;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::str::FromStr;
+pub use store_model::DirectoryRow;
 
 /// `rddUrl` for Ethereum mainnet.
 pub const DIRECTORY_URL: &str = "https://reference-data-directory.vercel.app/feeds-mainnet.json";
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DirectoryRow {
-    pub proxy: Address,
-    pub name: String,
-    pub path: String,
-    pub category: String,
-    pub feed_type: String,
-    pub contract_version: u64,
-    pub decimals: u8,
-    pub multiply: String,
-    pub heartbeat: u64,
-    pub threshold: String,
-    pub base_asset: String,
-    pub quote_asset: String,
-    pub product_type: String,
-    pub product_type_code: String,
-    pub attribute_type: String,
-    pub market_hours: String,
-    pub shutdown_date: String,
-    pub clic_product_name: String,
-    pub hidden: bool,
-    pub secondary_proxy: Option<Address>,
-    pub svr_label: String,
-    pub directory_aggregator: Address,
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum DirectoryError {

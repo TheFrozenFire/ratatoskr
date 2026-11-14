@@ -50,33 +50,7 @@ pub struct Edge {
     pub segments: Vec<SlopeSegment>,
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("{0}")]
-    Store(String),
-}
-
-/// The file a pass replaces. The store crate opens it.
-pub trait SpotBook {
-    fn replace(&self, spots: &[Spot]) -> Result<(), Error>;
-}
-
-/// The sized round trip that won for one token in one numeraire.
-///
-/// `bought` is the tokens the buy paid. `sold` is the numeraire the sell of
-/// those tokens returned. `hops` is the number of conduits, and the custodial
-/// wrap counts as one. `block` is the earliest pair conduit on the route. A
-/// route that is only the wrap stores block 0.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Spot {
-    pub token: Address,
-    pub numeraire: Address,
-    pub size: BigInt,
-    pub bought: BigInt,
-    pub sold: BigInt,
-    pub hops: u8,
-    pub block: u64,
-}
+pub use store_model::Spot;
 
 /// Wrapped ETH at a hundredth, a tenth, and one ether. USDC at 100, 1,000, and 10,000.
 pub fn mainnet_numeraires() -> Vec<Numeraire> {
@@ -402,14 +376,13 @@ fn pay(lane: &Lane, input: &BigInt) -> Option<BigInt> {
 /// `gather` reads the open venue catalog. This task does not open it and does
 /// not open the feed file. `wrap` is the custodial wrap from the seed file.
 /// The caller opens the spot file.
-pub async fn run<B, F>(
-    book: B,
+pub async fn run<F>(
+    book: store::service::Spots,
     mut stop: tokio::sync::watch::Receiver<bool>,
     wrap: Option<CustodialWrap>,
     gather: F,
 ) -> eyre::Result<()>
 where
-    B: SpotBook + Send + Sync + 'static,
     F: Fn() -> eyre::Result<Vec<Edge>> + Send + Sync + 'static,
 {
     let gather = std::sync::Arc::new(gather);

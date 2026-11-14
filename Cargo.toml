@@ -8,6 +8,7 @@ members = [
     "crates/era",
     "crates/chain",
     "crates/corpus",
+    "crates/store-model",
     "crates/store",
     "crates/pipeline",
     "crates/api",
@@ -48,6 +49,7 @@ rand = "0.8"
 api = { path = "crates/api" }
 chain = { path = "crates/chain" }
 corpus = { path = "crates/corpus" }
+store-model = { path = "crates/store-model" }
 store = { path = "crates/store" }
 pipeline = { path = "crates/pipeline" }
 directory = { path = "crates/directory" }

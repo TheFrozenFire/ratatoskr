@@ -3587,6 +3587,8 @@ dependencies = [
  "ipc",
  "reqwest 0.12.28",
  "serde_json",
+ "store",
+ "store-model",
  "thiserror",
  "tokio",
  "tracing",
@@ -5367,7 +5369,8 @@ dependencies = [
  "ipc",
  "num-bigint",
  "routing",
- "thiserror",
+ "store",
+ "store-model",
  "tokio",
  "tracing",
 ]
@@ -5413,10 +5416,19 @@ dependencies = [
  "redb",
  "routing",
  "serde_json",
- "spots",
+ "store-model",
+ "thiserror",
  "tokio",
  "tracing",
  "venues",
+]
+
+[[package]]
+name = "store-model"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "num-bigint",
 ]
 
 [[package]]

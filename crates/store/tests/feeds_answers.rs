@@ -4,7 +4,11 @@ use alloy_primitives::{address, Address, B256, I256};
 use oracles::{decode_answer_updated, ChainLog, ObservedAnswer, ProxyHead, Read, ANSWER_UPDATED};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
-use store::Feeds;
+use store::service::Feeds;
+
+fn rows(body: &str) -> Vec<store_model::DirectoryRow> {
+    oracles::parse_directory(body).unwrap()
+}
 
 const ETH: Address = address!("5f4eC3Df9cbd43714FE2740f5E3616155c5b8419");
 const ETH_AGG: Address = address!("E62B71cf983019BFf55bC83B48601ce8419650CC");
@@ -97,7 +101,7 @@ fn observed(aggregator: Address, round_id: u64, value: i64) -> ObservedAnswer {
 #[test]
 fn an_answer_updated_log_stores_the_aggregator_round() {
     let (_dir, feeds) = open();
-    feeds.apply_directory(&directory()).unwrap();
+    feeds.apply_directory(&rows(&directory())).unwrap();
     feeds.apply_read(ETH, read(ETH_AGG, 7)).unwrap();
     feeds.apply_read(ETH, read(NEXT_AGG, 9)).unwrap();
     let log = ChainLog {
@@ -131,7 +135,7 @@ fn an_answer_updated_log_stores_the_aggregator_round() {
 #[test]
 fn a_zero_log_and_an_unknown_aggregator_store_nothing() {
     let (_dir, feeds) = open();
-    feeds.apply_directory(&directory()).unwrap();
+    feeds.apply_directory(&rows(&directory())).unwrap();
     feeds.apply_read(ETH, read(ETH_AGG, 7)).unwrap();
     let zero = ChainLog {
         address: ETH_AGG,
@@ -158,7 +162,7 @@ fn a_zero_log_and_an_unknown_aggregator_store_nothing() {
 #[test]
 fn an_older_phase_keeps_the_log_from_its_own_aggregator() {
     let (_dir, feeds) = open();
-    feeds.apply_directory(&directory()).unwrap();
+    feeds.apply_directory(&rows(&directory())).unwrap();
     feeds.apply_read(ETH, read(ETH_AGG, 7)).unwrap();
     feeds.apply_read(ETH, read(NEXT_AGG, 9)).unwrap();
     feeds
@@ -181,7 +185,7 @@ fn the_heartbeat_lookback_is_remembered_once() {
 #[test]
 fn the_follow_cursor_does_not_move_backward() {
     let (_dir, feeds) = open();
-    feeds.apply_directory(&directory()).unwrap();
+    feeds.apply_directory(&rows(&directory())).unwrap();
     feeds.commit_follow(20, &[]).unwrap();
     let err = feeds.commit_follow(19, &[]).unwrap_err();
     assert!(err.to_string().contains("follow cursor"), "{err}");

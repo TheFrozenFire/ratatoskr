@@ -1,33 +1,59 @@
-//! Rows the directory, the proxy read, and the answer follow share.
-//!
-//! The store crate opens the file that holds them.
+//! Feed directory rows, proxy configuration, phases, and answers.
 
-use crate::abi::ProxyHead;
-use crate::directory::{DirectoryError, DirectoryRow};
 use alloy_primitives::{Address, I256, U256};
 
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error(transparent)]
-    Directory(#[from] DirectoryError),
-    #[error("proxy {proxy} is not listed")]
-    Unknown { proxy: Address },
-    #[error("{0}")]
-    Store(String),
+/// One row of the Ethereum mainnet feed directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectoryRow {
+    pub proxy: Address,
+    pub name: String,
+    pub path: String,
+    pub category: String,
+    pub feed_type: String,
+    pub contract_version: u64,
+    pub decimals: u8,
+    pub multiply: String,
+    pub heartbeat: u64,
+    pub threshold: String,
+    pub base_asset: String,
+    pub quote_asset: String,
+    pub product_type: String,
+    pub product_type_code: String,
+    pub attribute_type: String,
+    pub market_hours: String,
+    pub shutdown_date: String,
+    pub clic_product_name: String,
+    pub hidden: bool,
+    pub secondary_proxy: Option<Address>,
+    pub svr_label: String,
+    pub directory_aggregator: Address,
 }
 
+/// The words a proxy call returns for the current phase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyHead {
+    pub decimals: u8,
+    pub description: String,
+    pub version: U256,
+    pub aggregator: Address,
+    pub phase_id: u16,
+}
+
+/// One apply of the directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Listing {
     pub generation: u64,
     pub named: usize,
 }
 
+/// A directory row and the generation that last wrote it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Feed {
     pub row: DirectoryRow,
     pub listed_generation: u64,
 }
 
+/// Decimals, description, and version written once for a proxy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Configuration {
     pub decimals: u8,
@@ -35,6 +61,7 @@ pub struct Configuration {
     pub version: U256,
 }
 
+/// One chain phase of a proxy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Phase {
     pub phase_id: u16,
@@ -43,6 +70,7 @@ pub struct Phase {
     pub max_answer: Option<I256>,
 }
 
+/// An unclaimed history job for one phase.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryJob {
     pub proxy: Address,
@@ -84,6 +112,7 @@ pub struct ObservedAnswer {
     pub log_index: u64,
 }
 
+/// A later read that disagreed with the stored configuration or phase.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mismatch {
     Configuration {
@@ -105,6 +134,7 @@ pub enum Mismatch {
     },
 }
 
+/// The outcome of one proxy read, ready to store.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Read {
     Failed(String),

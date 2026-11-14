@@ -2,23 +2,20 @@
 
 mod abi;
 mod answer;
-mod book;
 mod configure;
 mod directory;
 mod follow;
-mod records;
 
 pub use abi::{
-    decode_aggregate3, decode_bound, decode_proxy_head, encode_aggregate3, CallResult, ProxyHead,
-    CALL_GAS, FEEDS_PER_CALL, MULTICALL,
+    decode_aggregate3, decode_bound, decode_proxy_head, encode_aggregate3, CallResult, CALL_GAS,
+    FEEDS_PER_CALL, MULTICALL,
 };
 pub use answer::{decode_answer_updated, ChainLog, ANSWER_UPDATED};
-pub use book::FeedBook;
 pub use configure::proxy_heads;
-pub use directory::{parse_directory, DirectoryError, DirectoryRow, DIRECTORY_URL};
-pub use records::{
-    Answer, Configuration, Error, Feed, Gauges, HistoryJob, Listing, Mismatch, ObservedAnswer,
-    Phase, Read,
+pub use directory::{parse_directory, DirectoryError, DIRECTORY_URL};
+pub use store_model::{
+    Answer, Configuration, DirectoryRow, Feed, Gauges, HistoryJob, Listing, Mismatch,
+    ObservedAnswer, Phase, ProxyHead, Read,
 };
 
 use eyre::WrapErr;
@@ -28,22 +25,19 @@ use eyre::WrapErr;
 /// An empty `rpcs` list uses [`venues::default_call_rpcs`]. The venue catalog
 /// stays closed. History jobs are not claimed. A follow error is logged and
 /// the next pass resumes from the stored cursor. The caller opens the feed file.
-pub async fn run<B>(
-    feeds: B,
+pub async fn run(
+    feeds: store::service::Feeds,
     rpcs: Vec<String>,
     stop: tokio::sync::watch::Receiver<bool>,
-) -> eyre::Result<()>
-where
-    B: FeedBook + Send + 'static,
-{
+) -> eyre::Result<()> {
     tokio::task::spawn_blocking(move || pass(&feeds, rpcs, stop))
         .await
         .wrap_err("feed pass")??;
     Ok(())
 }
 
-fn pass<B: FeedBook>(
-    feeds: &B,
+fn pass(
+    feeds: &store::service::Feeds,
     rpcs: Vec<String>,
     stop: tokio::sync::watch::Receiver<bool>,
 ) -> eyre::Result<Listing> {
@@ -60,7 +54,8 @@ fn pass<B: FeedBook>(
         .wrap_err("feed directory")?
         .text()
         .wrap_err("feed directory")?;
-    let listing = feeds.apply_directory(&body)?;
+    let rows = parse_directory(&body)?;
+    let listing = feeds.apply_directory(&rows)?;
     tracing::info!(
         generation = listing.generation,
         named = listing.named,

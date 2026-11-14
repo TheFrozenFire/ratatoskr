@@ -5,6 +5,7 @@
 //! the first word of that tuple.
 
 use alloy_primitives::{Address, I256, U256};
+pub use store_model::ProxyHead;
 
 pub const MULTICALL: Address =
     alloy_primitives::address!("cA11bde05977b3631167028862bE2a173976CA11");
@@ -25,15 +26,6 @@ const MAX_ANSWER: [u8; 4] = [0x70, 0xda, 0x2f, 0x67];
 pub struct CallResult {
     pub success: bool,
     pub body: Vec<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProxyHead {
-    pub decimals: u8,
-    pub description: String,
-    pub version: U256,
-    pub aggregator: Address,
-    pub phase_id: u16,
 }
 
 pub fn proxy_calls(proxy: Address) -> [(Address, [u8; 4]); 5] {

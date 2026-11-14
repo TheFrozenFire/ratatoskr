@@ -9,9 +9,10 @@ publish.workspace = true
 alloy-primitives.workspace = true
 eyre.workspace = true
 ipc.workspace = true
+store.workspace = true
+store-model.workspace = true
 num-bigint = "0.4"
 routing.workspace = true
-thiserror = "2"
 tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true
 

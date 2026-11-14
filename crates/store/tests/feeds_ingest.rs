@@ -7,7 +7,11 @@ use oracles::{
 };
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
-use store::Feeds;
+use store::service::Feeds;
+
+fn rows(body: &str) -> Vec<store_model::DirectoryRow> {
+    oracles::parse_directory(body).unwrap()
+}
 
 const ETH: Address = address!("5f4eC3Df9cbd43714FE2740f5E3616155c5b8419");
 const ETH_AGG: Address = address!("E62B71cf983019BFf55bC83B48601ce8419650CC");
@@ -188,7 +192,7 @@ fn the_directory_url_is_the_ethereum_mainnet_file() {
 #[test]
 fn directory_rows_keep_the_proxy_as_the_identity() {
     let (_dir, feeds) = open();
-    let listing = feeds.apply_directory(&directory()).unwrap();
+    let listing = feeds.apply_directory(&rows(&directory())).unwrap();
     assert_eq!(listing.generation, 1);
     assert_eq!(listing.named, 3);
     let eth = feeds.feed(ETH).unwrap().unwrap();
@@ -210,7 +214,7 @@ fn directory_rows_keep_the_proxy_as_the_identity() {
 #[test]
 fn a_later_directory_rewrites_category_and_keeps_the_proxy_configuration() {
     let (_dir, feeds) = open();
-    feeds.apply_directory(&directory()).unwrap();
+    feeds.apply_directory(&rows(&directory())).unwrap();
     feeds
         .apply_read(
             ETH,
@@ -223,7 +227,7 @@ fn a_later_directory_rewrites_category_and_keeps_the_proxy_configuration() {
         .unwrap();
     let rewritten =
         directory().replacen(r#""feedCategory": "low""#, r#""feedCategory": "medium""#, 1);
-    let listing = feeds.apply_directory(&rewritten).unwrap();
+    let listing = feeds.apply_directory(&rows(&rewritten)).unwrap();
     assert_eq!(listing.generation, 2);
     let eth = feeds.feed(ETH).unwrap().unwrap();
     assert_eq!(eth.row.proxy, ETH);
@@ -244,7 +248,7 @@ fn a_later_directory_rewrites_category_and_keeps_the_proxy_configuration() {
 #[test]
 fn an_omitted_proxy_keeps_its_listing_generation() {
     let (_dir, feeds) = open();
-    feeds.apply_directory(&directory()).unwrap();
+    feeds.apply_directory(&rows(&directory())).unwrap();
     let only_eth = format!(
         r#"[{{
             "proxyAddress": "{ETH}",
@@ -260,7 +264,7 @@ fn an_omitted_proxy_keeps_its_listing_generation() {
             "contractAddress": "{ETH_AGG}"
         }}]"#
     );
-    let listing = feeds.apply_directory(&only_eth).unwrap();
+    let listing = feeds.apply_directory(&rows(&only_eth)).unwrap();
     assert_eq!(listing.generation, 2);
     assert_eq!(listing.named, 1);
     assert_eq!(feeds.listing_generation().unwrap(), 2);
@@ -278,7 +282,7 @@ fn a_repeated_proxy_does_not_apply() {
             {{"proxyAddress":"{ETH}","name":"ETH / USD","path":"eth-usd-again","feedCategory":"high","feedType":"crypto","contractVersion":6,"decimals":8,"multiply":"100000000","heartbeat":3600,"threshold":0.5,"contractAddress":"{ETH_AGG}"}}
         ]"#
     );
-    let err = feeds.apply_directory(&body).unwrap_err();
+    let err = oracles::parse_directory(&body).unwrap_err();
     assert!(err.to_string().contains("repeated"), "{err}");
     assert_eq!(feeds.listing_generation().unwrap(), 0);
     assert!(feeds.proxies().unwrap().is_empty());
@@ -298,7 +302,7 @@ fn a_missing_proxy_and_a_bad_threshold_are_errors() {
 #[test]
 fn a_proxy_read_stores_the_chain_phase_and_one_history_job() {
     let (_dir, feeds) = open();
-    feeds.apply_directory(&directory()).unwrap();
+    feeds.apply_directory(&rows(&directory())).unwrap();
     let description = abi_string("ETH / USD");
     let results = encode_results(&[
         (true, word(8)),
@@ -339,7 +343,7 @@ fn a_proxy_read_stores_the_chain_phase_and_one_history_job() {
 #[test]
 fn the_same_phase_does_not_add_a_job() {
     let (_dir, feeds) = open();
-    feeds.apply_directory(&directory()).unwrap();
+    feeds.apply_directory(&rows(&directory())).unwrap();
     let bounds = Some(I256::try_from(5).unwrap());
     feeds
         .apply_read(ETH, configured(head(8, 7, ETH_AGG), bounds, bounds))
@@ -357,7 +361,7 @@ fn the_same_phase_does_not_add_a_job() {
 #[test]
 fn a_greater_phase_appends_one_phase_and_one_job() {
     let (_dir, feeds) = open();
-    feeds.apply_directory(&directory()).unwrap();
+    feeds.apply_directory(&rows(&directory())).unwrap();
     feeds
         .apply_read(ETH, configured(head(8, 7, ETH_AGG), None, None))
         .unwrap();
@@ -376,7 +380,7 @@ fn a_greater_phase_appends_one_phase_and_one_job() {
 #[test]
 fn a_smaller_phase_is_a_mismatch() {
     let (_dir, feeds) = open();
-    feeds.apply_directory(&directory()).unwrap();
+    feeds.apply_directory(&rows(&directory())).unwrap();
     feeds
         .apply_read(ETH, configured(head(8, 7, ETH_AGG), None, None))
         .unwrap();
@@ -397,7 +401,7 @@ fn a_smaller_phase_is_a_mismatch() {
 #[test]
 fn a_changed_aggregator_on_the_same_phase_is_a_mismatch() {
     let (_dir, feeds) = open();
-    feeds.apply_directory(&directory()).unwrap();
+    feeds.apply_directory(&rows(&directory())).unwrap();
     feeds
         .apply_read(ETH, configured(head(8, 7, ETH_AGG), None, None))
         .unwrap();
@@ -423,7 +427,7 @@ fn a_changed_aggregator_on_the_same_phase_is_a_mismatch() {
 #[test]
 fn disagreeing_decimals_stay_at_the_first_read() {
     let (_dir, feeds) = open();
-    feeds.apply_directory(&directory()).unwrap();
+    feeds.apply_directory(&rows(&directory())).unwrap();
     feeds
         .apply_read(ETH, configured(head(8, 7, ETH_AGG), None, None))
         .unwrap();
@@ -463,7 +467,7 @@ fn disagreeing_decimals_stay_at_the_first_read() {
 #[test]
 fn a_reverted_proxy_stores_a_failure_and_no_job() {
     let (_dir, feeds) = open();
-    feeds.apply_directory(&directory()).unwrap();
+    feeds.apply_directory(&rows(&directory())).unwrap();
     let body = encode_results(&[
         (false, Vec::new()),
         (true, abi_string("ETH / USD")),
@@ -490,7 +494,7 @@ fn a_reverted_proxy_stores_a_failure_and_no_job() {
 #[test]
 fn a_later_revert_keeps_phases_and_jobs() {
     let (_dir, feeds) = open();
-    feeds.apply_directory(&directory()).unwrap();
+    feeds.apply_directory(&rows(&directory())).unwrap();
     feeds
         .apply_read(ETH, configured(head(8, 7, ETH_AGG), None, None))
         .unwrap();
@@ -509,7 +513,7 @@ fn a_later_revert_keeps_phases_and_jobs() {
 #[test]
 fn clearing_history_jobs_leaves_the_feed_and_the_phase() {
     let (_dir, feeds) = open();
-    feeds.apply_directory(&directory()).unwrap();
+    feeds.apply_directory(&rows(&directory())).unwrap();
     feeds
         .apply_read(ETH, configured(head(8, 7, ETH_AGG), None, None))
         .unwrap();
@@ -523,7 +527,7 @@ fn clearing_history_jobs_leaves_the_feed_and_the_phase() {
 #[test]
 fn phase_zero_is_stored_when_the_aggregator_is_present() {
     let (_dir, feeds) = open();
-    feeds.apply_directory(&directory()).unwrap();
+    feeds.apply_directory(&rows(&directory())).unwrap();
     feeds
         .apply_read(ETH, configured(head(8, 0, ETH_AGG), None, None))
         .unwrap();
@@ -548,7 +552,7 @@ fn an_empty_aggregator_is_a_proxy_failure() {
 #[test]
 fn an_unknown_proxy_read_is_an_error() {
     let (_dir, feeds) = open();
-    feeds.apply_directory(&directory()).unwrap();
+    feeds.apply_directory(&rows(&directory())).unwrap();
     let err = feeds
         .apply_read(
             address!("6666666666666666666666666666666666666666"),

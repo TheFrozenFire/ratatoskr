@@ -9,17 +9,20 @@ use crate::answer::{
     answer_window, block_spans, decode_aggregator_confirmed, decode_answer_updated, ChainLog,
     AGGREGATOR_CONFIRMED, ANSWER_UPDATED,
 };
-use crate::book::FeedBook;
 use crate::configure;
-use crate::records::ObservedAnswer;
 use alloy_primitives::{Address, B256};
+use store_model::ObservedAnswer;
 use venues::Rpc;
 
 const SPAN: u64 = 2_000;
 const RECENT_BLOCKS: u64 = 8_000;
 const ADDRESS_CHUNK: usize = 20;
 
-pub fn catch_up(feeds: &impl FeedBook, rpc: &Rpc, stop: &dyn Fn() -> bool) -> eyre::Result<usize> {
+pub fn catch_up(
+    feeds: &store::service::Feeds,
+    rpc: &Rpc,
+    stop: &dyn Fn() -> bool,
+) -> eyre::Result<usize> {
     let head = rpc.block_number()?;
     if stop() {
         return Ok(0);
@@ -42,7 +45,7 @@ pub fn catch_up(feeds: &impl FeedBook, rpc: &Rpc, stop: &dyn Fn() -> bool) -> ey
 }
 
 fn scan(
-    feeds: &impl FeedBook,
+    feeds: &store::service::Feeds,
     rpc: &Rpc,
     from: u64,
     to: u64,
@@ -76,7 +79,11 @@ fn scan(
     Ok(written)
 }
 
-fn fill_quiet(feeds: &impl FeedBook, rpc: &Rpc, stop: &dyn Fn() -> bool) -> eyre::Result<usize> {
+fn fill_quiet(
+    feeds: &store::service::Feeds,
+    rpc: &Rpc,
+    stop: &dyn Fn() -> bool,
+) -> eyre::Result<usize> {
     let mut written = 0usize;
     let Some(cursor) = feeds.follow_block()? else {
         return Ok(0);
@@ -124,7 +131,7 @@ fn fill_quiet(feeds: &impl FeedBook, rpc: &Rpc, stop: &dyn Fn() -> bool) -> eyre
     Ok(written)
 }
 
-fn publish(feeds: &impl FeedBook) {
+fn publish(feeds: &store::service::Feeds) {
     let Ok(gauges) = feeds.gauges() else {
         return;
     };
@@ -138,12 +145,12 @@ fn publish(feeds: &impl FeedBook) {
     );
 }
 
-fn commit_older(feeds: &impl FeedBook, answers: &[ObservedAnswer]) -> eyre::Result<usize> {
+fn commit_older(feeds: &store::service::Feeds, answers: &[ObservedAnswer]) -> eyre::Result<usize> {
     let next = feeds.follow_block()?.unwrap_or(0);
     Ok(feeds.commit_follow(next, answers)?)
 }
 
-fn current_aggregators(feeds: &impl FeedBook) -> eyre::Result<Vec<Address>> {
+fn current_aggregators(feeds: &store::service::Feeds) -> eyre::Result<Vec<Address>> {
     let mut out = Vec::new();
     for proxy in feeds.proxies()? {
         if let Some(phase) = feeds.phases(proxy)?.into_iter().next_back() {

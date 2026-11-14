@@ -1,10 +1,9 @@
-//! Owner of the header chain, the receipt corpus, the venue catalog, the feed
-//! file, and the spot file.
+//! Storage services.
 //!
-//! The catalog is `discovery.redb`, `entities.redb`, and `work.redb`. Feeds
-//! live in `feeds.redb`. Spots live in `spots.redb`. Commits use immediate
-//! durability. Header, corpus, and catalog choices live in `HeaderChain`,
-//! `Corpus`, and `Catalog`.
+//! [`service`] is the interface a domain crate calls. Those services read and
+//! write [`store_model`] records. `feeds.redb` and `spots.redb` are opened
+//! there. [`LocalStore`] still opens the header chain, the receipt corpus, and
+//! the venue catalog through the crates that hold those files.
 
 use alloy_primitives::{Address, B256};
 use chain::HeaderChain;
@@ -15,15 +14,13 @@ use std::path::Path;
 use std::sync::Arc;
 use venues::{Catalog, Put, ReceiptBody, TokenRecord, VenueRow};
 
-mod feeds;
 mod remote;
 mod serve;
-mod spot_file;
+pub mod service;
 
-pub use feeds::Feeds;
 pub use remote::RemoteStore;
 pub use serve::{db_socket, serve};
-pub use spot_file::Spots;
+pub use service::{FeedError, Feeds, SpotError, Spots};
 pub use venues::EntityStore;
 
 const HEADER_BATCH: u64 = 8192;
