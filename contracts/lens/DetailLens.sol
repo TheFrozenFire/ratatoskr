@@ -78,6 +78,8 @@ contract DetailLens {
     uint256 internal constant SEL_FEE_GAMMA = 0x72d4f0e2;
     uint256 internal constant SEL_IMMUTABLES = 0xbcdb4dad;
     uint256 internal constant SEL_QUOTE = 0x171755b1;
+    uint256 internal constant SEL_DECIMALS = 0x313ce567;
+    uint256 internal constant SEL_TOKEN_RATES = 0x7e361bde;
 
     constructor(uint256[] memory items) {
         uint256 pools = items.length / 8;
@@ -400,7 +402,28 @@ contract DetailLens {
         (ptr, flags) = putBalancerHead(ptr, pool, okFee, fee, count, okW, weightCount);
         ptr = putBalancerPairs(ptr, count, nTokens);
         if (okW) ptr = copyFrom(ptr, 0x180, weightCount);
+        ptr = writeV3Rates(ptr, vault, pool, count);
         return (ptr, flags);
+    }
+
+    /// `getPoolTokenRates`: decimal scaling, then token rates. Both arrays or neither.
+    function writeV3Rates(uint256 ptr, address vault, address pool, uint256 n) internal view returns (uint256) {
+        if (n == 0) return ptr;
+        bool ok = callReturn(vault, SEL_TOKEN_RATES, uint256(uint160(pool)), true, 0x80, 0x300);
+        if (!ok) return ptr;
+        uint256 off0 = scratchWord(0x80);
+        uint256 off1 = scratchWord(0xa0);
+        if (off0 > 0x2c0 || off1 > 0x2c0) return ptr;
+        uint256 n0 = scratchWord(0x80 + off0);
+        uint256 n1 = scratchWord(0x80 + off1);
+        if (n0 < n || n1 < n) return ptr;
+        for (uint256 i = 0; i < n; i++) {
+            ptr = put(ptr, scratchWord(0x80 + off0 + 32 + i * 32));
+        }
+        for (uint256 i = 0; i < n; i++) {
+            ptr = put(ptr, scratchWord(0x80 + off1 + 32 + i * 32));
+        }
+        return ptr;
     }
 
     /// `getPoolTokens` compacted at `0x500`. Balances stay at `0x80`. Weights stay at `0x180`.
@@ -446,7 +469,18 @@ contract DetailLens {
             ptr = writeCurveCoin(ptr, pool, coinSel, balSel, c, c < rateCount);
             if (scratchWord(ptr - 32) != 0) flags |= 8;
         }
+        for (uint256 c = 0; c < n; c++) {
+            ptr = put(ptr, coinPrecision(pool, coinSel, c));
+        }
         return (ptr, flags);
+    }
+
+    /// `10^(18 - decimals)`. Zero when `decimals()` does not return a word in `0..=18`.
+    function coinPrecision(address pool, uint256 coinSel, uint256 index) internal view returns (uint256 prec) {
+        (, uint256 coin) = callWord(pool, coinSel, index, true);
+        (bool ok, uint256 dec) = callWord(address(uint160(coin)), SEL_DECIMALS, 0, false);
+        if (!ok || dec > 18) return 0;
+        prec = 10 ** (18 - dec);
     }
 
     function curveSelectors(address pool)
@@ -798,8 +832,10 @@ contract DetailLens {
                 mstore(0x04, arg)
                 size := 0x24
             }
-            ok := staticcall(400000, target, 0x00, size, 0x00, 0x20)
+            let success := staticcall(400000, target, 0x00, size, 0x00, 0x20)
+            ok := and(success, iszero(lt(returndatasize(), 32)))
             word := mload(0x00)
+            if iszero(ok) { word := 0 }
         }
     }
 
