@@ -341,6 +341,41 @@ impl Catalog {
         Ok(())
     }
 
+    /// Build every conduit job that is ready. A job that fails stays for a later pass.
+    pub fn drain_conduits(&self) -> eyre::Result<u64> {
+        let mut built = 0_u64;
+        loop {
+            let now = unix_now();
+            let jobs = self.claim_conduits(32, now, 120)?;
+            if jobs.is_empty() {
+                return Ok(built);
+            }
+            let mut done = Vec::new();
+            let mut again = Vec::new();
+            let mut failed = Vec::new();
+            for job in &jobs {
+                match self.build_conduit(job.token_in, job.token_out) {
+                    Ok(true) => {
+                        again.push((job.token_in, job.token_out));
+                        done.push((job.token_in, job.token_out));
+                    }
+                    Ok(false) => done.push((job.token_in, job.token_out)),
+                    Err(err) => failed.push(ConduitFail {
+                        token_in: job.token_in,
+                        token_out: job.token_out,
+                        not_before: now.saturating_add(60),
+                        error: clip_error(&err.to_string()),
+                    }),
+                }
+            }
+            self.finish_conduits(&done, &again, &failed)?;
+            built += done.len() as u64;
+            if built.is_multiple_of(256) {
+                tracing::info!(built, "conduit drain");
+            }
+        }
+    }
+
     /// Merge the members of one ordered pair and store the slope segments.
     ///
     /// The bool asks for another pass. It is set when the member index moved

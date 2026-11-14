@@ -90,6 +90,10 @@ struct Args {
     /// Combine with `--export-fit` to write the extract after the rewrite.
     #[arg(long)]
     refit: bool,
+    /// Re-read these catalog kinds through the detail lens, store each curve, rebuild
+    /// the conduit jobs those writes queued, then exit. Kinds are comma-separated numbers.
+    #[arg(long)]
+    refresh_kinds: Option<String>,
     /// Copy stored quote samples for `--data-dir` into a JSONL file and exit.
     #[arg(long)]
     export_fit: Option<PathBuf>,
@@ -176,6 +180,9 @@ async fn supervise(args: Args) -> eyre::Result<()> {
     if args.refit && args.data_dir.is_none() {
         return Err(eyre::eyre!("--refit needs --data-dir"));
     }
+    if args.refresh_kinds.is_some() && args.data_dir.is_none() {
+        return Err(eyre::eyre!("--refresh-kinds needs --data-dir"));
+    }
     if args.export_fit.is_some() && args.data_dir.is_none() {
         return Err(eyre::eyre!("--export-fit needs --data-dir"));
     }
@@ -226,6 +233,25 @@ async fn supervise(args: Args) -> eyre::Result<()> {
         if args.export_fit.is_none() {
             return Ok(());
         }
+    }
+    if let Some(spec) = args.refresh_kinds.clone() {
+        let kinds = parse_kind_list(&spec)?;
+        let urls = resolve_rpcs(&args.rpc, true)?;
+        let venues_path = paths.venues.clone();
+        let (report, built) = tokio::task::spawn_blocking(move || {
+            let catalog = venues::Catalog::open(&venues_path)?;
+            let rpc = venues::Rpc::new(urls)?;
+            let report = venues::refresh_kinds(&catalog, &rpc, &kinds)?;
+            let built = catalog.drain_conduits()?;
+            Ok::<_, eyre::Report>((report, built))
+        })
+        .await
+        .wrap_err("refresh task")??;
+        println!("read {}", report.read);
+        println!("failed {}", report.failed);
+        println!("curves {}", report.curves);
+        println!("conduits {built}");
+        return Ok(());
     }
     if let Some(out) = args.export_fit.clone() {
         let venues_path = paths.venues.clone();
@@ -652,6 +678,27 @@ fn egress_from(bind4: Option<Ipv4Addr>, bind6: Option<Ipv6Addr>) -> eyre::Result
         (None, None) => Ok(None),
         _ => Err(eyre::eyre!("pass both --bind4 and --bind6, or neither")),
     }
+}
+
+fn parse_kind_list(text: &str) -> eyre::Result<Vec<u8>> {
+    let mut kinds = Vec::new();
+    for part in text.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let kind: u8 = part
+            .parse()
+            .map_err(|_| eyre::eyre!("kind {part} is not a catalog kind"))?;
+        if kind == 0 {
+            return Err(eyre::eyre!("kind 0 is not a catalog kind"));
+        }
+        kinds.push(kind);
+    }
+    if kinds.is_empty() {
+        return Err(eyre::eyre!("--refresh-kinds needs a kind"));
+    }
+    Ok(kinds)
 }
 
 fn parse_services(text: &str) -> eyre::Result<Services> {

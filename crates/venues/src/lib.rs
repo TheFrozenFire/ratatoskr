@@ -55,8 +55,8 @@ pub use metrics::{prometheus_text, publish_summary, status_json};
 pub use rpc::Rpc;
 pub use seeds::root_address;
 pub use state::{
-    estimate, CurveRecord, ImmutablePut, ImmutableRow, MutableStored, MutableWrite, PoolState,
-    QuoteRecord, StateSummary, TickPage, WatchHit, WorkFail, WorkJob,
+    estimate, refresh_kinds, CurveRecord, ImmutablePut, ImmutableRow, MutableStored, MutableWrite,
+    PoolState, QuoteRecord, RefreshReport, StateSummary, TickPage, WatchHit, WorkFail, WorkJob,
 };
 
 use ipc::HistoryPeer;

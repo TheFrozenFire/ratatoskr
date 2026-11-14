@@ -8,7 +8,7 @@ A stored price curve, a local quote, and a chain quote are three amounts.
 
 The optimizer pays a stored price curve through `routing::quote` on slope segments in `crates/routing/src/lib.rs`. The searcher returns those segments. A local quote is `PoolDetail::quote` in `crates/venues/src/detail/mod.rs`, computed from the quote inputs. A chain quote is an execution through QuoteLens.
 
-Output that matches the stored segments does not mean the local quote matches the chain quote. A change to local-quote code does not change a stored plan until that kind's curves are written again and the pair conduits those curves feed are rebuilt. The state pipeline's fit stage is what writes the curve.
+Output that matches the stored segments does not mean the local quote matches the chain quote. A change to local-quote code does not change a stored plan until that kind's curves are written again and the pair conduits those curves feed are rebuilt. The state pipeline's fit stage writes the curve. `ratatoskr --refresh-kinds` re-reads the named kinds through the detail lens at one chain head, stores each curve, and drains the conduit jobs that write queued. A concentrated pool whose tick book is not kept stores no curve.
 
 ## Chain quote
 
