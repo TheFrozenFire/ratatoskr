@@ -35,7 +35,7 @@ use ipc::HistoryPeer;
 use model::{BlockRecord, NormalizedLog};
 use num_bigint::{BigInt, Sign};
 use num_traits::Zero;
-use redb::{Durability, ReadableDatabase, ReadableTable, TableDefinition};
+use redb::{Durability, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -1700,6 +1700,7 @@ fn job_for(jobs: &[WorkJob], kind: u8, id: B256) -> Option<&WorkJob> {
     jobs.iter().find(|job| job.kind == kind && job.id == id)
 }
 
+/// Row count stored on the tree header. Walking the table reads every leaf.
 fn count_bytes(db: &redb::Database, def: TableDefinition<&[u8], &[u8]>) -> eyre::Result<u64> {
     let read = db.begin_read()?;
     let table = match read.open_table(def) {
@@ -1707,12 +1708,7 @@ fn count_bytes(db: &redb::Database, def: TableDefinition<&[u8], &[u8]>) -> eyre:
         Err(redb::TableError::TableDoesNotExist(_)) => return Ok(0),
         Err(err) => return Err(err.into()),
     };
-    let mut n = 0_u64;
-    for item in table.iter()? {
-        item?;
-        n += 1;
-    }
-    Ok(n)
+    Ok(table.len()?)
 }
 
 pub(crate) fn unix_now() -> u64 {
@@ -2105,6 +2101,20 @@ mod tests {
         let dir = TempDir::new();
         let catalog = Catalog::open(&dir.0).unwrap();
         (dir, catalog)
+    }
+
+    #[test]
+    fn a_summary_counts_the_stored_identities() {
+        let (_dir, catalog) = open();
+        catalog
+            .commit_chunk("lists", 2, &[row(1), row(2)], crate::Put::IfAbsent)
+            .unwrap();
+        let summary = catalog.state_summary().unwrap();
+        assert_eq!(summary.identities, 2);
+        assert_eq!(summary.immutable, 0);
+        assert_eq!(summary.curves, 0);
+        assert_eq!(summary.jobs, 0);
+        assert_eq!(catalog.token_count().unwrap(), 0);
     }
 
     fn row(byte: u8) -> VenueRow {

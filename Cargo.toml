@@ -42,7 +42,7 @@ alloy-consensus = "2.5"
 alloy-primitives = { version = "1.6.1", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 eyre = "0.6"
-redb = "4.6.0"
+redb = { version = "4.6.0", features = ["cache_metrics"] }
 futures = "0.3"
 rand = "0.8"
 api = { path = "crates/api" }

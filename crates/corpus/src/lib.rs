@@ -35,6 +35,13 @@ impl Db {
         }
     }
 
+    fn cache_stats(&self) -> redb::CacheStats {
+        match self {
+            Db::Write(db) => db.cache_stats(),
+            Db::Read(db) => db.cache_stats(),
+        }
+    }
+
     fn begin_write(&self) -> eyre::Result<redb::WriteTransaction> {
         match self {
             Db::Write(db) => Ok(db.begin_write()?),
@@ -45,6 +52,7 @@ impl Db {
 
 pub struct Corpus {
     db: Db,
+    label: String,
 }
 
 fn open_database(path: &Path, create: bool) -> Result<Db, redb::DatabaseError> {
@@ -64,13 +72,25 @@ impl Corpus {
             std::fs::create_dir_all(parent)?;
         }
         let db = open_database(path, true).wrap_err("create redb")?;
-        Ok(Self { db })
+        Ok(Self::new(path, db))
+    }
+
+    /// Page cache configured for this file, and the counters redb has accumulated.
+    pub fn cache_reading(&self) -> ipc::db::CacheReading {
+        ipc::db::reading(&self.label, PAGE_CACHE as u64, self.db.cache_stats())
+    }
+
+    fn new(path: &Path, db: Db) -> Self {
+        Self {
+            db,
+            label: ipc::db::file_label(path),
+        }
     }
 
     /// Open a corpus another process may be writing. Callers only read.
     pub fn open(path: &Path) -> eyre::Result<Self> {
         let db = open_database(path, false).wrap_err("open corpus")?;
-        Ok(Self { db })
+        Ok(Self::new(path, db))
     }
 
     pub fn meta(&self, key: &str) -> eyre::Result<Option<u64>> {

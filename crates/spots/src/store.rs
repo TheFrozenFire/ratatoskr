@@ -8,6 +8,10 @@ use alloy_primitives::Address;
 use num_bigint::BigInt;
 use redb::{Durability, ReadableDatabase, ReadableTable, TableDefinition};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+/// One pass replaces the table. The cache holds that write.
+const PAGE_CACHE: usize = 8 * 1024 * 1024;
 
 const SPOTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("spots");
 const VERSION: u8 = 1;
@@ -23,7 +27,7 @@ fn db_err(err: impl std::fmt::Display) -> Error {
 }
 
 pub struct Spots {
-    db: redb::Database,
+    db: Arc<redb::Database>,
 }
 
 impl Spots {
@@ -34,7 +38,7 @@ impl Spots {
             }
         }
         let mut builder = redb::Builder::new();
-        builder.set_cache_size(8 * 1024 * 1024);
+        builder.set_cache_size(PAGE_CACHE);
         builder.set_concurrency_mode(redb::ConcurrencyMode::SingleWriter);
         let db = if path.exists() {
             builder.open(path)
@@ -42,6 +46,8 @@ impl Spots {
             builder.create(path)
         }
         .map_err(db_err)?;
+        let db = Arc::new(db);
+        ipc::db::watch_db(ipc::db::file_label(path), PAGE_CACHE as u64, &db);
         Ok(Self { db })
     }
 

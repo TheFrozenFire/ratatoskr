@@ -9,6 +9,10 @@ use crate::directory::{parse_directory, DirectoryError, DirectoryRow};
 use alloy_primitives::{Address, I256, U256};
 use redb::{Durability, ReadableDatabase, ReadableTable, TableDefinition};
 use std::path::Path;
+use std::sync::Arc;
+
+/// Feed rows are small. The cache holds the directory and the latest answers.
+const PAGE_CACHE: usize = 8 * 1024 * 1024;
 
 const IDENTITY: TableDefinition<&[u8], &[u8]> = TableDefinition::new("identity");
 const CONFIG: TableDefinition<&[u8], &[u8]> = TableDefinition::new("config");
@@ -160,7 +164,7 @@ pub enum Read {
 }
 
 pub struct Feeds {
-    db: redb::Database,
+    db: Arc<redb::Database>,
 }
 
 impl Feeds {
@@ -171,7 +175,7 @@ impl Feeds {
             }
         }
         let mut builder = redb::Builder::new();
-        builder.set_cache_size(8 * 1024 * 1024);
+        builder.set_cache_size(PAGE_CACHE);
         builder.set_concurrency_mode(redb::ConcurrencyMode::SingleWriter);
         let db = if path.exists() {
             builder.open(path)
@@ -179,6 +183,8 @@ impl Feeds {
             builder.create(path)
         }
         .map_err(db_err)?;
+        let db = Arc::new(db);
+        ipc::db::watch_db(ipc::db::file_label(path), PAGE_CACHE as u64, &db);
         Ok(Self { db })
     }
 

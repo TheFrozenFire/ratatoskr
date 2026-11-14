@@ -10,6 +10,7 @@ alloy-consensus.workspace = true
 alloy-eips = "2.5"
 alloy-primitives.workspace = true
 eyre.workspace = true
+ipc.workspace = true
 model.workspace = true
 redb.workspace = true
 reth-ethereum-primitives.workspace = true

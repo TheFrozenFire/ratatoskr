@@ -51,7 +51,10 @@ fn a_pass_replaces_the_spots_and_leaves_the_answer_table_absent() {
     assert_eq!(book.read().unwrap(), vec![kept.clone()]);
     drop(book);
 
-    let db = redb::Database::open(&path).unwrap();
+    let mut builder = redb::Builder::new();
+    builder.set_cache_size(1024 * 1024);
+    builder.set_concurrency_mode(redb::ConcurrencyMode::SingleWriter);
+    let db = builder.open(&path).unwrap();
     let read = db.begin_read().unwrap();
     let answers: TableDefinition<&[u8], &[u8]> = TableDefinition::new("answers");
     match read.open_table(answers) {

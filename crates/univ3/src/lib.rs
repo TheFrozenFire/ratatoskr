@@ -12,7 +12,11 @@ use redb::{Durability, TableDefinition};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
+    sync::Arc,
 };
+
+/// The histogram write is one pass over the pools gathered in memory.
+const PAGE_CACHE: usize = 16 * 1024 * 1024;
 
 const POOLS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("pools");
 /// UniswapV3Factory on Ethereum mainnet.
@@ -115,9 +119,10 @@ impl PoolScan {
             std::fs::remove_file(path).wrap_err("replace previous catalog")?;
         }
         let mut builder = redb::Builder::new();
-        builder.set_cache_size(16 * 1024 * 1024);
+        builder.set_cache_size(PAGE_CACHE);
         builder.set_concurrency_mode(redb::ConcurrencyMode::SingleWriter);
-        let out = builder.create(path).wrap_err("create pool catalog")?;
+        let out = Arc::new(builder.create(path).wrap_err("create pool catalog")?);
+        ipc::db::watch_db(ipc::db::file_label(path), PAGE_CACHE as u64, &out);
         let mut write = out.begin_write()?;
         write.set_durability(Durability::Immediate)?;
         {

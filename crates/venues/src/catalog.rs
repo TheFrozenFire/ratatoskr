@@ -13,7 +13,9 @@
 
 use alloy_primitives::{Address, B256};
 use eyre::WrapErr;
-use redb::{Database, Durability, ReadableDatabase, ReadableTable, TableDefinition};
+use redb::{
+    Database, Durability, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition,
+};
 use std::collections::{BTreeMap, HashSet};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
@@ -157,6 +159,23 @@ impl Catalog {
             entities: open_db(&dir.join("entities.redb"))?,
             work: open_db(&dir.join("work.redb"))?,
         })
+    }
+
+    /// Page caches for the three catalog files.
+    pub fn cache_readings(&self) -> Vec<ipc::db::CacheReading> {
+        vec![
+            ipc::db::reading(
+                "discovery.redb",
+                DISCOVERY_CACHE as u64,
+                self.discovery.cache_stats(),
+            ),
+            ipc::db::reading(
+                "entities.redb",
+                ENTITIES_CACHE as u64,
+                self.entities.cache_stats(),
+            ),
+            ipc::db::reading("work.redb", WORK_CACHE as u64, self.work.cache_stats()),
+        ]
     }
 
     pub fn default_path() -> PathBuf {
@@ -371,6 +390,7 @@ impl Catalog {
         read_token_rows(&self.entities)
     }
 
+    /// Row count stored on the tree header. Walking the table reads every leaf.
     pub fn token_count(&self) -> eyre::Result<u64> {
         let read = self.entities.begin_read()?;
         let table = match read.open_table(TOKENS) {
@@ -378,12 +398,7 @@ impl Catalog {
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(0),
             Err(err) => return Err(err.into()),
         };
-        let mut count = 0_u64;
-        for item in table.iter()? {
-            item?;
-            count += 1;
-        }
-        Ok(count)
+        Ok(table.len()?)
     }
 
     /// Write token rows. An empty symbol leaves a stored symbol and its decimals.
@@ -564,16 +579,22 @@ fn catalog_dir(path: &Path) -> PathBuf {
     }
 }
 
+/// redb's builder default is 1 GiB. These are the budgets this process sets.
+const ENTITIES_CACHE: usize = 256 * 1024 * 1024;
+const DISCOVERY_CACHE: usize = 128 * 1024 * 1024;
+const WORK_CACHE: usize = 16 * 1024 * 1024;
+const DEFAULT_CACHE: usize = 64 * 1024 * 1024;
+
 /// Page cache for one catalog file.
 ///
 /// Entities serves random pool reads. Discovery walks hit lists. Work stores
 /// leases. A sequential copy of any other file keeps a small cache.
 fn cache_bytes(path: &Path) -> usize {
     match path.file_name().and_then(|name| name.to_str()) {
-        Some("entities.redb" | "venues.redb") => 256 * 1024 * 1024,
-        Some("discovery.redb") => 128 * 1024 * 1024,
-        Some("work.redb") => 16 * 1024 * 1024,
-        _ => 64 * 1024 * 1024,
+        Some("entities.redb" | "venues.redb") => ENTITIES_CACHE,
+        Some("discovery.redb") => DISCOVERY_CACHE,
+        Some("work.redb") => WORK_CACHE,
+        _ => DEFAULT_CACHE,
     }
 }
 
@@ -1574,6 +1595,14 @@ mod tests {
     use super::*;
     use alloy_primitives::address;
 
+    /// redb's builder default is 1 GiB. A test file uses a 1 MiB budget.
+    fn empty_db(path: &std::path::Path) -> Database {
+        let mut builder = redb::Builder::new();
+        builder.set_cache_size(1024 * 1024);
+        builder.set_concurrency_mode(redb::ConcurrencyMode::SingleWriter);
+        builder.create(path).unwrap()
+    }
+
     fn sample() -> VenueRow {
         VenueRow {
             kind: 1,
@@ -1790,7 +1819,7 @@ mod tests {
     fn a_legacy_venues_file_is_renamed_and_crawl_tables_move() {
         let dir = TempDir::new();
         let legacy = dir.0.join("venues.redb");
-        let db = Database::create(&legacy).unwrap();
+        let db = empty_db(&legacy);
         {
             let mut write = db.begin_write().unwrap();
             write.set_durability(Durability::Immediate).unwrap();
@@ -1827,7 +1856,7 @@ mod tests {
     fn sample_takes_small_kinds_and_a_stride_of_the_large_one() {
         let src_dir = TempDir::new();
         let src = src_dir.0.join("venues.redb");
-        let db = Database::create(&src).unwrap();
+        let db = empty_db(&src);
         {
             let write = db.begin_write().unwrap();
             {
@@ -1861,7 +1890,7 @@ mod tests {
     fn fill_adds_identities_the_sample_did_not_copy() {
         let src_dir = TempDir::new();
         let src = src_dir.0.join("venues.redb");
-        let db = Database::create(&src).unwrap();
+        let db = empty_db(&src);
         {
             let write = db.begin_write().unwrap();
             {
@@ -1902,7 +1931,7 @@ mod tests {
     fn sample_keeps_the_anchor_pool_off_the_stride() {
         let src_dir = TempDir::new();
         let src = src_dir.0.join("venues.redb");
-        let db = Database::create(&src).unwrap();
+        let db = empty_db(&src);
         {
             let write = db.begin_write().unwrap();
             {

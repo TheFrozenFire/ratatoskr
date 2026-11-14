@@ -319,7 +319,119 @@ pub fn prometheus_text() -> String {
             );
         }
     }
+    append_databases(&mut out);
     out
+}
+
+fn append_databases(out: &mut String) {
+    let rows = ipc::db::readings();
+    if !rows.is_empty() {
+        gauge(
+            out,
+            "ratatoskr_db_cache_limit_bytes",
+            "Configured redb page-cache budget.",
+            &[("db", "")],
+        );
+        gauge(
+            out,
+            "ratatoskr_db_cache_used_bytes",
+            "Bytes resident in the redb page cache.",
+            &[("db", "")],
+        );
+        counter(
+            out,
+            "ratatoskr_db_cache_evictions_total",
+            "Pages evicted from the redb page cache.",
+            &[("db", "")],
+        );
+        counter(
+            out,
+            "ratatoskr_db_cache_read_hits_total",
+            "Unmodified pages read from the redb page cache.",
+            &[("db", "")],
+        );
+        counter(
+            out,
+            "ratatoskr_db_cache_read_misses_total",
+            "Unmodified pages read from storage.",
+            &[("db", "")],
+        );
+        counter(
+            out,
+            "ratatoskr_db_cache_write_hits_total",
+            "Dirty pages read from the redb page cache.",
+            &[("db", "")],
+        );
+        counter(
+            out,
+            "ratatoskr_db_cache_write_misses_total",
+            "Dirty pages read from storage.",
+            &[("db", "")],
+        );
+        for row in &rows {
+            let labels = [("db", row.name.as_str())];
+            line(
+                out,
+                "ratatoskr_db_cache_limit_bytes",
+                &labels,
+                &row.limit.to_string(),
+            );
+            line(
+                out,
+                "ratatoskr_db_cache_used_bytes",
+                &labels,
+                &row.used.to_string(),
+            );
+            line(
+                out,
+                "ratatoskr_db_cache_evictions_total",
+                &labels,
+                &row.evictions.to_string(),
+            );
+            line(
+                out,
+                "ratatoskr_db_cache_read_hits_total",
+                &labels,
+                &row.read_hits.to_string(),
+            );
+            line(
+                out,
+                "ratatoskr_db_cache_read_misses_total",
+                &labels,
+                &row.read_misses.to_string(),
+            );
+            line(
+                out,
+                "ratatoskr_db_cache_write_hits_total",
+                &labels,
+                &row.write_hits.to_string(),
+            );
+            line(
+                out,
+                "ratatoskr_db_cache_write_misses_total",
+                &labels,
+                &row.write_misses.to_string(),
+            );
+        }
+    }
+    let probes = ipc::db::probes();
+    if probes.is_empty() {
+        return;
+    }
+    gauge(
+        out,
+        "ratatoskr_sampler_milliseconds",
+        "Duration of the last sampler probe.",
+        &[("probe", "")],
+    );
+    for (name, ms) in probes {
+        line(
+            out,
+            "ratatoskr_sampler_milliseconds",
+            &[("probe", name)],
+            &ms.to_string(),
+        );
+    }
 }
 
 fn snapshot() -> Value {
@@ -447,5 +559,29 @@ mod tests {
         let text = prometheus_text();
         assert!(text.contains("ratatoskr_state_batches_total{stage=\"immutable\"}"));
         assert!(text.contains("# TYPE ratatoskr_state_batches_total counter"));
+    }
+
+    #[test]
+    fn database_cache_is_in_the_exposition_and_not_the_status() {
+        ipc::db::publish(vec![ipc::db::CacheReading {
+            name: "status-split.redb".to_string(),
+            limit: 4096,
+            used: 128,
+            evictions: 2,
+            read_hits: 3,
+            read_misses: 4,
+            write_hits: 5,
+            write_misses: 6,
+        }]);
+        ipc::db::record_probe("status-split", 7);
+        let text = prometheus_text();
+        assert!(text.contains("ratatoskr_db_cache_limit_bytes{db=\"status-split.redb\"} 4096"));
+        assert!(text.contains("ratatoskr_db_cache_used_bytes{db=\"status-split.redb\"} 128"));
+        assert!(text.contains("ratatoskr_db_cache_read_misses_total{db=\"status-split.redb\"} 4"));
+        assert!(text.contains("ratatoskr_db_cache_write_misses_total{db=\"status-split.redb\"} 6"));
+        assert!(text.contains("ratatoskr_sampler_milliseconds{probe=\"status-split\"} 7"));
+        let status = status_json();
+        assert!(!status.contains("status-split"));
+        assert!(!status.contains("ratatoskr_db_cache"));
     }
 }

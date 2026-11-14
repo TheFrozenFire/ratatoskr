@@ -516,19 +516,113 @@ fn spawn_sampler(store: LocalStore) {
             let store = store.clone();
             let busy = std::sync::Arc::clone(&busy);
             tokio::task::spawn_blocking(move || {
-                if let Ok(cursor) = store.stored_header() {
-                    ipc::note_header_cursor(cursor);
-                }
-                if let Ok((bytes, holes)) = store.corpus_gauge() {
-                    ipc::note_corpus(bytes, holes);
-                }
-                if let Ok(summary) = store.state_summary() {
-                    venues::publish_summary(&summary);
-                }
+                sample_store(&store);
                 busy.store(false, std::sync::atomic::Ordering::Release);
             });
         }
     });
+}
+
+fn sample_store(store: &LocalStore) {
+    ipc::db::publish(store.cache_readings());
+    let summary_ms = millis(|| match store.state_summary() {
+        Ok(summary) => venues::publish_summary(&summary),
+        Err(err) => tracing::warn!(%err, "catalog summary"),
+    });
+    ipc::db::record_probe("summary", summary_ms);
+    let header_ms = millis(|| {
+        if let Ok(cursor) = store.stored_header() {
+            ipc::note_header_cursor(cursor);
+        }
+    });
+    ipc::db::record_probe("headers", header_ms);
+    let corpus_ms = millis(|| {
+        if let Ok((bytes, holes)) = store.corpus_gauge() {
+            ipc::note_corpus(bytes, holes);
+        }
+    });
+    ipc::db::record_probe("corpus", corpus_ms);
+    log_sample(summary_ms, header_ms, corpus_ms);
+}
+
+fn millis(sample: impl FnOnce()) -> u64 {
+    let started = std::time::Instant::now();
+    sample();
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn log_sample(summary_ms: u64, header_ms: u64, corpus_ms: u64) {
+    const SLOW_MS: u64 = 50;
+    const MISS_WARN: u64 = 4_096;
+    if summary_ms >= SLOW_MS && warn_due("summary") {
+        tracing::warn!(ms = summary_ms, "catalog summary");
+    }
+    if header_ms >= SLOW_MS && warn_due("headers") {
+        tracing::warn!(ms = header_ms, "header cursor read");
+    }
+    if corpus_ms >= SLOW_MS && warn_due("corpus") {
+        tracing::warn!(ms = corpus_ms, "corpus gauge read");
+    }
+    let info = info_due();
+    for pace in ipc::db::pace() {
+        let hot = pace.read_misses_delta >= MISS_WARN || pace.write_misses_delta >= MISS_WARN;
+        if hot && warn_due(&pace.name) {
+            tracing::warn!(
+                db = %pace.name,
+                read_misses = pace.read_misses_delta,
+                write_misses = pace.write_misses_delta,
+                used = pace.used,
+                limit = pace.limit,
+                evictions = pace.evictions_delta,
+                "db cache misses"
+            );
+        }
+        if info {
+            tracing::info!(
+                db = %pace.name,
+                limit = pace.limit,
+                used = pace.used,
+                read_hits = pace.read_hits,
+                read_misses = pace.read_misses,
+                write_hits = pace.write_hits,
+                write_misses = pace.write_misses,
+                evictions = pace.evictions,
+                "db cache"
+            );
+        }
+    }
+}
+
+fn info_due() -> bool {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    let next = NEXT.load(Ordering::Relaxed);
+    if now < next {
+        return false;
+    }
+    NEXT.store(now.saturating_add(60), Ordering::Relaxed);
+    true
+}
+
+fn warn_due(name: &str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    static LAST: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
+    let mut slot = LAST.lock().unwrap_or_else(|err| err.into_inner());
+    let seen = slot.get_or_insert_with(HashMap::new);
+    let now = Instant::now();
+    if let Some(then) = seen.get(name) {
+        if now.duration_since(*then) < Duration::from_secs(10) {
+            return false;
+        }
+    }
+    seen.insert(name.to_string(), now);
+    true
 }
 
 fn conduit_edges(store: &LocalStore) -> eyre::Result<Vec<spots::Edge>> {

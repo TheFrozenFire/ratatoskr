@@ -13,7 +13,7 @@ use crate::state::{decode_curve_record, join_detail, unix_now, CurveRecord, CURV
 use crate::Catalog;
 use alloy_primitives::{Address, B256};
 use num_bigint::{BigInt, Sign};
-use redb::{Durability, ReadableDatabase, ReadableTable, TableDefinition};
+use redb::{Durability, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use routing::{segments_from_knots, Action, SlopeSegment};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -795,6 +795,7 @@ fn open_bytes(
     }
 }
 
+/// Row count stored on the tree header. Walking the table reads every leaf.
 fn count_table(db: &redb::Database, def: TableDefinition<&[u8], &[u8]>) -> eyre::Result<u64> {
     let read = db.begin_read()?;
     let table = match read.open_table(def) {
@@ -802,12 +803,7 @@ fn count_table(db: &redb::Database, def: TableDefinition<&[u8], &[u8]>) -> eyre:
         Err(redb::TableError::TableDoesNotExist(_)) => return Ok(0),
         Err(err) => return Err(err.into()),
     };
-    let mut n = 0_u64;
-    for item in table.iter()? {
-        item?;
-        n += 1;
-    }
-    Ok(n)
+    Ok(table.len()?)
 }
 
 fn pair_key(token_in: Address, token_out: Address) -> [u8; 40] {

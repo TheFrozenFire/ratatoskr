@@ -112,6 +112,21 @@ impl LocalStore {
         self.catalog_db()?.state_summary()
     }
 
+    /// Page caches for the files this store has open.
+    pub fn cache_readings(&self) -> Vec<ipc::db::CacheReading> {
+        let mut out = Vec::new();
+        if let Some(chain) = &self.chain {
+            out.push(chain.cache_reading());
+        }
+        if let Some(corpus) = &self.corpus {
+            out.push(corpus.cache_reading());
+        }
+        if let Some(catalog) = &self.catalog {
+            out.extend(catalog.cache_readings());
+        }
+        out
+    }
+
     pub fn stored_header(&self) -> eyre::Result<u64> {
         self.chain_db()?.cursor()
     }

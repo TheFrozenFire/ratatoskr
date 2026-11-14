@@ -1126,6 +1126,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "eyre",
+ "ipc",
  "model",
  "redb",
 ]
@@ -1355,6 +1356,7 @@ dependencies = [
  "alloy-eips",
  "alloy-primitives",
  "eyre",
+ "ipc",
  "model",
  "redb",
  "reth-ethereum-primitives",
@@ -1777,6 +1779,7 @@ name = "directory"
 version = "0.1.0"
 dependencies = [
  "eyre",
+ "ipc",
  "redb",
  "reth-network-peers",
  "tracing",
@@ -2901,6 +2904,7 @@ version = "0.1.0"
 dependencies = [
  "eyre",
  "model",
+ "redb",
  "serde_json",
  "tokio",
 ]
@@ -5404,6 +5408,7 @@ dependencies = [
  "chain",
  "corpus",
  "eyre",
+ "ipc",
  "model",
  "routing",
  "serde_json",
@@ -5995,6 +6000,7 @@ dependencies = [
  "corpus",
  "discover",
  "eyre",
+ "ipc",
  "model",
  "redb",
  "tracing",

@@ -11,6 +11,7 @@ use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     path::{Path, PathBuf},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -80,7 +81,7 @@ pub struct PublishedPeer {
 }
 
 pub struct Catalog {
-    db: Database,
+    db: Arc<Database>,
     pub next_seq: u64,
     pub summaries: HashMap<PeerId, Summary>,
 }
@@ -93,9 +94,10 @@ impl Catalog {
         let mut builder = redb::Builder::new();
         builder.set_cache_size(PAGE_CACHE);
         builder.set_concurrency_mode(redb::ConcurrencyMode::SingleWriter);
-        let db = builder.create(path)?;
-        let next_seq = meta_get(&db, "sighting_seq")?.unwrap_or(0);
-        let summaries = load_summaries(&db)?;
+        let db = Arc::new(builder.create(path)?);
+        ipc::db::watch_db(ipc::db::file_label(path), PAGE_CACHE as u64, &db);
+        let next_seq = meta_get(db.as_ref(), "sighting_seq")?.unwrap_or(0);
+        let summaries = load_summaries(db.as_ref())?;
         Ok(Self {
             db,
             next_seq,
