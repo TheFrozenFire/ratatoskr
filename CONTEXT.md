@@ -344,6 +344,10 @@ _Avoid_: route set, quote
 The numeraire value of what a finished plan spent, the numeraire value of what it received, and the gas the plan opened. The price of a token is the first slope segment of a pair conduit into the numeraire. The gap is the input value minus the output value. The prices are read after the plan exists.
 _Avoid_: acceptance bar, price impact
 
+**Spot**:
+The geometric mid of one sized round trip from a numeraire into a token and back along one route of pair conduits. The route is the direct pair, a path through one hub, or a path through two hubs, and the same route is used in both directions. The size is the smallest numeraire amount both directions fully clear. A round trip that returns less than half that size is not a spot. The stored record is that size, the tokens bought, and the numeraire returned. Wrapped ETH and USDC are the numeraires. Native ETH takes the custodial wrap of wrapped ETH, one for one. A spot is not an answer.
+_Avoid_: answer, quote, price curve, score
+
 **Acceptance bar**:
 The worst relative error a stored formula is allowed on its labels: ten basis points.
 _Avoid_: score, tolerance
@@ -570,7 +574,8 @@ _Avoid_: price, quote, spot
 
 ## Relationships
 
-- A **Feed** is not a **Pool identity**. A **Phase** is not a **Stage**. An **Answer** is not a **Quote** and not a **Price curve**
+- A **Feed** is not a **Pool identity**. A **Phase** is not a **Stage**. An **Answer** is not a **Quote**, not a **Price curve**, and not a **Spot**
+- A **Spot** is not an **Answer**, and it is stored apart from the feed file. A **Spot** is not a **Quote**, not a **Price curve**, and not the first slope a **Score** reads
 - A **Pool identity** has exactly one **Kind** and one **Pool id**, and it comes from one **Factory**, one **Singleton**, or one **Registry**
 - A **Kind** is not a **Shape**. A v2 fork is a kind whose shape is a constant-product pool
 - A **Settlement** is not a **Pool identity**

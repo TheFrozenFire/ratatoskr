@@ -20,6 +20,8 @@ History for a bloom hit comes from an era1 file before the merge and from a peer
 
 **Oracle pipeline** is not one of those three. `--pipeline oracles` fetches the Ethereum mainnet feed directory at `https://reference-data-directory.vercel.app/feeds-mainnet.json` and writes `feeds.redb`. Decimals, description, and version are written once. A later read that disagrees is a mismatch and the stored values stay. A new chain phase appends, and that write inserts one history job for the phase. The job is not claimed. Answers come from `AnswerUpdated` logs on the phase's aggregator. The round id in the log is the aggregator's round. A zero value is not stored. The first pass reads the last 8,000 blocks, then walks further back only for a feed that still has no answer, as far as that feed's heartbeat. The follow cursor then moves forward with new blocks. `AggregatorConfirmed` on the proxy reads configuration again. The pipeline does not open the venue catalog.
 
+**Spot pipeline** is not one of those three. `--pipeline spots` reads stored pair conduits from the open venue catalog and writes `spots.redb`. A spot is the smallest sized round trip into wrapped ETH or USDC that both directions fully clear, on the direct pair or on a path through one or two hubs. The same route is used in both directions. A round trip that returns less than half the size spent is dropped. Each pass replaces the table, so a token that lost its route is dropped. Native ETH takes the custodial wrap of wrapped ETH. The pass waits 60 seconds and reads again. It does not open `feeds.redb` and it does not read an answer.
+
 ## Detail read
 
 The detail lens reads a batch of pools in one call. That call returns the configuration and the quoting state. Tick words are read later into the tick book.
@@ -120,6 +122,8 @@ The venue catalog holds identities, configuration, quoting state, tick books, pr
 
 The oracle pipeline owns `feeds.redb`. The database service does not open it. Deleting the history jobs leaves the feeds and the phases. Those writes use immediate durability.
 
+The spot pipeline owns `spots.redb`. The database service does not open it. The oracle pipeline does not open it. A pass replaces the spots. Those writes use immediate durability.
+
 The state pipeline opens the data directory it is given. A sample catalog is a copy of identities for a trial. The live catalog is the venue catalog of the full identity set.
 
 A pool identity with no observation stays version 1. An observation appends the block hash, transaction index, and log index and uses version 2. An identity read from a list has no observation. An identity read from a creation event carries the observation. A merge keeps a stored observation when the new identity has none.
@@ -128,7 +132,7 @@ A pool identity with no observation stays version 1. An observation appends the 
 
 The writer opens each database in single-writer mode. One process writes a file. Other processes may open that file read-only and follow its commits. A second writer fails with "Database already open." redb commits through two header slots. Header append, peer sightings, venue commits, hit commits, era1 receipt bytes, state writes, corpus writes, cursor writes, and feed writes use immediate durability.
 
-`peers.redb` stays with the dialer. A peer-only process leaves the entity files closed. An oracles-only process leaves the entity files closed and writes `feeds.redb`.
+`peers.redb` stays with the dialer. A peer-only process leaves the entity files closed. An oracles-only process leaves the entity files closed and writes `feeds.redb`. A spots-only process opens the venue catalog and writes `spots.redb`. It leaves `feeds.redb` closed.
 
 ### Sockets
 

@@ -4155,6 +4155,7 @@ dependencies = [
  "pipeline",
  "ratatui",
  "serde_json",
+ "spots",
  "store",
  "tokio",
  "tracing",
@@ -5355,6 +5356,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "spots"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "eyre",
+ "ipc",
+ "num-bigint",
+ "redb",
+ "routing",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5389,6 +5405,7 @@ dependencies = [
  "corpus",
  "eyre",
  "model",
+ "routing",
  "serde_json",
  "tokio",
  "tracing",

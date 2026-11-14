@@ -53,7 +53,7 @@ pub use history::BloomScan;
 pub use logs::Walk;
 pub use metrics::{prometheus_text, publish_summary, status_json};
 pub use rpc::{default_call_rpcs, Rpc, RpcLog};
-pub use seeds::root_address;
+pub use seeds::{custodial_wrap, root_address};
 pub use state::{
     estimate, refresh_kinds, CurveRecord, ImmutablePut, ImmutableRow, MutableStored, MutableWrite,
     PoolState, QuoteRecord, RefreshReport, StateSummary, TickPage, WatchHit, WorkFail, WorkJob,

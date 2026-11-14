@@ -33,6 +33,8 @@ struct Board {
     peer_sessions: AtomicU64,
     peer_summaries: AtomicU64,
     peer_sightings: AtomicU64,
+    spots: AtomicBool,
+    spot_count: AtomicU64,
 }
 
 fn board() -> &'static Board {
@@ -63,6 +65,8 @@ fn board() -> &'static Board {
         peer_sessions: AtomicU64::new(0),
         peer_summaries: AtomicU64::new(0),
         peer_sightings: AtomicU64::new(0),
+        spots: AtomicBool::new(false),
+        spot_count: AtomicU64::new(0),
     })
 }
 
@@ -137,6 +141,12 @@ pub fn note_feeds(
     board.feeds.store(true, Ordering::Relaxed);
 }
 
+pub fn note_spots(spots: u64) {
+    let board = board();
+    board.spot_count.store(spots, Ordering::Relaxed);
+    board.spots.store(true, Ordering::Relaxed);
+}
+
 pub fn note_peers(sessions: u64, summaries: u64, sightings: u64) {
     let board = board();
     board.peer_sessions.store(sessions, Ordering::Relaxed);
@@ -183,6 +193,10 @@ pub fn snapshot() -> Value {
             "summaries": load_u64(&board.peer_summaries),
             "sightings": load_u64(&board.peer_sightings),
         },
+        "spots": {
+            "live": load_bool(&board.spots),
+            "spots": load_u64(&board.spot_count),
+        },
     })
 }
 
@@ -204,5 +218,10 @@ mod tests {
         assert_eq!(snap["feeds"]["answers"], 9);
         assert_eq!(snap["feeds"]["follow"], 80);
         assert_eq!(snap["feeds"]["lookback"], false);
+        assert_eq!(snap["spots"]["live"], false);
+        note_spots(12);
+        let snap = snapshot();
+        assert_eq!(snap["spots"]["live"], true);
+        assert_eq!(snap["spots"]["spots"], 12);
     }
 }

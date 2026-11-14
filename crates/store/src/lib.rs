@@ -124,6 +124,14 @@ impl LocalStore {
         ))
     }
 
+    /// Pair conduits already stored, with the block each merge used.
+    pub fn visit_conduit_blocks(
+        &self,
+        visit: impl FnMut(Address, Address, u64, &[routing::SlopeSegment]) -> eyre::Result<()>,
+    ) -> eyre::Result<()> {
+        self.catalog_db()?.visit_conduit_blocks(visit)
+    }
+
     pub(crate) async fn page_blocks(
         &self,
         after: Option<u64>,

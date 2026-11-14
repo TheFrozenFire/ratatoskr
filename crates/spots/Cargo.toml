@@ -1,0 +1,23 @@
+[package]
+name = "spots"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+alloy-primitives.workspace = true
+eyre.workspace = true
+ipc.workspace = true
+num-bigint = "0.4"
+redb.workspace = true
+routing.workspace = true
+thiserror = "2"
+tokio = { workspace = true, features = ["sync"] }
+tracing.workspace = true
+
+[dev-dependencies]
+alloy-primitives.workspace = true
+num-bigint = "0.4"
+redb.workspace = true
+routing.workspace = true

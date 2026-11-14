@@ -28,3 +28,4 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 venues.workspace = true
 oracles.workspace = true
+spots.workspace = true

@@ -1,5 +1,5 @@
 //! Full-screen status. It polls the exporter for the state pipeline and for
-//! the header chain, discovery, the token lens, feeds, the peer directory,
+//! the header chain, discovery, the token lens, feeds, spots, the peer directory,
 //! and the corpus.
 
 use crossterm::{
@@ -230,6 +230,7 @@ fn pipeline_text(snap: Option<&Value>) -> Vec<String> {
         ),
         row("token lens", "token records", &token_detail(board)),
         row("oracles", "feeds", &feed_detail(board)),
+        row("spots", "spots", &spot_detail(board)),
         row("peer service", "peer directory", &peer_detail(board)),
         row("corpus", "corpus", &corpus_detail(board)),
     ]
@@ -318,6 +319,16 @@ fn feed_detail(board: Option<&Value>) -> String {
         text.push_str("   lookback");
     }
     text
+}
+
+fn spot_detail(board: Option<&Value>) -> String {
+    let Some(spots) = board_row(board, "spots") else {
+        return "not running".into();
+    };
+    if !spots["live"].as_bool().unwrap_or(false) {
+        return "not running".into();
+    }
+    format!("{} spots", commas(spots["spots"].as_u64().unwrap_or(0)))
 }
 
 fn peer_detail(board: Option<&Value>) -> String {
@@ -839,7 +850,8 @@ mod tests {
                     "follow_known": true,
                     "lookback": true
                 },
-                "peers": {"live": false}
+                "peers": {"live": false},
+                "spots": {"live": true, "spots": 12}
             }
         });
         let text = pipeline_text(Some(&snap)).join("\n");
@@ -854,6 +866,8 @@ mod tests {
         assert!(text.contains("reading"), "{text}");
         assert!(text.contains("oracles"), "{text}");
         assert!(text.contains("8 answers"), "{text}");
+        assert!(text.contains("spots"), "{text}");
+        assert!(text.contains("12 spots"), "{text}");
         assert!(text.contains("following"), "{text}");
         assert!(text.contains("2.0 KB"), "{text}");
         assert!(text.contains("peer service"), "{text}");

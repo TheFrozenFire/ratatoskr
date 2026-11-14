@@ -6,8 +6,8 @@
 
 mod board;
 pub use board::{
-    note_corpus, note_feeds, note_header_cursor, note_headers, note_peers, note_token_lens,
-    note_token_reading, note_token_records, snapshot as board_snapshot,
+    note_corpus, note_feeds, note_header_cursor, note_headers, note_peers, note_spots,
+    note_token_lens, note_token_reading, note_token_records, snapshot as board_snapshot,
 };
 
 use eyre::{eyre, WrapErr};

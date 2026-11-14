@@ -444,6 +444,14 @@ impl Catalog {
         visit_conduits_at(&self.entities, visit)
     }
 
+    /// Read every stored pair conduit, including the block the merge used.
+    pub fn visit_conduit_blocks(
+        &self,
+        visit: impl FnMut(Address, Address, u64, &[SlopeSegment]) -> eyre::Result<()>,
+    ) -> eyre::Result<()> {
+        visit_conduit_rows(&self.entities, visit)
+    }
+
     fn member_segments(
         &self,
         token_in: Address,
@@ -508,6 +516,15 @@ pub(crate) fn visit_conduits_at(
     db: &impl redb::ReadableDatabase,
     mut visit: impl FnMut(Address, Address, &[SlopeSegment]) -> eyre::Result<()>,
 ) -> eyre::Result<()> {
+    visit_conduit_rows(db, |token_in, token_out, _block, segments| {
+        visit(token_in, token_out, segments)
+    })
+}
+
+pub(crate) fn visit_conduit_rows(
+    db: &impl redb::ReadableDatabase,
+    mut visit: impl FnMut(Address, Address, u64, &[SlopeSegment]) -> eyre::Result<()>,
+) -> eyre::Result<()> {
     let read = db.begin_read()?;
     let Some(table) = open_conduits(&read)? else {
         return Ok(());
@@ -522,7 +539,7 @@ pub(crate) fn visit_conduits_at(
         pair.copy_from_slice(raw);
         let (token_in, token_out) = pair_addresses(&pair);
         let stored = decode_conduit(value.value())?;
-        visit(token_in, token_out, &stored.segments)?;
+        visit(token_in, token_out, stored.block, &stored.segments)?;
     }
     Ok(())
 }
@@ -542,6 +559,14 @@ impl crate::EntityRead {
         visit: impl FnMut(Address, Address, &[SlopeSegment]) -> eyre::Result<()>,
     ) -> eyre::Result<()> {
         visit_conduits_at(&self.entities, visit)
+    }
+
+    /// Read every stored pair conduit, including the block the merge used.
+    pub fn visit_conduit_blocks(
+        &self,
+        visit: impl FnMut(Address, Address, u64, &[SlopeSegment]) -> eyre::Result<()>,
+    ) -> eyre::Result<()> {
+        visit_conduit_rows(&self.entities, visit)
     }
 }
 

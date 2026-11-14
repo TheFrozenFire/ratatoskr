@@ -12,6 +12,7 @@ chain.workspace = true
 corpus.workspace = true
 eyre.workspace = true
 model.workspace = true
+routing.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true

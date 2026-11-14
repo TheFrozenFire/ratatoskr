@@ -79,6 +79,17 @@ pub fn root_address(kind: u8) -> Option<Address> {
     document().kind_address(kind)
 }
 
+/// Native token and the wrapped token from `corpus/mainnet.yaml`.
+///
+/// The seed file names that custodial wrap. The first pair is the one a spot uses.
+pub fn custodial_wrap() -> (Address, Address) {
+    let wrap = document()
+        .wraps
+        .first()
+        .expect("corpus/mainnet.yaml names a wrapper");
+    (wrap.token, wrap.wrapper)
+}
+
 /// Quote contract for this factory, or the only quoted root of `kind`.
 pub(crate) fn quoter(kind: u8, factory: Option<Address>) -> Option<Address> {
     let doc = document();
