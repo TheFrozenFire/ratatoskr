@@ -47,34 +47,7 @@ pub(crate) fn output_bound(problem: &Problem) -> BigInt {
 }
 
 pub(crate) fn meet(problem: &Problem, count: &BigInt) -> Option<Plan> {
-    meet_ranked(problem, count, Rank::Slope, None)
-}
-
-/// Keeps the count and replaces the plan when another fill opens less gas.
-///
-/// Ten routes or fewer are searched as subsets. A larger set drops one open
-/// action at a time, then takes one cheap fill.
-pub(crate) fn polish(problem: &Problem, mut best: Plan) -> Plan {
-    if best.count.is_zero() || !gas_can_move(problem) {
-        return best;
-    }
-    loop {
-        let count = best.count.clone();
-        let gas = best.gas.clone();
-        if problem.routes.len() <= 10 {
-            improve_subsets(problem, &mut best);
-        }
-        improve_without(problem, &mut best);
-        if let Some(plan) = meet_ranked(problem, &best.count, Rank::Cheap, None) {
-            if lex_better(&plan, &best) {
-                best = plan;
-            }
-        }
-        if best.count == count && best.gas == gas {
-            break;
-        }
-    }
-    best
+    meet_ranked(problem, count)
 }
 
 #[derive(Clone)]
@@ -85,12 +58,7 @@ struct Saved {
     tenders: Vec<BigInt>,
 }
 
-fn meet_ranked(
-    problem: &Problem,
-    count: &BigInt,
-    rank: Rank,
-    allow: Option<&[bool]>,
-) -> Option<Plan> {
+fn meet_ranked(problem: &Problem, count: &BigInt) -> Option<Plan> {
     if count < &BigInt::from(0) {
         return None;
     }
@@ -103,11 +71,8 @@ fn meet_ranked(
         }
         let room = gas_room(problem, &state.gas);
         let mut open = Vec::new();
-        for index in 0..problem.routes.len() {
-            if allow.is_some_and(|allow| !allow[index]) {
-                continue;
-            }
-            let sink = sink(problem, &problem.routes[index])?;
+        for (index, route) in problem.routes.iter().enumerate() {
+            let sink = sink(problem, route)?;
             let need = state.remaining(&sink);
             if need.is_zero() {
                 continue;
@@ -128,7 +93,6 @@ fn meet_ranked(
                     saved[index] = None;
                     continue;
                 };
-                let route = &problem.routes[index];
                 saved[index] = Some(Saved {
                     take: step.takes.first().cloned().unwrap_or_else(BigInt::zero),
                     need: need.clone(),
@@ -143,7 +107,7 @@ fn meet_ranked(
             };
             open.push(Candidate {
                 index,
-                hub: route_touches(&problem.routes[index], problem, &hubs),
+                hub: route_touches(route, problem, &hubs),
                 step,
             });
         }
@@ -151,15 +115,16 @@ fn meet_ranked(
         for candidate in &open {
             if best
                 .as_ref()
-                .map(|held| candidate.beats(held, rank))
+                .map(|held| candidate.beats(held))
                 .unwrap_or(true)
             {
                 best = Some(candidate.clone());
             }
         }
-        let Some(candidate) = best else {
+        let Some(mut candidate) = best else {
             break;
         };
+        candidate = widen_opening(problem, &state, candidate, &open, room.as_ref());
         let touched = touched_tokens(problem, candidate.index, &candidate.step);
         let before: Vec<BigInt> = touched
             .iter()
@@ -265,83 +230,6 @@ fn invalidate_saved(
             *slot = None;
         }
     }
-}
-
-#[derive(Clone, Copy)]
-enum Rank {
-    Slope,
-    Cheap,
-}
-
-fn lex_better(plan: &Plan, best: &Plan) -> bool {
-    plan.count > best.count || (plan.count == best.count && plan.gas < best.gas)
-}
-
-fn gas_can_move(problem: &Problem) -> bool {
-    problem.gas_ceiling.is_some() || problem.gas.values().any(|gas| !gas.is_zero())
-}
-
-fn improve_subsets(problem: &Problem, best: &mut Plan) {
-    let n = problem.routes.len();
-    let mut allow = vec![false; n];
-    let limit = 1_u32 << n;
-    for mask in 1..limit {
-        for (index, flag) in allow.iter_mut().enumerate() {
-            *flag = (mask & (1_u32 << index)) != 0;
-        }
-        if !covers(problem, &allow) {
-            continue;
-        }
-        adopt(problem, best, Rank::Slope, Some(&allow));
-    }
-}
-
-fn improve_without(problem: &Problem, best: &mut Plan) {
-    let mut actions: Vec<Action> = best
-        .tenders
-        .iter()
-        .map(|tender| tender.action.clone())
-        .collect();
-    actions.sort();
-    actions.dedup();
-    for action in actions {
-        let muted = mute_action(problem, &action);
-        adopt(&muted, best, Rank::Slope, None);
-        adopt(&muted, best, Rank::Cheap, None);
-    }
-}
-
-fn adopt(problem: &Problem, best: &mut Plan, rank: Rank, allow: Option<&[bool]>) {
-    if let Some(plan) = meet_ranked(problem, &best.count, rank, allow) {
-        if lex_better(&plan, best) {
-            *best = plan;
-        }
-    }
-}
-
-fn covers(problem: &Problem, allow: &[bool]) -> bool {
-    problem.outputs.iter().all(|output| {
-        problem
-            .routes
-            .iter()
-            .enumerate()
-            .any(|(index, route)| allow[index] && sink(problem, route) == Some(output.token))
-    })
-}
-
-fn mute_action(problem: &Problem, action: &Action) -> Problem {
-    let mut muted = problem.clone();
-    for edge in &mut muted.edges {
-        let clear = matches!(edge.curve, Curve::Unlimited) && edge.action == *action;
-        if clear {
-            edge.curve = Curve::Chords(Vec::new());
-            continue;
-        }
-        if let Curve::Chords(chords) = &mut edge.curve {
-            chords.retain(|chord| &chord.action != action);
-        }
-    }
-    muted
 }
 
 fn gas_room(problem: &Problem, spent: &BigInt) -> Option<BigInt> {
@@ -520,14 +408,7 @@ struct Candidate {
 }
 
 impl Candidate {
-    fn beats(&self, other: &Self, rank: Rank) -> bool {
-        match rank {
-            Rank::Slope => self.slope_beats(other),
-            Rank::Cheap => self.cheap_beats(other),
-        }
-    }
-
-    fn slope_beats(&self, other: &Self) -> bool {
+    fn beats(&self, other: &Self) -> bool {
         if self.step.eff.free != other.step.eff.free {
             return self.step.eff.free;
         }
@@ -537,50 +418,12 @@ impl Candidate {
         self.tie_beats(other)
     }
 
-    fn cheap_beats(&self, other: &Self) -> bool {
-        let group = self.gas_group();
-        let other_group = other.gas_group();
-        if group != other_group {
-            return group < other_group;
-        }
-        if group == 2 && !self.same_charge(other) {
-            return self.cheaper_than(other);
-        }
-        if !self.same_slope(other) {
-            return self.steeper_than(other);
-        }
-        self.tie_beats(other)
-    }
-
-    fn gas_group(&self) -> u8 {
-        if self.step.gas.is_zero() {
-            if self.step.eff.free {
-                0
-            } else {
-                1
-            }
-        } else {
-            2
-        }
-    }
-
     fn same_slope(&self, other: &Self) -> bool {
         &self.step.eff.num * &other.step.eff.den == &other.step.eff.num * &self.step.eff.den
     }
 
     fn steeper_than(&self, other: &Self) -> bool {
         &self.step.eff.num * &other.step.eff.den > &other.step.eff.num * &self.step.eff.den
-    }
-
-    fn same_charge(&self, other: &Self) -> bool {
-        &self.step.gas * &other.step.delivered == &other.step.gas * &self.step.delivered
-            && self.step.gas == other.step.gas
-    }
-
-    fn cheaper_than(&self, other: &Self) -> bool {
-        let left = &self.step.gas * &other.step.delivered;
-        let right = &other.step.gas * &self.step.delivered;
-        left < right || (left == right && self.step.gas < other.step.gas)
     }
 
     fn tie_beats(&self, other: &Self) -> bool {
@@ -755,12 +598,17 @@ fn fallback_prefix(
     let mut best_gain =
         spent_gain(problem, state, route_index, &best_take).unwrap_or_else(BigInt::zero);
     if problem.routes[route_index].edges.len() > 1 {
-        // A one-unit prefix has the best average on a diminishing curve, and
-        // filling the budget one unit at a time does not finish. The current
-        // slope segment is one marginal, so the step is the rest of it.
+        // The opening unit has the best average while the slope falls. The
+        // step is the rest of the slope segment that unit lands on. The whole
+        // budget is quoted only when every edge it crosses keeps that slope.
         if let Some((take, gain)) = span_candidate(problem, state, route_index, limit) {
             best_take = take;
             best_gain = gain;
+        } else if let Some((take, gain)) = landing_candidate(problem, state, route_index, limit) {
+            if ratio_beats(&gain, &take, &best_gain, Some(&best_take)) {
+                best_take = take;
+                best_gain = gain;
+            }
         }
     } else if let Some((take, gain)) = head_candidate(problem, state, route_index, limit) {
         if ratio_beats(&gain, &take, &best_gain, Some(&best_take)) {
@@ -768,10 +616,12 @@ fn fallback_prefix(
             best_gain = gain;
         }
     }
-    if let Some(gain) = spent_gain(problem, state, route_index, limit) {
-        if ratio_beats(&gain, limit, &best_gain, Some(&best_take)) {
-            best_take = limit.clone();
-            best_gain = gain;
+    if flat_through(problem, state, route_index, limit) {
+        if let Some(gain) = spent_gain(problem, state, route_index, limit) {
+            if ratio_beats(&gain, limit, &best_gain, Some(&best_take)) {
+                best_take = limit.clone();
+                best_gain = gain;
+            }
         }
     }
     if best_gain.is_zero() {
@@ -797,7 +647,11 @@ fn span_candidate(
     let take = match span_take(problem, state, route_index, limit) {
         Some(take) if span_exact(problem, state, route_index, limit, &take) => take,
         _ if stays_on_heads(problem, state, route_index, &one) => {
-            span_search(problem, state, route_index, limit)?
+            let hi = span_hi(problem, state, route_index, limit);
+            if hi.is_zero() {
+                return None;
+            }
+            span_search(problem, state, route_index, &hi)?
         }
         _ => return None,
     };
@@ -839,6 +693,275 @@ fn span_search(
         }
     }
     Some(lo)
+}
+
+/// Largest source that can still sit on the first edge's current slope segment.
+fn span_hi(problem: &Problem, state: &Live, route_index: usize, limit: &BigInt) -> BigInt {
+    let Some(first) = problem.routes[route_index].edges.first() else {
+        return limit.clone();
+    };
+    let Curve::Chords(segments) = &problem.edges[*first].curve else {
+        return limit.clone();
+    };
+    let Some(head) = head(segments, &state.tender[*first]) else {
+        return BigInt::from(0);
+    };
+    std::cmp::min(limit.clone(), head.rem_w)
+}
+
+/// Largest source that ends on the slope segment reached by one unit of flow.
+///
+/// One unit that has already left the opening segment still has a landing
+/// segment. The step runs to the end of that segment when its average holds.
+fn landing_candidate(
+    problem: &Problem,
+    state: &Live,
+    route_index: usize,
+    limit: &BigInt,
+) -> Option<(BigInt, BigInt)> {
+    let one = BigInt::from(1);
+    if limit < &one || problem.routes[route_index].edges.len() < 2 {
+        return None;
+    }
+    let cap = landing_source(problem, state, route_index, &one, limit)?;
+    let gain = spent_gain(problem, state, route_index, &cap)?;
+    Some((cap, gain))
+}
+
+/// Grows a one-unit winner across the slope segments it still beats.
+///
+/// The opening unit still decides which route wins. Later segments join the
+/// step while the first and last unit of each one stay strictly above the
+/// next-best route. A shallower landing is left for that route.
+fn widen_opening(
+    problem: &Problem,
+    state: &Live,
+    mut candidate: Candidate,
+    open: &[Candidate],
+    room: Option<&BigInt>,
+) -> Candidate {
+    let Some(runner) = runner_up(open, candidate.index) else {
+        return candidate;
+    };
+    if runner.step.eff.free || candidate.step.eff.free {
+        return candidate;
+    }
+    if candidate.step.takes.first() != Some(&BigInt::from(1)) {
+        return candidate;
+    }
+    let Some(sink) = sink(problem, &problem.routes[candidate.index]) else {
+        return candidate;
+    };
+    let need = state.remaining(&sink);
+    if candidate.step.delivered >= need {
+        return candidate;
+    }
+    let Some(limit) = source_budget(problem, state, candidate.index) else {
+        return candidate;
+    };
+    let mut take = BigInt::from(1);
+    for _ in 0..4096 {
+        // A cursor on a boundary has no room left in that segment. Probe the
+        // next source unit so the following segment can join this step.
+        let cap = match landing_source(problem, state, candidate.index, &take, &limit) {
+            Some(cap) => cap,
+            None => {
+                let next = &take + 1;
+                if next > limit {
+                    break;
+                }
+                match landing_source(problem, state, candidate.index, &next, &limit) {
+                    Some(cap) => cap,
+                    None => break,
+                }
+            }
+        };
+        if cap <= take {
+            break;
+        }
+        let Some(at_next) = unit_marginal(problem, state, candidate.index, &(&take + 1)) else {
+            break;
+        };
+        let Some(at_end) = unit_marginal(problem, state, candidate.index, &cap) else {
+            break;
+        };
+        if !steeper_than_rate(&at_next, runner) || !steeper_than_rate(&at_end, runner) {
+            break;
+        }
+        let Some(pushed) = push(problem, state, candidate.index, &cap, room) else {
+            break;
+        };
+        if pushed.delivered >= need {
+            if let Some(cut) = try_ask(problem, state, candidate.index, &need, room) {
+                if cut.takes.first().is_some_and(|taken| taken > &take) {
+                    candidate.step = cut;
+                }
+            }
+            break;
+        }
+        candidate.step = pushed;
+        take = cap;
+    }
+    candidate
+}
+
+fn runner_up(open: &[Candidate], winner: usize) -> Option<&Candidate> {
+    let mut best: Option<&Candidate> = None;
+    for candidate in open {
+        if candidate.index == winner {
+            continue;
+        }
+        if best.is_some_and(|held| !candidate.beats(held)) {
+            continue;
+        }
+        best = Some(candidate);
+    }
+    best
+}
+
+fn steeper_than_rate(marginal: &BigInt, runner: &Candidate) -> bool {
+    marginal * &runner.step.eff.den > runner.step.eff.num
+}
+
+fn unit_marginal(
+    problem: &Problem,
+    state: &Live,
+    route_index: usize,
+    at: &BigInt,
+) -> Option<BigInt> {
+    let end = spent_gain(problem, state, route_index, at)?;
+    let prev = if at <= &BigInt::from(1) {
+        BigInt::from(0)
+    } else {
+        spent_gain(problem, state, route_index, &(at - 1))?
+    };
+    if end <= prev {
+        None
+    } else {
+        Some(end - prev)
+    }
+}
+
+/// Largest source at or below `limit` that still ends on the slope segment `take` reaches.
+fn landing_source(
+    problem: &Problem,
+    state: &Live,
+    route_index: usize,
+    take: &BigInt,
+    limit: &BigInt,
+) -> Option<BigInt> {
+    if take.is_zero() || problem.routes[route_index].edges.len() < 2 {
+        return None;
+    }
+    let sim = simulate(problem, state, route_index, take)?;
+    if sim.takes.first() != Some(take) {
+        return None;
+    }
+    let route = &problem.routes[route_index];
+    let mut cap = limit.clone();
+    let mut bound = false;
+    for (index, edge_index) in route.edges.iter().enumerate() {
+        let edge = &problem.edges[*edge_index];
+        let tender = &state.tender[*edge_index];
+        let Some(room) = landing_room(edge, tender, &sim.takes[index]) else {
+            continue;
+        };
+        if room.is_zero() {
+            return None;
+        }
+        bound = true;
+        if let Some(allowed) = source_for_enter(problem, state, route, index, &room) {
+            if allowed < cap {
+                cap = allowed;
+            }
+        }
+    }
+    if !bound || cap <= *take {
+        None
+    } else {
+        Some(cap)
+    }
+}
+
+/// Input from `tender` that reaches the end of the segment holding `tender + take`.
+fn landing_room(edge: &Edge, tender: &BigInt, take: &BigInt) -> Option<BigInt> {
+    let Curve::Chords(segments) = &edge.curve else {
+        return None;
+    };
+    if take.is_zero() {
+        return None;
+    }
+    let pos = tender + take;
+    let mut cursor = BigInt::from(0);
+    for segment in segments {
+        if segment.width.is_zero() {
+            continue;
+        }
+        let seg_end = &cursor + &segment.width;
+        if pos <= seg_end {
+            return Some(&seg_end - tender);
+        }
+        cursor = seg_end;
+    }
+    remaining_input(edge, tender)
+}
+
+/// The budget stays on one slope of every edge, so its average can tie the opening.
+fn flat_through(problem: &Problem, state: &Live, route_index: usize, limit: &BigInt) -> bool {
+    if limit.is_zero() {
+        return false;
+    }
+    let route = &problem.routes[route_index];
+    let mut flow = limit.clone();
+    for (index, edge_index) in route.edges.iter().enumerate() {
+        let edge = &problem.edges[*edge_index];
+        let tender = &state.tender[*edge_index];
+        let mut enter = flow.clone();
+        if index > 0 {
+            enter += state.excess(&spent(edge));
+        }
+        let take = match remaining_input(edge, tender) {
+            Some(rem) => std::cmp::min(enter, rem),
+            None => enter,
+        };
+        if take.is_zero() || !one_slope(edge, tender, &take) {
+            return false;
+        }
+        flow = produce(edge, tender, &take);
+    }
+    true
+}
+
+fn one_slope(edge: &Edge, tender: &BigInt, take: &BigInt) -> bool {
+    let Curve::Chords(segments) = &edge.curve else {
+        return true;
+    };
+    let Some(head) = head(segments, tender) else {
+        return false;
+    };
+    let mut skip = tender.clone();
+    let mut left = take.clone();
+    let mut first = true;
+    for segment in segments {
+        if segment.width.is_zero() {
+            continue;
+        }
+        if skip >= segment.width {
+            skip -= &segment.width;
+            continue;
+        }
+        if !first && (&segment.output * &head.width != &head.output * &segment.width) {
+            return false;
+        }
+        first = false;
+        let room = &segment.width - &skip;
+        if left <= room {
+            return true;
+        }
+        left -= &room;
+        skip = BigInt::from(0);
+    }
+    true
 }
 
 /// Source bound from the head of each edge, inverted back along the route.

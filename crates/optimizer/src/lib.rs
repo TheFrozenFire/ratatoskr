@@ -14,10 +14,9 @@
 //! The count is the largest one whose inputs fit the amounts.
 //!
 //! Gas is the sum of the gas units of the actions whose chords receive input.
-//! The same action is charged once. A larger count wins. Equal counts keep
-//! the smaller gas: once the count is fixed, a fill that opens less gas
-//! replaces the plan when it still meets the count. A gas ceiling drops a
-//! candidate that would pass it. The allocator does not read a venue kind.
+//! The same action is charged once. The objective is the basket count. A gas
+//! ceiling drops a candidate that would pass it. The allocator does not read
+//! a venue kind.
 
 mod solve;
 
@@ -222,7 +221,7 @@ pub fn optimize(problem: &Problem) -> Result<Plan, OptimizeError> {
             hi = mid;
         }
     }
-    Ok(solve::polish(problem, best))
+    Ok(best)
 }
 
 fn zero_plan(problem: &Problem) -> Plan {
@@ -374,22 +373,30 @@ pub(crate) fn quote_curve(curve: &Curve, input: &BigInt) -> BigInt {
                 input.clone()
             }
         }
-        Curve::Chords(chords) => {
-            let marker = routing::Action {
-                kind: 0,
-                pool: [0; 32],
-            };
-            let segments: Vec<routing::SlopeSegment> = chords
-                .iter()
-                .map(|chord| routing::SlopeSegment {
-                    width: chord.width.clone(),
-                    output: chord.output.clone(),
-                    action: marker,
-                })
-                .collect();
-            routing::quote(&segments, input)
-        }
+        Curve::Chords(chords) => quote_chords(chords, input),
     }
+}
+
+/// Same integer division as [`routing::quote`], read from the chords in place.
+fn quote_chords(chords: &[Chord], input: &BigInt) -> BigInt {
+    if input <= &BigInt::from(0) {
+        return BigInt::from(0);
+    }
+    let mut left = input.clone();
+    let mut paid = BigInt::from(0);
+    for chord in chords {
+        if left.is_zero() || chord.width.is_zero() {
+            break;
+        }
+        let taken = if left < chord.width {
+            left.clone()
+        } else {
+            chord.width.clone()
+        };
+        paid += (&chord.output * &taken) / &chord.width;
+        left -= taken;
+    }
+    paid
 }
 
 fn check_route(

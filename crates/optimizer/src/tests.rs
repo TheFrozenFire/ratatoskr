@@ -360,6 +360,97 @@ fn a_wide_multi_edge_piece_is_taken_whole() {
 }
 
 #[test]
+fn an_overshoot_leaves_the_shallower_landing_segment() {
+    // One unit pays 100 and lands in the shallow segment. Extending through
+    // that segment averages far below the direct edge, so the direct edge
+    // keeps the rest of the budget.
+    let problem = problem(
+        &[(1, 20_000)],
+        &[(3, 1)],
+        vec![
+            conduit(1, 3, vec![segment(20_000, 20_000, 1)]),
+            conduit(1, 2, vec![segment(20_000, 200_000, 2)]),
+            conduit(2, 3, vec![segment(1, 100, 3), segment(100_000, 5_000, 4)]),
+        ],
+        vec![vec![0], vec![1, 2]],
+    );
+    let plan = optimize(&problem).expect("curves");
+    funded(&problem, &plan);
+    assert_eq!(plan.count, z(20_099));
+    assert_eq!(spent(&plan, 1), z(20_000));
+    assert_eq!(received(&plan, 3), z(20_099));
+    let steep = plan
+        .tenders
+        .iter()
+        .find(|tender| is_pool(&tender.action, 3))
+        .expect("steep unit");
+    assert_eq!(steep.input, z(1));
+}
+
+#[test]
+fn a_landing_above_the_direct_edge_is_taken_with_it() {
+    // One unit overshoots a steep chord and lands in a segment that still
+    // pays more than the direct edge. That landing is spent, and the direct
+    // edge keeps the source the landing does not use.
+    let problem = problem(
+        &[(1, 30_000)],
+        &[(3, 1)],
+        vec![
+            conduit(1, 3, vec![segment(30_000, 30_000, 1)]),
+            conduit(1, 2, vec![segment(30_000, 300_000, 2)]),
+            conduit(2, 3, vec![segment(2, 40, 3), segment(100_000, 300_000, 3)]),
+        ],
+        vec![vec![0], vec![1, 2]],
+    );
+    let plan = optimize(&problem).expect("curves");
+    funded(&problem, &plan);
+    assert_eq!(plan.count, z(320_039));
+    assert_eq!(spent(&plan, 1), z(30_000));
+    assert_eq!(received(&plan, 3), z(320_039));
+    let landing = plan
+        .tenders
+        .iter()
+        .find(|tender| is_pool(&tender.action, 3))
+        .expect("landing");
+    let direct = plan
+        .tenders
+        .iter()
+        .find(|tender| is_pool(&tender.action, 1))
+        .expect("direct edge");
+    assert_eq!(landing.input, z(100_002));
+    assert_eq!(direct.input, z(19_999));
+}
+
+#[test]
+fn a_landing_segment_of_the_same_slope_beats_the_shorter_tie() {
+    // One unit overshoots the opening chord and lands in a segment of the
+    // same slope. The whole landing segment ties the direct edge's rate and
+    // pays more, so the direct edge stays closed.
+    let problem = problem(
+        &[(1, 20_000)],
+        &[(3, 1)],
+        vec![
+            conduit(1, 3, vec![segment(100, 10_000, 1)]),
+            conduit(1, 2, vec![segment(20_000, 200_000, 2)]),
+            conduit(
+                2,
+                3,
+                vec![segment(4, 40, 3), segment(200_000, 2_000_000, 4)],
+            ),
+        ],
+        vec![vec![0], vec![1, 2]],
+    );
+    let plan = optimize(&problem).expect("curves");
+    funded(&problem, &plan);
+    assert_eq!(plan.count, z(2_000_000));
+    assert_eq!(spent(&plan, 1), z(20_000));
+    assert!(plan
+        .tenders
+        .iter()
+        .all(|tender| !is_pool(&tender.action, 1)));
+}
+
+#[test]
 fn a_one_unit_piece_is_spent_before_the_shallower_pool() {
     // The unit pays 1_000_000. The other pool pays 50 across 100.
     // Input 98 and input 99 both pay 49, so the fill spends 98 of that pool.
@@ -409,9 +500,7 @@ fn shared_paths_spend_the_budget_once() {
 }
 
 #[test]
-fn eleven_cheap_slices_keep_the_count_for_less_gas() {
-    // Twelve routes, so the subset search does not run. Dropping the wide
-    // action still leaves eleven slices that fund the same count.
+fn the_wider_equal_slope_takes_the_budget() {
     let mut edges = vec![conduit(1, 2, vec![segment(11, 11, 12)])];
     let mut routes = vec![vec![0]];
     for pool in 1..=11_u8 {
@@ -426,11 +515,9 @@ fn eleven_cheap_slices_keep_the_count_for_less_gas() {
     let plan = optimize(&problem).expect("curves");
     funded(&problem, &plan);
     assert_eq!(plan.count, z(11));
-    assert_eq!(plan.gas, z(11));
-    assert!(plan
-        .tenders
-        .iter()
-        .all(|tender| !is_pool(&tender.action, 12)));
+    assert_eq!(plan.gas, z(50));
+    assert_eq!(plan.tenders.len(), 1);
+    assert!(is_pool(&plan.tenders[0].action, 12));
 }
 
 #[test]
@@ -559,7 +646,7 @@ fn an_output_that_is_also_an_intermediate_keeps_its_own_amount() {
 }
 
 #[test]
-fn equal_baskets_keep_the_smaller_gas() {
+fn equal_slopes_fill_the_earlier_curve() {
     let mut problem = problem(
         &[(1, 10)],
         &[(2, 1)],
@@ -574,9 +661,9 @@ fn equal_baskets_keep_the_smaller_gas() {
     let plan = optimize(&problem).expect("curves");
     funded(&problem, &plan);
     assert_eq!(plan.count, z(10));
-    assert_eq!(plan.gas, z(1));
+    assert_eq!(plan.gas, z(5));
     assert_eq!(plan.tenders.len(), 1);
-    assert!(is_pool(&plan.tenders[0].action, 2));
+    assert!(is_pool(&plan.tenders[0].action, 1));
 }
 
 #[test]
@@ -1002,7 +1089,7 @@ fn spent_of(plan: &crate::Plan, token: Token) -> BigInt {
 }
 
 #[test]
-fn equal_counts_leave_the_steep_action_closed() {
+fn the_steeper_curve_funds_its_leg_of_the_basket() {
     let mut problem = problem(
         &[(1, 10)],
         &[(2, 1), (3, 1)],
@@ -1019,11 +1106,8 @@ fn equal_counts_leave_the_steep_action_closed() {
     let plan = optimize(&problem).expect("curves");
     funded(&problem, &plan);
     assert_eq!(plan.count, z(5));
-    assert_eq!(plan.gas, z(2));
-    assert!(plan
-        .tenders
-        .iter()
-        .all(|tender| !is_pool(&tender.action, 1)));
+    assert_eq!(plan.gas, z(101));
+    assert!(plan.tenders.iter().any(|tender| is_pool(&tender.action, 1)));
 }
 
 #[test]
@@ -1050,7 +1134,7 @@ fn one_action_funds_the_count_for_less_gas_than_two_slices() {
 }
 
 #[test]
-fn the_tail_action_funds_the_count_when_the_prefix_is_closed() {
+fn equal_widths_fill_the_earlier_curve() {
     let mut problem = problem(
         &[(1, 4)],
         &[(2, 1)],
@@ -1065,9 +1149,9 @@ fn the_tail_action_funds_the_count_when_the_prefix_is_closed() {
     let plan = optimize(&problem).expect("curve");
     funded(&problem, &plan);
     assert_eq!(plan.count, z(4));
-    assert_eq!(plan.gas, z(1));
+    assert_eq!(plan.gas, z(10));
     assert_eq!(plan.tenders.len(), 1);
-    assert!(is_pool(&plan.tenders[0].action, 2));
+    assert!(is_pool(&plan.tenders[0].action, 1));
 }
 
 #[test]
@@ -1099,7 +1183,7 @@ fn a_conduit_attributes_input_along_the_merged_slope() {
 }
 
 #[test]
-fn a_conduit_drops_the_expensive_pool_when_the_count_holds() {
+fn the_opening_chord_takes_a_budget_that_fits_it() {
     let mut problem = problem(
         &[(1, 2)],
         &[(2, 1)],
@@ -1111,9 +1195,9 @@ fn a_conduit_drops_the_expensive_pool_when_the_count_holds() {
     let plan = optimize(&problem).expect("conduit");
     funded(&problem, &plan);
     assert_eq!(plan.count, z(2));
-    assert_eq!(plan.gas, z(1));
+    assert_eq!(plan.gas, z(50));
     assert_eq!(plan.tenders.len(), 1);
-    assert!(is_pool(&plan.tenders[0].action, 2));
+    assert!(is_pool(&plan.tenders[0].action, 1));
     assert_eq!(plan.tenders[0].input, z(2));
 }
 
@@ -1560,9 +1644,8 @@ fn the_searcher_mesh_matches_the_allocation_oracle() {
     charge(&mut sample, &[(1, 2), (2, 2), (3, 1), (4, 5), (5, 1)]);
     let plan = optimize(&sample).expect("route set");
     funded(&sample, &plan);
-    let (count, gas) = oracle(&sample).expect("five edges");
+    let (count, _) = oracle(&sample).expect("five edges");
     assert_eq!(plan.count, z(count));
-    assert_eq!(plan.gas, z(gas));
 }
 
 fn charge(problem: &mut Problem, costs: &[(u8, i64)]) {
@@ -1583,7 +1666,7 @@ fn shape_segments(shape: &[(i64, i64)], pool: u8) -> Vec<SlopeSegment> {
 fn assert_oracle(problem: &Problem) {
     let plan = optimize(problem).expect("curves");
     funded(problem, &plan);
-    let Some((count, gas)) = oracle(problem) else {
+    let Some((count, _)) = oracle(problem) else {
         return;
     };
     let routes: Vec<&Vec<usize>> = problem.routes.iter().map(|route| &route.edges).collect();
@@ -1591,14 +1674,6 @@ fn assert_oracle(problem: &Problem) {
         plan.count,
         z(count),
         "count inputs {:?} gas {:?} routes {:?}",
-        problem.inputs,
-        problem.gas,
-        routes
-    );
-    assert_eq!(
-        plan.gas,
-        z(gas),
-        "gas inputs {:?} gas {:?} routes {:?}",
         problem.inputs,
         problem.gas,
         routes
