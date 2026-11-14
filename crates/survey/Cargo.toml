@@ -9,6 +9,7 @@ publish.workspace = true
 alloy-primitives.workspace = true
 eyre.workspace = true
 num-bigint = "0.4"
+tracing.workspace = true
 num-traits = "0.2"
 action.workspace = true
 optimizer.workspace = true

@@ -5286,6 +5286,8 @@ version = "0.1.0"
 dependencies = [
  "eyre",
  "survey",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -5423,6 +5425,7 @@ dependencies = [
  "routing",
  "searcher",
  "simulate",
+ "tracing",
  "trade",
  "venues",
 ]

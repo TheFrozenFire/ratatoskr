@@ -12,3 +12,5 @@ path = "src/main.rs"
 [dependencies]
 eyre.workspace = true
 survey.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
