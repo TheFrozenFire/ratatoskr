@@ -554,8 +554,23 @@ _Avoid_: sample catalog
 A smaller copy of pool identities, used for a trial.
 _Avoid_: live catalog, quote record, grid
 
+### Feeds
+
+**Feed**:
+A Chainlink proxy listed in the Ethereum mainnet feed directory. The proxy address is the identity. Category, heartbeat, threshold, and shutdown date come from that directory and can change while the proxy stays.
+_Avoid_: pool, pool identity, quote
+
+**Phase**:
+The chain phase id of one aggregator a feed proxy has used. The first stored phase is the phase id the proxy returns, and a greater phase id appends. A smaller phase id, or the same phase id with a different aggregator, leaves the stored phases in place.
+_Avoid_: stage, generation
+
+**Answer**:
+The scaled integer a feed phase reports for one round. A zero left after the feed shuts down is not an answer.
+_Avoid_: price, quote, spot
+
 ## Relationships
 
+- A **Feed** is not a **Pool identity**. A **Phase** is not a **Stage**. An **Answer** is not a **Quote** and not a **Price curve**
 - A **Pool identity** has exactly one **Kind** and one **Pool id**, and it comes from one **Factory**, one **Singleton**, or one **Registry**
 - A **Kind** is not a **Shape**. A v2 fork is a kind whose shape is a constant-product pool
 - A **Settlement** is not a **Pool identity**

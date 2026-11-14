@@ -18,7 +18,7 @@ mod peer_cmd;
 mod status;
 
 const DEFAULT_LOG: &str =
-    "ratatoskr=info,store=info,pipeline=info,peer=info,eth_p2p=info,venues=info,headers=info";
+    "ratatoskr=info,store=info,pipeline=info,peer=info,eth_p2p=info,venues=info,headers=info,oracles=info";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -43,8 +43,8 @@ struct Args {
     /// Comma-separated file owners: `db`, `peer`. Default is `db,peer`.
     #[arg(long, default_value = "db,peer")]
     services: String,
-    /// Comma-separated pipelines: `headers`, `venues`, `state`.
-    /// Default is all three. `state` reads the live catalog when `--data-dir` is omitted.
+    /// Comma-separated pipelines: `headers`, `venues`, `state`, `oracles`.
+    /// Default is `headers,venues,state`. `oracles` writes `feeds.redb` and does not open the venue catalog.
     #[arg(long, default_value = "headers,venues,state")]
     pipeline: String,
     /// Catalog directory for this process. Default is the live catalog.
@@ -135,6 +135,8 @@ struct Pipelines {
     venues: bool,
     /// Pool details, ticks, curves, and the watch.
     state: bool,
+    /// Chainlink feed directory, proxy configuration, and phase jobs.
+    oracles: bool,
 }
 
 struct Paths {
@@ -144,6 +146,7 @@ struct Paths {
     venues: PathBuf,
     peer_socket: PathBuf,
     db_socket: PathBuf,
+    feeds: PathBuf,
 }
 
 struct Owned {
@@ -364,6 +367,7 @@ async fn supervise(args: Args) -> eyre::Result<()> {
         return Ok(());
     }
     let rpcs = resolve_rpcs(&args.rpc, pipelines.state)?;
+    let oracle_rpcs = rpcs.clone();
     let mut owned = open_owned(&services, &pipelines, &paths)?;
     let local = owned.peer.as_ref().map(peer::OpenedPeer::local);
     let prepared = match owned.peer.take() {
@@ -434,13 +438,21 @@ async fn supervise(args: Args) -> eyre::Result<()> {
             spawn_sampler(store);
         }
     }
-    let pipelines_started = pipelines.headers || pipelines.venues || pipelines.state;
+    let pipelines_started =
+        pipelines.headers || pipelines.venues || pipelines.state || pipelines.oracles;
     let mut peer_task = peer_task;
     let mut stop_rx = stop_rx;
     let mut failed = tokio::task::LocalSet::new()
         .run_until(async {
-            let mut tasks =
-                spawn_pipelines(&pipelines, store.clone(), local, opts, stop_rx.clone());
+            let mut tasks = spawn_pipelines(
+                &pipelines,
+                store.clone(),
+                local,
+                opts,
+                stop_rx.clone(),
+                paths.feeds.clone(),
+                oracle_rpcs,
+            );
             wait_for_stop(
                 &mut tasks,
                 &mut peer_task,
@@ -510,6 +522,8 @@ fn spawn_pipelines(
     local: Option<LocalPeer>,
     opts: RunOpts,
     stop: watch::Receiver<bool>,
+    feeds: PathBuf,
+    rpcs: Vec<String>,
 ) -> JoinSet<eyre::Result<()>> {
     let mut tasks = JoinSet::new();
     if pipelines.headers {
@@ -544,6 +558,10 @@ fn spawn_pipelines(
                 .run(&mut sink, stop)
                 .await
         });
+    }
+    if pipelines.oracles {
+        let stop = stop.clone();
+        tasks.spawn_local(async move { oracles::run(feeds, rpcs, stop).await });
     }
     tasks
 }
@@ -729,6 +747,7 @@ fn parse_pipelines(text: &str) -> eyre::Result<Pipelines> {
             "headers" => pipelines.headers = true,
             "venues" => pipelines.venues = true,
             "state" => pipelines.state = true,
+            "oracles" => pipelines.oracles = true,
             other => return Err(eyre::eyre!("unknown pipeline {other}")),
         }
     }
@@ -756,7 +775,8 @@ fn open_owned(services: &Services, pipelines: &Pipelines, paths: &Paths) -> eyre
     } else {
         None
     };
-    let store = if services.db {
+    let catalog = services.db && (pipelines.headers || pipelines.venues || pipelines.state);
+    let store = if catalog {
         match LocalStore::open(&paths.headers, &paths.corpus, &paths.venues) {
             Ok(store) => Some(store),
             Err(err) => {
@@ -781,6 +801,7 @@ fn default_paths() -> eyre::Result<Paths> {
         venues: venues::Catalog::default_path(),
         peer_socket: peer::socket_path()?,
         db_socket: store::db_socket()?,
+        feeds: oracles::default_path(),
     })
 }
 
@@ -795,6 +816,7 @@ fn paths_from(data_dir: Option<&Path>) -> eyre::Result<Paths> {
         venues: dir.join("entities.redb"),
         peer_socket: dir.join("peer.sock"),
         db_socket: dir.join("db.sock"),
+        feeds: dir.join("feeds.redb"),
     })
 }
 
@@ -896,6 +918,7 @@ mod tests {
             venues: dir.join("venues.redb"),
             peer_socket: dir.join("peer.sock"),
             db_socket: dir.join("db.sock"),
+            feeds: dir.join("feeds.redb"),
         }
     }
 
@@ -911,6 +934,7 @@ mod tests {
             headers: true,
             venues: true,
             state: true,
+            oracles: false,
         }
     }
 
@@ -923,6 +947,7 @@ mod tests {
         assert!(!dir.join("entities.redb").exists());
         assert!(!dir.join("discovery.redb").exists());
         assert!(!dir.join("work.redb").exists());
+        assert!(!paths.feeds.exists());
     }
 
     #[test]
@@ -944,10 +969,38 @@ mod tests {
         assert!(headers.headers);
         assert!(!headers.venues);
         assert!(!headers.state);
+        assert!(!headers.oracles);
         assert!(parse_pipelines("venues").unwrap().venues);
         assert!(parse_pipelines("state").unwrap().state);
         assert!(!parse_pipelines("headers,venues").unwrap().state);
+        let oracles = parse_pipelines("oracles").unwrap();
+        assert!(oracles.oracles);
+        assert!(!oracles.headers);
+        assert!(!oracles.venues);
+        assert!(!oracles.state);
         assert!(parse_pipelines("receipts").is_err());
+    }
+
+    #[test]
+    fn oracles_with_db_does_not_open_the_venue_catalog() {
+        let dir = TempDir::new();
+        let paths = paths_in(&dir.0);
+        let owned = open_owned(
+            &Services {
+                db: true,
+                peer: false,
+            },
+            &Pipelines {
+                headers: false,
+                venues: false,
+                state: false,
+                oracles: true,
+            },
+            &paths,
+        )
+        .unwrap();
+        assert!(owned.store.is_none());
+        assert_no_databases(&paths);
     }
 
     #[test]
@@ -957,6 +1010,7 @@ mod tests {
         assert_eq!(paths.venues, dir.0.join("entities.redb"));
         assert_eq!(paths.headers, dir.0.join("headers.redb"));
         assert_eq!(paths.db_socket, dir.0.join("db.sock"));
+        assert_eq!(paths.feeds, dir.0.join("feeds.redb"));
         assert!(refuse_live(&dir.0).is_ok());
     }
 
@@ -973,6 +1027,7 @@ mod tests {
                 headers: false,
                 venues: false,
                 state: true,
+                oracles: false,
             },
             &paths,
         ));
@@ -1025,6 +1080,7 @@ mod tests {
                 headers: true,
                 venues: false,
                 state: false,
+                oracles: false,
             },
             &paths,
         ));
@@ -1039,6 +1095,7 @@ mod tests {
                 headers: false,
                 venues: true,
                 state: false,
+                oracles: false,
             },
             &paths,
         ));
@@ -1079,6 +1136,7 @@ mod tests {
                 headers: false,
                 venues: true,
                 state: false,
+                oracles: false,
             },
             &paths,
         )
@@ -1143,8 +1201,9 @@ mod tests {
             },
             &Pipelines {
                 headers: false,
-                venues: false,
+                venues: true,
                 state: false,
+                oracles: false,
             },
             &paths,
         )

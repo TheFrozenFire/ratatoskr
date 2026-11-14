@@ -18,6 +18,8 @@ History for a bloom hit comes from an era1 file before the merge and from a peer
 
 **State pipeline** runs on identities discovery has already written. For each pool it stores configuration, quoting state, the tick book, and a price curve, then a pair conduit for each ordered pair those curves price. Each pass reads quoting state at the latest stored header. `--pin-block` holds that read at one block. The work queue leases one stage at a time. The stages are configuration, quoting state, tick book, fit, and the pair conduit. With no `--data-dir` it opens the live catalog. `--copy-from` copies a stratified identity sample into `--data-dir` first.
 
+**Oracle pipeline** is not one of those three. `--pipeline oracles` fetches the Ethereum mainnet feed directory at `https://reference-data-directory.vercel.app/feeds-mainnet.json` and writes `feeds.redb`. Decimals, description, and version are written once. A later read that disagrees is a mismatch and the stored values stay. A new chain phase appends, and that write inserts one history job for the phase. The job is not claimed. One process reads the directory and the proxy configuration, inserts the new jobs, and then waits. It does not open the venue catalog.
+
 ## Detail read
 
 The detail lens reads a batch of pools in one call. That call returns the configuration and the quoting state. Tick words are read later into the tick book.
@@ -116,15 +118,17 @@ The peer service owns `peers.redb`, the peer directory. That is `ratatoskr` with
 
 The venue catalog holds identities, configuration, quoting state, tick books, price curves, pair conduits, quote records, and watch marks. The discovery store holds list cursors, bloom hits, and era1 receipt bytes. The work queue holds leases. Deleting the work queue drops the leases. The pools remain in the venue catalog.
 
+The oracle pipeline owns `feeds.redb`. The database service does not open it. Deleting the history jobs leaves the feeds and the phases. Those writes use immediate durability.
+
 The state pipeline opens the data directory it is given. A sample catalog is a copy of identities for a trial. The live catalog is the venue catalog of the full identity set.
 
 A pool identity with no observation stays version 1. An observation appends the block hash, transaction index, and log index and uses version 2. An identity read from a list has no observation. An identity read from a creation event carries the observation. A merge keeps a stored observation when the new identity has none.
 
 ### Flock
 
-The writer opens each database in single-writer mode. One process writes a file. Other processes may open that file read-only and follow its commits. A second writer fails with "Database already open." redb commits through two header slots. Header append, peer sightings, venue commits, hit commits, era1 receipt bytes, state writes, corpus writes, and cursor writes use immediate durability.
+The writer opens each database in single-writer mode. One process writes a file. Other processes may open that file read-only and follow its commits. A second writer fails with "Database already open." redb commits through two header slots. Header append, peer sightings, venue commits, hit commits, era1 receipt bytes, state writes, corpus writes, cursor writes, and feed writes use immediate durability.
 
-`peers.redb` stays with the dialer. A peer-only process leaves the entity files closed.
+`peers.redb` stays with the dialer. A peer-only process leaves the entity files closed. An oracles-only process leaves the entity files closed and writes `feeds.redb`.
 
 ### Sockets
 

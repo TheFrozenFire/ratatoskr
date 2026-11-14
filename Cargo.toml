@@ -18,6 +18,7 @@ members = [
     "crates/routing",
     "crates/searcher",
     "crates/optimizer",
+    "crates/oracles",
     "crates/action",
     "crates/trade",
     "crates/survey",
@@ -59,6 +60,7 @@ peer = { path = "crates/peer" }
 routing = { path = "crates/routing" }
 searcher = { path = "crates/searcher" }
 optimizer = { path = "crates/optimizer" }
+oracles = { path = "crates/oracles" }
 action = { path = "crates/action" }
 trade = { path = "crates/trade" }
 survey = { path = "crates/survey" }

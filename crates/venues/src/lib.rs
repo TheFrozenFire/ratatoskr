@@ -52,7 +52,7 @@ pub use fit_select::{logistic_outs, poke_choose, poke_formula, select_fit};
 pub use history::BloomScan;
 pub use logs::Walk;
 pub use metrics::{prometheus_text, publish_summary, status_json};
-pub use rpc::Rpc;
+pub use rpc::{default_call_rpcs, Rpc};
 pub use seeds::root_address;
 pub use state::{
     estimate, refresh_kinds, CurveRecord, ImmutablePut, ImmutableRow, MutableStored, MutableWrite,
