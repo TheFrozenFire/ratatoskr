@@ -23,9 +23,8 @@ pub(crate) static FEE_1E10: LazyLock<BigInt> = LazyLock::new(|| pow10(10));
 pub(crate) static A_MULTIPLIER: LazyLock<BigInt> = LazyLock::new(|| BigInt::from(10_000));
 pub(crate) static Q96: LazyLock<BigInt> = LazyLock::new(|| BigInt::one() << 96u32);
 pub(crate) static MIN_SQRT: LazyLock<BigInt> = LazyLock::new(|| BigInt::from(4_295_128_739u64));
-pub(crate) static MAX_SQRT: LazyLock<BigInt> = LazyLock::new(|| {
-    parse_dec("1461446703485210103287273052203988822378723970342")
-});
+pub(crate) static MAX_SQRT: LazyLock<BigInt> =
+    LazyLock::new(|| parse_dec("1461446703485210103287273052203988822378723970342"));
 pub(crate) static MAX_TICK: LazyLock<BigInt> = LazyLock::new(|| BigInt::from(887_272));
 pub(crate) static PRECISIONS: LazyLock<[BigInt; 4]> =
     LazyLock::new(|| [BigInt::one(), pow10(10), pow10(12), pow10(16)]);
@@ -55,9 +54,7 @@ pub(crate) static TICK_BITS: LazyLock<Vec<BigInt>> = LazyLock::new(|| {
         "2216e584f5fa1ea926041bedfe98",
         "48a170391f7dc42444e8fa2",
     ];
-    HEX.iter()
-        .map(|text| parse_hex(text))
-        .collect()
+    HEX.iter().map(|text| parse_hex(text)).collect()
 });
 
 static LN2: LazyLock<BigRational> = LazyLock::new(ln2_series);
@@ -323,7 +320,10 @@ fn small_u32(exp: &BigRational) -> Option<u32> {
 }
 
 fn bd_at(prec: u64) -> Context {
-    Context::new(NonZeroU64::new(prec).expect("precision"), RoundingMode::Floor)
+    Context::new(
+        NonZeroU64::new(prec).expect("precision"),
+        RoundingMode::Floor,
+    )
 }
 
 fn bd_floor(value: BigDecimal, prec: u64) -> BigDecimal {
@@ -488,7 +488,11 @@ pub(crate) fn product_out(
 }
 
 fn samples_ok(x1: &BigInt, y1: &BigInt, x2: &BigInt, y2: &BigInt) -> bool {
-    x1.is_positive() && x2 > x1 && y1.is_positive() && y2 >= y1 && hyp_D(x1, y1, x2, y2).is_positive()
+    x1.is_positive()
+        && x2 > x1
+        && y1.is_positive()
+        && y2 >= y1
+        && hyp_D(x1, y1, x2, y2).is_positive()
 }
 
 pub(crate) fn hyperbola_out(
@@ -881,7 +885,14 @@ pub(crate) fn stable_y(
     d: &BigInt,
 ) -> Option<BigInt> {
     let n_len = xp.len() as i64;
-    if i == j || i < 0 || j < 0 || i >= n_len || j >= n_len || !amp.is_positive() || !d.is_positive() || !x.is_positive()
+    if i == j
+        || i < 0
+        || j < 0
+        || i >= n_len
+        || j >= n_len
+        || !amp.is_positive()
+        || !d.is_positive()
+        || !x.is_positive()
     {
         return None;
     }
@@ -893,7 +904,11 @@ pub(crate) fn stable_y(
         if k as i64 == j {
             continue;
         }
-        let x_k = if k as i64 == i { x.clone() } else { balance.clone() };
+        let x_k = if k as i64 == i {
+            x.clone()
+        } else {
+            balance.clone()
+        };
         if !x_k.is_positive() {
             return None;
         }
@@ -974,7 +989,10 @@ pub(crate) fn stable_swap_out(
         let mut used = fee.clone();
         if offpeg > fee_denom {
             used = dynamic_fee(
-                &floor_div(&(&xp[i as usize] + &xp[i as usize] + &paid), &BigInt::from(2)),
+                &floor_div(
+                    &(&xp[i as usize] + &xp[i as usize] + &paid),
+                    &BigInt::from(2),
+                ),
                 &floor_div(&(&xp[j as usize] + &y), &BigInt::from(2)),
                 &fee,
                 &offpeg,
@@ -1006,7 +1024,11 @@ pub(crate) fn crypto_y2(
     d: &BigInt,
     i: i64,
 ) -> Option<BigInt> {
-    if !ann.is_positive() || !gamma.is_positive() || !d.is_positive() || (i != 0 && i != 1) || x.len() < 2
+    if !ann.is_positive()
+        || !gamma.is_positive()
+        || !d.is_positive()
+        || (i != 0 && i != 1)
+        || x.len() < 2
     {
         return None;
     }
@@ -1048,8 +1070,7 @@ pub(crate) fn crypto_y2(
         if !fprime.is_positive() {
             return None;
         }
-        let y_minus =
-            floor_div(&mul1, &fprime) + floor_div(&(&*WAD * (x_j + &y)), &fprime);
+        let y_minus = floor_div(&mul1, &fprime) + floor_div(&(&*WAD * (x_j + &y)), &fprime);
         let y_plus = floor_div(&(&yfprime + &*WAD * d), &fprime)
             + floor_div(&(floor_div(&mul1, &fprime) * &*WAD), &k0);
         y = if y_plus < y_minus {
@@ -1138,7 +1159,10 @@ fn flat_fee(xp: &[BigInt], mid_fee: &BigInt, out_fee: &BigInt, fee_gamma: &BigIn
         return mid_fee.clone();
     }
     let reduction = floor_div(&(fee_gamma * &k), &den);
-    floor_div(&(mid_fee * &reduction + out_fee * (&*WAD - &reduction)), &*WAD)
+    floor_div(
+        &(mid_fee * &reduction + out_fee * (&*WAD - &reduction)),
+        &*WAD,
+    )
 }
 
 fn crypto_fee2(xp: &[BigInt], mid_fee: &BigInt, out_fee: &BigInt, fee_gamma: &BigInt) -> BigInt {
@@ -1153,7 +1177,10 @@ fn crypto_fee2(xp: &[BigInt], mid_fee: &BigInt, out_fee: &BigInt, fee_gamma: &Bi
         return mid_fee.clone();
     }
     let reduction = floor_div(&(fee_gamma * &*WAD), &den);
-    floor_div(&(mid_fee * &reduction + out_fee * (&*WAD - &reduction)), &*WAD)
+    floor_div(
+        &(mid_fee * &reduction + out_fee * (&*WAD - &reduction)),
+        &*WAD,
+    )
 }
 
 fn scaled_pair(
@@ -1221,13 +1248,27 @@ pub(crate) fn flat_pair_out(
     fee_gamma: &BigInt,
     flat_fee_on: bool,
 ) -> Option<BigInt> {
-    if !scale.is_positive() || dx.is_negative() || (i != 0 && i != 1) || (j != 0 && j != 1) || i == j
+    if !scale.is_positive()
+        || dx.is_negative()
+        || (i != 0 && i != 1)
+        || (j != 0 && j != 1)
+        || i == j
     {
         return None;
     }
     let xp = scaled_pair(balances, precs, scale, i, dx)?;
     let y = flat_y(amp, &xp, d, j)?;
-    finish_pair(xp, y, j, scale, precs, mid_fee, out_fee, fee_gamma, flat_fee_on)
+    finish_pair(
+        xp,
+        y,
+        j,
+        scale,
+        precs,
+        mid_fee,
+        out_fee,
+        fee_gamma,
+        flat_fee_on,
+    )
 }
 
 pub(crate) fn crypto2_out(
@@ -1244,7 +1285,11 @@ pub(crate) fn crypto2_out(
     out_fee: &BigInt,
     fee_gamma: &BigInt,
 ) -> Option<BigInt> {
-    if !scale.is_positive() || dx.is_negative() || (i != 0 && i != 1) || (j != 0 && j != 1) || i == j
+    if !scale.is_positive()
+        || dx.is_negative()
+        || (i != 0 && i != 1)
+        || (j != 0 && j != 1)
+        || i == j
     {
         return None;
     }
@@ -1260,7 +1305,11 @@ pub(crate) fn crypto_y3(
     d: &BigInt,
     i: i64,
 ) -> Option<BigInt> {
-    if !ann.is_positive() || !gamma.is_positive() || !d.is_positive() || !(0..=2).contains(&i) || x.len() != 3
+    if !ann.is_positive()
+        || !gamma.is_positive()
+        || !d.is_positive()
+        || !(0..=2).contains(&i)
+        || x.len() != 3
     {
         return None;
     }
@@ -1322,8 +1371,8 @@ pub(crate) fn crypto_y3(
             return None;
         }
         let mut y_minus = floor_div(&mul1, &fprime);
-        let y_plus = floor_div(&(&yfprime + &*WAD * d), &fprime)
-            + floor_div(&(&y_minus * &*WAD), &k0);
+        let y_plus =
+            floor_div(&(&yfprime + &*WAD * d), &fprime) + floor_div(&(&y_minus * &*WAD), &k0);
         y_minus += floor_div(&(&*WAD * (&s_i + &y)), &fprime);
         y = if y_plus < y_minus {
             floor_div(&previous, &BigInt::from(2))
@@ -1477,7 +1526,12 @@ fn ordered_prices(left: &BigInt, right: &BigInt) -> (BigInt, BigInt) {
     }
 }
 
-fn amount0_delta(sqrt_a: &BigInt, sqrt_b: &BigInt, liquidity: &BigInt, round_up: bool) -> Option<BigInt> {
+fn amount0_delta(
+    sqrt_a: &BigInt,
+    sqrt_b: &BigInt,
+    liquidity: &BigInt,
+    round_up: bool,
+) -> Option<BigInt> {
     let (lo, hi) = ordered_prices(sqrt_a, sqrt_b);
     if !lo.is_positive() {
         return None;
@@ -1488,10 +1542,18 @@ fn amount0_delta(sqrt_a: &BigInt, sqrt_b: &BigInt, liquidity: &BigInt, round_up:
         let inner = mul_div_up(&numerator1, &numerator2, &hi)?;
         return div_up(&inner, &lo);
     }
-    Some(floor_div(&floor_div(&(&numerator1 * &numerator2), &hi), &lo))
+    Some(floor_div(
+        &floor_div(&(&numerator1 * &numerator2), &hi),
+        &lo,
+    ))
 }
 
-fn amount1_delta(sqrt_a: &BigInt, sqrt_b: &BigInt, liquidity: &BigInt, round_up: bool) -> Option<BigInt> {
+fn amount1_delta(
+    sqrt_a: &BigInt,
+    sqrt_b: &BigInt,
+    liquidity: &BigInt,
+    round_up: bool,
+) -> Option<BigInt> {
     let (lo, hi) = ordered_prices(sqrt_a, sqrt_b);
     let diff = &hi - &lo;
     if round_up {
@@ -1570,7 +1632,11 @@ fn next_initialized(
     }
 }
 
-fn tick_net(nets: &BTreeMap<BigInt, BigInt>, boundary: &BigInt, zero_for_one: bool) -> Option<BigInt> {
+fn tick_net(
+    nets: &BTreeMap<BigInt, BigInt>,
+    boundary: &BigInt,
+    zero_for_one: bool,
+) -> Option<BigInt> {
     let net = nets.get(boundary)?.clone();
     if zero_for_one {
         Some(-net)
@@ -1589,7 +1655,10 @@ pub(crate) fn concentrated_out(
     amount: &BigInt,
 ) -> Option<BigInt> {
     let million = BigInt::from(1_000_000u32);
-    if !sqrt_price.is_positive() || fee_pips.is_negative() || fee_pips > &million || amount.is_negative()
+    if !sqrt_price.is_positive()
+        || fee_pips.is_negative()
+        || fee_pips > &million
+        || amount.is_negative()
     {
         return None;
     }
@@ -1745,6 +1814,9 @@ pub(crate) fn bin_out(
     if !reference_x64.is_positive() || amount.is_negative() {
         return None;
     }
+    if scale_out.is_positive() && !scaled_out.is_positive() {
+        return Some(BigInt::zero());
+    }
     let million = BigInt::from(1_000_000u32);
     let lower = if distance_e6 >= &BigInt::zero() {
         floor_div(&(reference_x64 * (&million + distance_e6)), &million)
@@ -1808,7 +1880,9 @@ pub(crate) fn worst_bps(
         if gap <= *DUST {
             continue;
         }
-        let score = floor_div(&(&gap * 10_000), label).to_i64().unwrap_or(i64::MAX);
+        let score = floor_div(&(&gap * 10_000), label)
+            .to_i64()
+            .unwrap_or(i64::MAX);
         best = Some(match best {
             Some(so_far) => so_far.max(score),
             None => score,
@@ -1836,7 +1910,13 @@ mod tests {
     #[test]
     fn self_check_and_inverses() {
         assert_eq!(
-            product_out(&ib(1_000), &ib(1_000), &ib(1_000), &ib(3_000), &ib(1_000_000)),
+            product_out(
+                &ib(1_000),
+                &ib(1_000),
+                &ib(1_000),
+                &ib(3_000),
+                &ib(1_000_000)
+            ),
             Some(ib(499))
         );
         assert_eq!(sqrt_at_tick(&BigInt::zero()), Some(Q96.clone()));
@@ -1849,7 +1929,10 @@ mod tests {
             hyperbola_out(&ib(2), &ib(3), &ib(6), &ib(6), &ib(3)),
             Some(ib(4))
         );
-        assert_eq!(hyperbola_in(&ib(2), &ib(3), &ib(6), &ib(6), &ib(4)), Some(ib(3)));
+        assert_eq!(
+            hyperbola_in(&ib(2), &ib(3), &ib(6), &ib(6), &ib(4)),
+            Some(ib(3))
+        );
         let knots = [pair(100, 1100), pair(400, 1400)];
         let line = chord_quote(&knots).expect("line");
         assert_eq!(line(ib(200)), Some(ib(1200)));
@@ -1857,7 +1940,8 @@ mod tests {
         assert_eq!(line(ib(400)), Some(ib(1400)));
         let backward = chord_in(&knots).expect("chord in");
         assert_eq!(backward(ib(1200)), Some(ib(200)));
-        let curve = cubic_quote(&[pair(100, 1100), pair(400, 1400), pair(800, 1500)]).expect("curve");
+        let curve =
+            cubic_quote(&[pair(100, 1100), pair(400, 1400), pair(800, 1500)]).expect("curve");
         assert_eq!(curve(ib(100)), Some(ib(1100)));
         assert_eq!(curve(ib(400)), Some(ib(1400)));
         assert_eq!(curve(ib(800)), Some(ib(1500)));
@@ -1875,8 +1959,16 @@ mod tests {
         let gamma = s("145000000000000");
         let d_crypto = s("863257940499748221795");
         let balances = [s("535404253762953867722"), s("17320665696279630959")];
-        let scale = crypto_scale(&ann, &gamma, &d_crypto, &balances[0], &balances[1], &ib(1), &ib(1))
-            .expect("scale");
+        let scale = crypto_scale(
+            &ann,
+            &gamma,
+            &d_crypto,
+            &balances[0],
+            &balances[1],
+            &ib(1),
+            &ib(1),
+        )
+        .expect("scale");
         let pred = crypto2_out(
             &balances,
             &[ib(1), ib(1)],
@@ -1903,8 +1995,14 @@ mod tests {
             ),
             Some(s("471798109549896825012548"))
         );
-        assert_eq!(dynamic_fee(&ib(1), &ib(1), &ib(10), &ib(500), &ib(100)), ib(10));
-        assert_eq!(dynamic_fee(&ib(1), &ib(100), &ib(10), &ib(500), &ib(100)), ib(43));
+        assert_eq!(
+            dynamic_fee(&ib(1), &ib(1), &ib(10), &ib(500), &ib(100)),
+            ib(10)
+        );
+        assert_eq!(
+            dynamic_fee(&ib(1), &ib(100), &ib(10), &ib(500), &ib(100)),
+            ib(43)
+        );
         // weighted_out(1000, 1000, 2, 1, 100, 0)
         assert_eq!(
             weighted_out(&ib(1000), &ib(1000), &ib(2), &ib(1), &ib(100), &ib(0)),
@@ -1912,10 +2010,47 @@ mod tests {
         );
         // weighted_out(10**18, 2*10**18, 3, 2, 10**17, 0)
         assert_eq!(
-            weighted_out(&pow10(18), &(ib(2) * pow10(18)), &ib(3), &ib(2), &pow10(17), &ib(0)),
+            weighted_out(
+                &pow10(18),
+                &(ib(2) * pow10(18)),
+                &ib(3),
+                &ib(2),
+                &pow10(17),
+                &ib(0)
+            ),
             Some(s("266431655917104881"))
         );
     }
+
+    #[test]
+    fn tricrypto_get_dy_matches_chain() {
+        let balances = vec![
+            s("7949965799"),
+            s("4113599969321168658"),
+            s("848042467675018410911"),
+        ];
+        let precs = vec![pow10(12), ib(1), ib(1)];
+        let scales = vec![s("1928615248180488065580"), s("9373305418011774631")];
+        let gamma = s("1300000000000");
+        let d = s("23832478032965456732327");
+        let dx = s("1000000000000000");
+        let mid = s("2999999");
+        let out_fee = s("80000000");
+        let fee_gamma = s("350000000000000");
+        let got = crypto3_out(
+            &balances,
+            &precs,
+            &scales,
+            &s("2700000"),
+            &gamma,
+            &d,
+            1,
+            0,
+            &dx,
+            &mid,
+            &out_fee,
+            &fee_gamma,
+        );
+        assert_eq!(got, Some(s("1928233")));
+    }
 }
-
-

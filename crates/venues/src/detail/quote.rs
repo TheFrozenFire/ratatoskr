@@ -1,6 +1,8 @@
 //! Local quote of one ingested pool snapshot.
 
 use super::*;
+use crate::fit_math::{crypto2_out, crypto3_out};
+use num_bigint::{BigInt, Sign};
 
 pub(super) fn quote_product(
     pool: &ConstantProduct,
@@ -401,33 +403,108 @@ pub(super) fn quote_balancer(
     }
     let fee = pool.fee.ok_or_else(|| "fee unread".to_string())?;
     let one = e18();
-    if pool.flags & FLAG_STABLE != 0 {
+    let raw_in = amount_in;
+    let (balances, amount_in, out_scale, out_rate, in_scale, in_rate) =
+        balancer_space(pool, input, output, amount_in)?;
+    let mut quote = if pool.flags & FLAG_STABLE != 0 {
         if pool.amp_precision.is_zero() {
             return Err("amp".into());
         }
         let amp = pool.amp / pool.amp_precision;
-        return stable_out(&pool.balances, amp, input, output, amount_in, fee, one);
-    }
-    if pool.weights.len() != pool.tokens.len() {
+        stable_out(&balances, amp, input, output, amount_in, fee, one)?
+    } else if pool.weights.len() != pool.tokens.len() {
         return Err("weights".into());
-    }
-    if pool.weights[input] == pool.weights[output] && !pool.weights[input].is_zero() {
-        return constant_product_out(
-            pool.balances[input],
-            pool.balances[output],
+    } else if pool.weights[input] == pool.weights[output] && !pool.weights[input].is_zero() {
+        constant_product_out(balances[input], balances[output], amount_in, fee, one)?
+    } else {
+        weighted_out(
+            balances[input],
+            balances[output],
+            pool.weights[input],
+            pool.weights[output],
             amount_in,
             fee,
-            one,
-        );
+        )?
+    };
+    if pool.kind == BALANCER_V3 {
+        quote.amount_out = unscale(quote.amount_out, out_scale, out_rate)?;
+        quote.fee_paid = unscale(quote.fee_paid, in_scale, in_rate)?;
     }
-    weighted_out(
-        pool.balances[input],
-        pool.balances[output],
-        pool.weights[input],
-        pool.weights[output],
-        amount_in,
-        fee,
+    quote.amount_in = raw_in;
+    Ok(quote)
+}
+
+/// Invariant balances, scaled input, then the output scale, output rate, input scale, and input rate.
+type BalancerSpace = (Vec<U256>, U256, U256, U256, U256, U256);
+
+/// `getCurrentLiveBalances` is already `raw * scaling * rate / 1e18`.
+/// The input is brought into that space and the output is scaled back to raw.
+/// Multiplying the live balance by the rate again inflates the invariant.
+fn balancer_space(
+    pool: &BalancerPool,
+    input: usize,
+    output: usize,
+    amount_in: U256,
+) -> Result<BalancerSpace, String> {
+    if pool.kind != BALANCER_V3 {
+        return Ok((
+            pool.balances.clone(),
+            amount_in,
+            U256::from(1u8),
+            e18(),
+            U256::from(1u8),
+            e18(),
+        ));
+    }
+    let n = pool.tokens.len();
+    if pool.scaling.len() != n {
+        return Err("scaling".into());
+    }
+    if !pool.rates.is_empty() && pool.rates.len() != n {
+        return Err("rate".into());
+    }
+    if pool.scaling.iter().any(|scale| scale.is_zero()) {
+        return Err("scaling".into());
+    }
+    let rate_in = token_rate(pool, input);
+    let scaled = mul_div(amount_in, pool.scaling[input], U256::from(1u8))?;
+    let scaled = mul_div(scaled, rate_in, e18())?;
+    Ok((
+        pool.balances.clone(),
+        scaled,
+        pool.scaling[output],
+        token_rate(pool, output),
+        pool.scaling[input],
+        rate_in,
+    ))
+}
+
+/// Live v3 balance back to raw token units. Other kinds already store raw balances.
+pub(crate) fn v3_raw_balance(pool: &BalancerPool, index: usize) -> Result<U256, String> {
+    if pool.kind != BALANCER_V3 || pool.scaling.len() != pool.tokens.len() {
+        return Ok(pool.balances[index]);
+    }
+    unscale(
+        pool.balances[index],
+        pool.scaling[index],
+        token_rate(pool, index),
     )
+}
+
+fn token_rate(pool: &BalancerPool, index: usize) -> U256 {
+    if pool.rates.len() == pool.tokens.len() && !pool.rates[index].is_zero() {
+        pool.rates[index]
+    } else {
+        e18()
+    }
+}
+
+fn unscale(amount: U256, scaling: U256, rate: U256) -> Result<U256, String> {
+    let rate = if rate.is_zero() { e18() } else { rate };
+    let den = scaling
+        .checked_mul(rate)
+        .ok_or_else(|| "scale".to_string())?;
+    mul_div(amount, e18(), den)
 }
 
 pub(super) fn weighted_out(
@@ -510,30 +587,93 @@ pub(super) fn quote_crypto(
     output: usize,
     amount_in: U256,
 ) -> Result<Quote, String> {
-    let fee = if pool.mid_fee.is_zero() {
-        pool.fee.ok_or_else(|| "fee unread".to_string())?
-    } else {
-        pool.mid_fee
-    };
-    let denom = U256::from(10_000_000_000u64);
-    if fee > denom {
-        return Err("fee".into());
+    let n = pool.coins.len();
+    if n != 2 && n != 3 {
+        return Err("coins".into());
     }
-    let after = mul_div(amount_in, denom - fee, denom)?;
-    let scale = pool.coins[output].price_scale;
-    let amount_out = if input == 0 && !scale.is_zero() {
-        mul_div(after, e18(), scale)?
-    } else if output == 0 && !pool.coins[input].price_scale.is_zero() {
-        mul_div(after, pool.coins[input].price_scale, e18())?
+    let amp_limit = U256::from(1_000_000_000_000u64);
+    if pool.amp.is_zero() || pool.amp > amp_limit {
+        return Err("amp".into());
+    }
+    if pool.coins.iter().any(|coin| coin.precision.is_zero()) {
+        return Err("precision".into());
+    }
+    let balances = pool
+        .coins
+        .iter()
+        .map(|coin| bigint_from_u256(coin.balance))
+        .collect::<Vec<_>>();
+    let precs = pool
+        .coins
+        .iter()
+        .map(|coin| bigint_from_u256(coin.precision))
+        .collect::<Vec<_>>();
+    let dx = bigint_from_u256(amount_in);
+    let amp = bigint_from_u256(pool.amp);
+    let gamma = bigint_from_u256(pool.gamma);
+    let d = bigint_from_u256(pool.d);
+    let mid = bigint_from_u256(pool.mid_fee);
+    let out_fee = bigint_from_u256(pool.out_fee);
+    let fee_gamma = bigint_from_u256(pool.fee_gamma);
+    let amount = if n == 3 {
+        let scales = vec![
+            bigint_from_u256(pool.coins[0].price_scale),
+            bigint_from_u256(pool.coins[1].price_scale),
+        ];
+        crypto3_out(
+            &balances,
+            &precs,
+            &scales,
+            &amp,
+            &gamma,
+            &d,
+            input as i64,
+            output as i64,
+            &dx,
+            &mid,
+            &out_fee,
+            &fee_gamma,
+        )
     } else {
-        return Err("price scale".into());
+        crypto2_out(
+            &balances,
+            &precs,
+            &bigint_from_u256(pool.coins[0].price_scale),
+            &amp,
+            &gamma,
+            &d,
+            input as i64,
+            output as i64,
+            &dx,
+            &mid,
+            &out_fee,
+            &fee_gamma,
+        )
     };
+    let amount_out = amount.ok_or_else(|| "quote".to_string())?;
     Ok(Quote {
         amount_in,
-        amount_out,
-        fee_paid: amount_in - after,
+        amount_out: u256_from_bigint(&amount_out)?,
+        fee_paid: U256::ZERO,
         exhausted: false,
     })
+}
+
+fn bigint_from_u256(value: U256) -> BigInt {
+    BigInt::from_bytes_be(Sign::Plus, &value.to_be_bytes::<32>())
+}
+
+fn u256_from_bigint(value: &BigInt) -> Result<U256, String> {
+    if value.sign() == Sign::Minus {
+        return Err("quote".into());
+    }
+    let bytes = value.to_bytes_be().1;
+    if bytes.len() > 32 {
+        return Err("quote".into());
+    }
+    let mut wide = [0u8; 32];
+    wide[32 - bytes.len()..].copy_from_slice(&bytes);
+    Ok(U256::from_be_bytes(wide))
 }
 
 pub(super) fn stable_out(
@@ -694,23 +834,41 @@ pub(super) fn quote_metric(
     } else {
         return Err("token".into());
     };
-    let (scale_out, scaled_out) = if selling_token0 {
-        (pool.scale1, bin.map(|bin| bin.token1_scaled).unwrap_or(0))
+    let (scale_out, scaled_out, scale_in) = if selling_token0 {
+        (
+            pool.scale1,
+            bin.map(|bin| bin.token1_scaled).unwrap_or(0),
+            pool.scale0,
+        )
     } else {
-        (pool.scale0, bin.map(|bin| bin.token0_scaled).unwrap_or(0))
+        (
+            pool.scale0,
+            bin.map(|bin| bin.token0_scaled).unwrap_or(0),
+            pool.scale1,
+        )
     };
-    let amount_out = if selling_token0 {
+    if scale_in.is_zero() || scale_out.is_zero() {
+        return Err("scale".into());
+    }
+    // An empty bin has no inventory. A zero scaled balance pays nothing.
+    if scaled_out == 0 {
+        return Ok(Quote {
+            amount_in,
+            amount_out: U256::ZERO,
+            fee_paid: U256::ZERO,
+            exhausted: true,
+        });
+    }
+    // `price` is whole token1 per whole token0. `scale` is `10^(D - decimals)`.
+    let unscaled = if selling_token0 {
         mul_div(amount_in, price, U256::from(1u8) << 64)?
     } else if price.is_zero() {
         return Err("price".into());
     } else {
         mul_div(amount_in, U256::from(1u8) << 64, price)?
     };
-    let raw_available = if scale_out.is_zero() || scaled_out == 0 {
-        None
-    } else {
-        Some(U256::from(scaled_out) / scale_out)
-    };
+    let amount_out = mul_div(unscaled, scale_in, scale_out)?;
+    let raw_available = Some(U256::from(scaled_out) / scale_out);
     if let Some(available) = raw_available {
         if amount_out > available {
             return Ok(Quote {

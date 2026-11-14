@@ -14,6 +14,7 @@ bytecode_hash = "ipfs"
 cbor_metadata = true
 deny = "warnings"
 auto_detect_remappings = true
+fs_permissions = [{ access = "read", path = "contracts/lens/QuoteLens.bin" }]
 
 [fmt]
 line_length = 120

@@ -23,7 +23,7 @@ use std::sync::OnceLock;
 mod quote;
 
 use self::quote::*;
-pub(crate) use self::quote::{concentrated_ladder, product_fee_pips};
+pub(crate) use self::quote::{concentrated_ladder, product_fee_pips, v3_raw_balance};
 
 const MAGIC: [u8; 32] = [
     0x9a, 0x7a, 0xd5, 0x55, 0x5f, 0xe5, 0x50, 0xf2, 0x7c, 0x28, 0x58, 0x1e, 0x7e, 0xf0, 0xa5, 0x54,
@@ -163,6 +163,10 @@ pub struct BalancerPool {
     pub tokens: Vec<Address>,
     pub balances: Vec<U256>,
     pub weights: Vec<U256>,
+    /// Decimal scaling `10^(18-decimals)` from Balancer v3 `getPoolTokenRates`. Empty on v2 and on old rows.
+    pub scaling: Vec<U256>,
+    /// Token rates beside `scaling`. An empty or zero rate is `1e18` at quote time.
+    pub rates: Vec<U256>,
     pub flags: u64,
 }
 
@@ -172,6 +176,8 @@ pub struct CurveCoin {
     pub balance: U256,
     pub rate: U256,
     pub price_scale: U256,
+    /// `10^(18-decimals)`. Zero on rows read before the coin precision was stored.
+    pub precision: U256,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -660,7 +666,8 @@ fn balancer(kind: u8, id: B256, flags: u64, body: &[U256]) -> Result<BalancerPoo
     }
     let n = fit_u64(body[1]).ok_or_else(|| "balancer n".to_string())? as usize;
     let weights = fit_u64(body[4]).ok_or_else(|| "balancer weights".to_string())? as usize;
-    if n > 8 || weights > 8 || body.len() != 5 + n * 2 + weights {
+    let base = 5 + n * 2 + weights;
+    if n > 8 || weights > 8 || (body.len() != base && body.len() != base + n * 2) {
         return Err("balancer body".into());
     }
     let mut tokens = Vec::with_capacity(n);
@@ -669,6 +676,12 @@ fn balancer(kind: u8, id: B256, flags: u64, body: &[U256]) -> Result<BalancerPoo
         tokens.push(address_of_word(body[5 + index * 2]));
         balances.push(body[6 + index * 2]);
     }
+    let (scaling, rates) = if body.len() == base {
+        (Vec::new(), Vec::new())
+    } else {
+        let at = base;
+        (body[at..at + n].to_vec(), body[at + n..at + n * 2].to_vec())
+    };
     Ok(BalancerPool {
         kind,
         id,
@@ -679,7 +692,9 @@ fn balancer(kind: u8, id: B256, flags: u64, body: &[U256]) -> Result<BalancerPoo
         amp_precision: body[3],
         tokens,
         balances,
-        weights: body[5 + n * 2..].to_vec(),
+        weights: body[5 + n * 2..5 + n * 2 + weights].to_vec(),
+        scaling,
+        rates,
         flags,
     })
 }
@@ -689,7 +704,8 @@ fn curve(kind: u8, id: B256, flags: u64, body: &[U256]) -> Result<CurvePool, Str
         return Err("curve body".into());
     }
     let n = fit_u64(body[0]).ok_or_else(|| "curve n".to_string())? as usize;
-    if n > 8 || body.len() != 9 + n * 4 {
+    let base = 9 + n * 4;
+    if n > 8 || (body.len() != base && body.len() != base + n) {
         return Err("curve body".into());
     }
     let mut coins = Vec::with_capacity(n);
@@ -700,6 +716,11 @@ fn curve(kind: u8, id: B256, flags: u64, body: &[U256]) -> Result<CurvePool, Str
             balance: body[at + 1],
             rate: body[at + 2],
             price_scale: body[at + 3],
+            precision: if body.len() == base + n {
+                body[base + index]
+            } else {
+                U256::ZERO
+            },
         });
     }
     Ok(CurvePool {
@@ -1004,6 +1025,7 @@ fn optional_u256(word: U256) -> Option<U256> {
 mod tests {
     use super::*;
     use alloy_primitives::{address, keccak256};
+    use std::str::FromStr;
 
     fn query(kind: u8) -> DetailQuery {
         DetailQuery {
@@ -1182,6 +1204,7 @@ mod tests {
             balance: e18(),
             rate: U256::ZERO,
             price_scale: U256::ZERO,
+            precision: U256::ZERO,
         };
         let pool = CurvePool {
             kind: CURVE,
@@ -1219,12 +1242,199 @@ mod tests {
             tokens: vec![token0, token1],
             balances: vec![U256::from(1_000_000u64), U256::from(1_000_000u64)],
             weights: vec![e18() / U256::from(2u8), e18() / U256::from(2u8)],
+            scaling: Vec::new(),
+            rates: Vec::new(),
             flags: 0,
         };
         let quote = PoolDetail::Balancer(pool)
             .quote(token0, token1, U256::from(1000u64))
             .unwrap();
         assert_eq!(quote.amount_out, U256::from(999u64));
+    }
+
+    #[test]
+    fn balancer_v3_scales_live_balances_back_to_raw() {
+        let token0 = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let token1 = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        let scale0 = U256::from(1_000_000_000_000u64);
+        let mut pool = BalancerPool {
+            kind: BALANCER_V3,
+            id: B256::ZERO,
+            vault: Address::ZERO,
+            pool: Address::ZERO,
+            fee: Some(U256::ZERO),
+            amp: U256::ZERO,
+            amp_precision: U256::ZERO,
+            tokens: vec![token0, token1],
+            balances: vec![scale0 * U256::from(1_000_000u64), U256::from(1_000_000u64)],
+            weights: vec![e18() / U256::from(2u8), e18() / U256::from(2u8)],
+            scaling: Vec::new(),
+            rates: Vec::new(),
+            flags: 0,
+        };
+        assert!(PoolDetail::Balancer(pool.clone())
+            .quote(token0, token1, U256::from(1000u64))
+            .is_err());
+        pool.scaling = vec![scale0, U256::from(1u8)];
+        pool.rates = vec![e18(), e18()];
+        let quote = PoolDetail::Balancer(pool)
+            .quote(token0, token1, U256::from(1000u64))
+            .unwrap();
+        assert_eq!(quote.amount_in, U256::from(1000u64));
+        assert_eq!(quote.amount_out, U256::from(999u64));
+    }
+
+    #[test]
+    fn balancer_v3_live_balance_already_includes_the_rate() {
+        let weth = address!("c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2");
+        let wbtc = address!("2260fac5e5542a773aa44fbcfedf7c193bc2c599");
+        let rate_in = e18() * U256::from(2u8);
+        let rate_out = e18() * U256::from(4u8);
+        let scale_out = U256::from(10_000_000_000u64);
+        let pool = BalancerPool {
+            kind: BALANCER_V3,
+            id: B256::ZERO,
+            vault: Address::ZERO,
+            pool: Address::ZERO,
+            fee: Some(U256::ZERO),
+            amp: U256::ZERO,
+            amp_precision: U256::ZERO,
+            tokens: vec![weth, wbtc],
+            balances: vec![
+                U256::from(1000u64) * rate_in / e18(),
+                U256::from(1000u64) * scale_out * rate_out / e18(),
+            ],
+            weights: vec![e18() / U256::from(2u8), e18() / U256::from(2u8)],
+            scaling: vec![U256::from(1u8), scale_out],
+            rates: vec![rate_in, rate_out],
+            flags: 0,
+        };
+        let quote = PoolDetail::Balancer(pool)
+            .quote(weth, wbtc, U256::from(1000u64))
+            .unwrap();
+        assert_eq!(quote.amount_out, U256::from(500u64));
+    }
+
+    #[test]
+    fn balancer_v3_dust_stable_pays_at_most_the_raw_balance() {
+        let wbtc = address!("2260fac5e5542a773aa44fbcfedf7c193bc2c599");
+        let usdc = address!("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
+        let weth = address!("c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2");
+        let scale_btc = U256::from(10_000_000_000u64);
+        let scale_usdc = U256::from(1_000_000_000_000u64);
+        let rate_btc = U256::from_str("67295400000000000000000").unwrap();
+        let rate_eth = U256::from_str("1904291978630000000000").unwrap();
+        let pool = BalancerPool {
+            kind: BALANCER_V3,
+            id: B256::ZERO,
+            vault: Address::ZERO,
+            pool: Address::ZERO,
+            fee: Some(U256::from(1_000_000_000_000_000u64)),
+            amp: U256::from(500_000u64),
+            amp_precision: U256::from(1_000u64),
+            tokens: vec![wbtc, usdc, weth],
+            balances: vec![
+                U256::from_str("672954000000000").unwrap(),
+                U256::from(1_000_000_000_000u64),
+                U256::from(199_950u64),
+            ],
+            weights: Vec::new(),
+            scaling: vec![scale_btc, scale_usdc, U256::from(1u8)],
+            rates: vec![rate_btc, e18(), rate_eth],
+            flags: FLAG_STABLE,
+        };
+        let quote = PoolDetail::Balancer(pool).quote(weth, wbtc, U256::from(199_950_000u64));
+        // Raw WBTC is 1 sat. A quote that still applies the rate twice pays tens of thousands.
+        // These live balances do not converge, so the direction is left unquoted.
+        match quote {
+            Ok(quote) => assert!(quote.amount_out <= U256::from(1u8)),
+            Err(err) => assert_eq!(err, "invariant"),
+        }
+    }
+
+    #[test]
+    fn balancer_v3_stable_rate_quote_stays_inside_the_raw_balance() {
+        let weth = address!("c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2");
+        let dai = address!("6b175474e89094c44da98b954eedeac495271d0f");
+        let live = U256::from(10u64).pow(U256::from(20u8));
+        let rate_eth = e18() * U256::from(2u8);
+        let pool = BalancerPool {
+            kind: BALANCER_V3,
+            id: B256::ZERO,
+            vault: Address::ZERO,
+            pool: Address::ZERO,
+            fee: Some(U256::ZERO),
+            amp: U256::from(500_000u64),
+            amp_precision: U256::from(1_000u64),
+            tokens: vec![weth, dai],
+            balances: vec![live, live],
+            weights: Vec::new(),
+            scaling: vec![U256::from(1u8), U256::from(1u8)],
+            rates: vec![rate_eth, e18()],
+            flags: FLAG_STABLE,
+        };
+        let raw_in = U256::from(10u64).pow(U256::from(18u8));
+        let quote = PoolDetail::Balancer(pool).quote(weth, dai, raw_in).unwrap();
+        assert_eq!(
+            quote.amount_out,
+            U256::from_str("1999920131050144065").unwrap()
+        );
+    }
+
+    #[test]
+    fn tricrypto_quote_matches_get_dy_and_rejects_a_false_amp() {
+        let usdc = address!("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
+        let weth = address!("c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2");
+        let other = address!("41d5d79431a913c4ae7d69a668ecdfe5ff9dfb68");
+        let mut pool = CurvePool {
+            kind: CURVE,
+            id: B256::ZERO,
+            pool: Address::ZERO,
+            amp: U256::from(2_700_000u64),
+            fee: None,
+            gamma: U256::from(1_300_000_000_000u64),
+            d: U256::from_str("23832478032965456732327").unwrap(),
+            mid_fee: U256::from(2_999_999u64),
+            out_fee: U256::from(80_000_000u64),
+            fee_gamma: U256::from(350_000_000_000_000u64),
+            coins_indexed_by_uint: true,
+            coins: vec![
+                CurveCoin {
+                    token: usdc,
+                    balance: U256::from(7_949_965_799u64),
+                    rate: U256::ZERO,
+                    price_scale: U256::from_str("1928615248180488065580").unwrap(),
+                    precision: U256::from(1_000_000_000_000u64),
+                },
+                CurveCoin {
+                    token: weth,
+                    balance: U256::from_str("4113599969321168658").unwrap(),
+                    rate: U256::ZERO,
+                    price_scale: U256::from_str("9373305418011774631").unwrap(),
+                    precision: U256::from(1u8),
+                },
+                CurveCoin {
+                    token: other,
+                    balance: U256::from_str("848042467675018410911").unwrap(),
+                    rate: U256::ZERO,
+                    price_scale: U256::ZERO,
+                    precision: U256::from(1u8),
+                },
+            ],
+            flags: FLAG_CRYPTO,
+        };
+        let dx = U256::from(1_000_000_000_000_000u64);
+        let quote = PoolDetail::Curve(pool.clone())
+            .quote(weth, usdc, dx)
+            .unwrap();
+        assert_eq!(quote.amount_out, U256::from(1_928_233u64));
+        pool.coins[0].precision = U256::ZERO;
+        assert!(PoolDetail::Curve(pool.clone())
+            .quote(weth, usdc, dx)
+            .is_err());
+        pool.coins[0].precision = U256::from(1_000_000_000_000u64);
+        pool.amp = U256::from(1_000_000_000_000u64) + U256::from(1u8);
+        assert!(PoolDetail::Curve(pool).quote(weth, usdc, dx).is_err());
     }
 
     #[test]
@@ -1252,6 +1462,26 @@ mod tests {
             .unwrap();
         assert!(quote.exhausted);
         assert_eq!(quote.amount_out, U256::from(40u8));
+    }
+
+    #[test]
+    fn metric_whole_token_price_scales_raw_output_and_an_empty_bin_pays_nothing() {
+        let mut pool = sample_metric();
+        pool.scale0 = U256::from(1u8);
+        pool.scale1 = U256::from(1_000_000_000_000u64);
+        pool.reference_x64 = U256::from(1u8) << 64;
+        pool.bins[0].token1_scaled = 1_000_000_000_000_000_000;
+        let quote = PoolDetail::Metric(pool.clone())
+            .quote(pool.token0, pool.token1, e18())
+            .unwrap();
+        assert_eq!(quote.amount_out, U256::from(1_000_000u64));
+        assert!(!quote.exhausted);
+        pool.bins[0].token1_scaled = 0;
+        let quote = PoolDetail::Metric(pool.clone())
+            .quote(pool.token0, pool.token1, e18())
+            .unwrap();
+        assert!(quote.exhausted);
+        assert_eq!(quote.amount_out, U256::ZERO);
     }
 
     fn sample_metric() -> MetricPool {

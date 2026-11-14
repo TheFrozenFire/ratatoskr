@@ -17,7 +17,8 @@ use crate::fit_formula::Formula;
 use crate::fit_math::{
     added_residual, bin_out, chord_quote, concentrated_out, crypto2_out, crypto3_out, crypto_scale,
     crypto_y3, cubic_quote, flat_pair_out, flat_scale, hyperbola_out, product_out, residual_quote,
-    stable_swap_out, weighted_out, worst_bps, Predict, A_MULTIPLIER, DUST, FEE_1E10, PRECISIONS, WAD,
+    stable_swap_out, weighted_out, worst_bps, Predict, A_MULTIPLIER, DUST, FEE_1E10, PRECISIONS,
+    WAD,
 };
 
 type Scored = (i64, Formula);
@@ -219,18 +220,8 @@ impl Formula {
                 let j_idx = *j;
                 Arc::new(move |dx: BigInt| {
                     crypto2_out(
-                        &balances,
-                        &precs,
-                        &scale,
-                        &ann,
-                        &gamma,
-                        &d,
-                        i_idx,
-                        j_idx,
-                        &dx,
-                        &mid,
-                        &out_fee,
-                        &fee_gamma,
+                        &balances, &precs, &scale, &ann, &gamma, &d, i_idx, j_idx, &dx, &mid,
+                        &out_fee, &fee_gamma,
                     )
                 })
             }
@@ -260,18 +251,8 @@ impl Formula {
                 let flat_fee = *flat_fee;
                 Arc::new(move |dx: BigInt| {
                     flat_pair_out(
-                        &balances,
-                        &precs,
-                        &scale,
-                        &amp,
-                        &d,
-                        i_idx,
-                        j_idx,
-                        &dx,
-                        &mid,
-                        &out_fee,
-                        &fee_gamma,
-                        flat_fee,
+                        &balances, &precs, &scale, &amp, &d, i_idx, j_idx, &dx, &mid, &out_fee,
+                        &fee_gamma, flat_fee,
                     )
                 })
             }
@@ -301,18 +282,8 @@ impl Formula {
                 let j_idx = *j;
                 Arc::new(move |dx: BigInt| {
                     crypto3_out(
-                        &balances,
-                        &precs,
-                        &scales,
-                        &ann,
-                        &gamma,
-                        &d,
-                        i_idx,
-                        j_idx,
-                        &dx,
-                        &mid,
-                        &out_fee,
-                        &fee_gamma,
+                        &balances, &precs, &scales, &ann, &gamma, &d, i_idx, j_idx, &dx, &mid,
+                        &out_fee, &fee_gamma,
                     )
                 })
             }
@@ -344,7 +315,11 @@ impl Formula {
                 let fee_on_input = *fee_on_input;
                 Arc::new(move |dx: BigInt| {
                     if fee_on_input {
-                        let paid = if which == i { fd(&(&dx * &ppm), &bi(10_000)) } else { dx };
+                        let paid = if which == i {
+                            fd(&(&dx * &ppm), &bi(10_000))
+                        } else {
+                            dx
+                        };
                         let mut dy = stable_swap_out(
                             &xp,
                             amp.clone(),
@@ -361,7 +336,11 @@ impl Formula {
                         }
                         return Some(dy);
                     }
-                    let mut paid = if rates[i].is_zero() { dx } else { fd(&(&dx * &rates[i]), &wad()) };
+                    let mut paid = if rates[i].is_zero() {
+                        dx
+                    } else {
+                        fd(&(&dx * &rates[i]), &wad())
+                    };
                     if which == i {
                         paid = fd(&(&paid * &ppm), &bi(10_000));
                     }
@@ -386,7 +365,15 @@ impl Formula {
                     }
                 })
             }
-            Self::StableOutput { xp, amp, i, j, fee, rates, ppm } => {
+            Self::StableOutput {
+                xp,
+                amp,
+                i,
+                j,
+                fee,
+                rates,
+                ppm,
+            } => {
                 let xp = xp.clone();
                 let amp = amp.clone();
                 let fee = fee.clone();
@@ -403,7 +390,15 @@ impl Formula {
                     Some(fd(&(&dy * &ppm), &bi(10_000)))
                 })
             }
-            Self::StablePpms { xp, amp, i, j, fee, rates, ppms } => {
+            Self::StablePpms {
+                xp,
+                amp,
+                i,
+                j,
+                fee,
+                rates,
+                ppms,
+            } => {
                 let xp = xp.clone();
                 let amp = amp.clone();
                 let fee = fee.clone();
@@ -416,7 +411,11 @@ impl Formula {
                     return Arc::new(|_| None);
                 };
                 Arc::new(move |dx: BigInt| {
-                    let mut paid = if rates[i].is_zero() { dx } else { fd(&(&dx * &rates[i]), &wad()) };
+                    let mut paid = if rates[i].is_zero() {
+                        dx
+                    } else {
+                        fd(&(&dx * &rates[i]), &wad())
+                    };
                     paid = fd(&(&paid * &ppms[i]), &bi(10_000));
                     let dy = stable_swap_out(
                         &xp,
@@ -469,7 +468,10 @@ impl Formula {
                     let paid = if rate_i.is_zero() {
                         fd(&(&dx * &prec_i * &ppm_i), &bi(10_000))
                     } else {
-                        fd(&(fd(&(&dx * &rate_i), &wad()) * &prec_i * &ppm_i), &bi(10_000))
+                        fd(
+                            &(fd(&(&dx * &rate_i), &wad()) * &prec_i * &ppm_i),
+                            &bi(10_000),
+                        )
                     };
                     let dy = stable_swap_out(
                         &xp,
@@ -491,12 +493,19 @@ impl Formula {
                     }
                 })
             }
-            Self::Product { reserve_in, reserve_out, fee, denom } => {
+            Self::Product {
+                reserve_in,
+                reserve_out,
+                fee,
+                denom,
+            } => {
                 let reserve_in = reserve_in.clone();
                 let reserve_out = reserve_out.clone();
                 let fee = fee.clone();
                 let denom = denom.clone();
-                Arc::new(move |dx: BigInt| product_out(&reserve_in, &reserve_out, &dx, &fee, &denom))
+                Arc::new(move |dx: BigInt| {
+                    product_out(&reserve_in, &reserve_out, &dx, &fee, &denom)
+                })
             }
             Self::Weighted {
                 balance_in,
@@ -511,10 +520,25 @@ impl Formula {
                 let weight_out = weight_out.clone();
                 let fee = fee.clone();
                 Arc::new(move |dx: BigInt| {
-                    weighted_out(&balance_in, &balance_out, &weight_in, &weight_out, &dx, &fee)
+                    weighted_out(
+                        &balance_in,
+                        &balance_out,
+                        &weight_in,
+                        &weight_out,
+                        &dx,
+                        &fee,
+                    )
                 })
             }
-            Self::BalancerStable { xp, amp, i, j, fee, prec_i, prec_j } => {
+            Self::BalancerStable {
+                xp,
+                amp,
+                i,
+                j,
+                fee,
+                prec_i,
+                prec_j,
+            } => {
                 let xp = xp.clone();
                 let amp = amp.clone();
                 let fee = fee.clone();
@@ -537,7 +561,14 @@ impl Formula {
                     Some(fd(&dy, &prec_j))
                 })
             }
-            Self::Ladder { sqrt_price, liquidity, tick, fee, ticks, zero_for_one } => {
+            Self::Ladder {
+                sqrt_price,
+                liquidity,
+                tick,
+                fee,
+                ticks,
+                zero_for_one,
+            } => {
                 let sqrt_price = sqrt_price.clone();
                 let liquidity = liquidity.clone();
                 let tick = tick.clone();
@@ -545,7 +576,15 @@ impl Formula {
                 let ticks = ticks.clone();
                 let zero_for_one = *zero_for_one;
                 Arc::new(move |dx: BigInt| {
-                    concentrated_out(&sqrt_price, &liquidity, &tick, &fee, &ticks, zero_for_one, &dx)
+                    concentrated_out(
+                        &sqrt_price,
+                        &liquidity,
+                        &tick,
+                        &fee,
+                        &ticks,
+                        zero_for_one,
+                        &dx,
+                    )
                 })
             }
             Self::Bins {
@@ -594,16 +633,27 @@ impl Formula {
                     Some(fd(&(&value * &ppm), &bi(10_000)))
                 })
             }
-            Self::Fillet { slope, cap, xa, xb } => fillet_quote(slope.clone(), cap.clone(), xa.clone(), xb.clone()),
+            Self::Fillet { slope, cap, xa, xb } => {
+                fillet_quote(slope.clone(), cap.clone(), xa.clone(), xb.clone())
+            }
             Self::Logistic { slope, rate, knee } => logistic_quote(slope, rate, knee),
             Self::Scaled { base, ppm } => scale_out(base.predict(), *ppm),
-            Self::Wave { base, cap, x_last, a_ppm, b_ppm } => {
-                wave_quote(base.predict(), cap, x_last, *a_ppm, *b_ppm)
-            }
+            Self::Wave {
+                base,
+                cap,
+                x_last,
+                a_ppm,
+                b_ppm,
+            } => wave_quote(base.predict(), cap, x_last, *a_ppm, *b_ppm),
             Self::Identity => Arc::new(Some),
             Self::Lookup { pairs } => {
                 let pairs = pairs.clone();
-                Arc::new(move |dx: BigInt| pairs.iter().find(|(amount, _)| amount == &dx).map(|(_, out)| out.clone()))
+                Arc::new(move |dx: BigInt| {
+                    pairs
+                        .iter()
+                        .find(|(amount, _)| amount == &dx)
+                        .map(|(_, out)| out.clone())
+                })
             }
         }
     }
@@ -719,9 +769,7 @@ pub fn labels_of(direction: &Value) -> Result<Vec<(BigInt, BigInt)>, String> {
 fn index_of(tokens: &[String], token: Option<&Value>) -> Option<usize> {
     let token = token?.as_str()?;
     let key = token.to_lowercase();
-    tokens
-        .iter()
-        .position(|item| item.to_lowercase() == key)
+    tokens.iter().position(|item| item.to_lowercase() == key)
 }
 
 fn string_tokens(coins: &[Value]) -> Option<Vec<String>> {
@@ -736,10 +784,11 @@ fn string_tokens(coins: &[Value]) -> Option<Vec<String>> {
     Some(tokens)
 }
 
-fn require_object<'a>(value: &'a Value, message: &str) -> Result<&'a serde_json::Map<String, Value>, String> {
-    value
-        .as_object()
-        .ok_or_else(|| message.to_string())
+fn require_object<'a>(
+    value: &'a Value,
+    message: &str,
+) -> Result<&'a serde_json::Map<String, Value>, String> {
+    value.as_object().ok_or_else(|| message.to_string())
 }
 
 fn coin_field(coin: &Value, key: &str) -> Result<BigInt, String> {
@@ -747,7 +796,9 @@ fn coin_field(coin: &Value, key: &str) -> Result<BigInt, String> {
     amount_or_zero(coin.get(key))
 }
 
-fn split_holdout(direction: &Value) -> Result<(Vec<(BigInt, BigInt)>, Vec<(BigInt, BigInt)>), String> {
+fn split_holdout(
+    direction: &Value,
+) -> Result<(Vec<(BigInt, BigInt)>, Vec<(BigInt, BigInt)>), String> {
     let Some(samples) = direction.get("samples") else {
         return Err("samples must be a list".to_string());
     };
@@ -816,7 +867,10 @@ fn best_over(
         return best;
     }
     for prec in precisions() {
-        if choices.iter().all(|choice| choice.iter().any(|item| item == &prec)) {
+        if choices
+            .iter()
+            .all(|choice| choice.iter().any(|item| item == &prec))
+        {
             let precs = vec![prec; n];
             take_score(&mut best, evaluate(&precs));
             if best.as_ref().is_some_and(|item| item.0 <= 10) {
@@ -1009,7 +1063,17 @@ fn stable_candidate(
     }
     let choices = choices_for(&rates);
     let flat = best_over(coins.len(), &choices, |precs| {
-        stable_quote(&balances, &rates, precs, &amp, i, j, &fee, &BigInt::zero(), rows)
+        stable_quote(
+            &balances,
+            &rates,
+            precs,
+            &amp,
+            i,
+            j,
+            &fee,
+            &BigInt::zero(),
+            rows,
+        )
     });
     if fee.is_zero() || flat.as_ref().is_some_and(|item| item.0 <= 10) {
         return Ok(flat);
@@ -1141,7 +1205,10 @@ fn stable_mixed_candidate(
 }
 
 fn fee_words(state: &Value) -> Result<(BigInt, BigInt, BigInt), String> {
-    let mid = amount_or(state.get("mid_fee"), amount_or(state.get("fee"), BigInt::zero())?)?;
+    let mid = amount_or(
+        state.get("mid_fee"),
+        amount_or(state.get("fee"), BigInt::zero())?,
+    )?;
     let out_fee = amount_or(state.get("out_fee"), mid.clone())?;
     let fee_gamma = amount_or_zero(state.get("fee_gamma"))?;
     Ok((mid, out_fee, fee_gamma))
@@ -1183,7 +1250,15 @@ fn crypto2_candidate(
     let (mid, out_fee, fee_gamma) = fee_words(state)?;
     let choices = vec![precisions(), precisions()];
     let got = best_over(2, &choices, |precs| {
-        let scale = crypto_scale(&ann, &gamma, &d, &balances[0], &balances[1], &precs[0], &precs[1])?;
+        let scale = crypto_scale(
+            &ann,
+            &gamma,
+            &d,
+            &balances[0],
+            &balances[1],
+            &precs[0],
+            &precs[1],
+        )?;
         if scale <= BigInt::zero() {
             return None;
         }
@@ -1397,11 +1472,19 @@ fn max_ann() -> BigInt {
 }
 
 fn max_bi(left: BigInt, right: BigInt) -> BigInt {
-    if left > right { left } else { right }
+    if left > right {
+        left
+    } else {
+        right
+    }
 }
 
 fn min_bi(left: BigInt, right: BigInt) -> BigInt {
-    if left < right { left } else { right }
+    if left < right {
+        left
+    } else {
+        right
+    }
 }
 
 fn ternary_points(left: &BigInt, right: &BigInt) -> (BigInt, BigInt) {
@@ -1471,10 +1554,12 @@ fn crypto3_fit_candidate(
             }
             let (first, second) = ternary_points(&left, &right);
             let (left_score, _) = crypto3_at(
-                &balances, &scales, &first, &gamma, &d, i, j, &prec, &mid, &out_fee, &fee_gamma, target,
+                &balances, &scales, &first, &gamma, &d, i, j, &prec, &mid, &out_fee, &fee_gamma,
+                target,
             );
             let (right_score, _) = crypto3_at(
-                &balances, &scales, &second, &gamma, &d, i, j, &prec, &mid, &out_fee, &fee_gamma, target,
+                &balances, &scales, &second, &gamma, &d, i, j, &prec, &mid, &out_fee, &fee_gamma,
+                target,
             );
             if left_score.is_none() && right_score.is_none() {
                 break;
@@ -1482,14 +1567,22 @@ fn crypto3_fit_candidate(
             if left_strict(left_score, right_score) {
                 right = second;
                 if let Some(left_score) = left_score {
-                    if best.as_ref().map(|item| left_score < item.0).unwrap_or(true) {
+                    if best
+                        .as_ref()
+                        .map(|item| left_score < item.0)
+                        .unwrap_or(true)
+                    {
                         best = Some((left_score, first, prec.clone()));
                     }
                 }
             } else {
                 left = first;
                 if let Some(right_score) = right_score {
-                    if best.as_ref().map(|item| right_score < item.0).unwrap_or(true) {
+                    if best
+                        .as_ref()
+                        .map(|item| right_score < item.0)
+                        .unwrap_or(true)
+                    {
                         best = Some((right_score, second, prec.clone()));
                     }
                 }
@@ -1536,7 +1629,12 @@ fn spread_of(xp: &[BigInt]) -> Option<BigInt> {
     Some(fd(&(max * &bi(1000)), min))
 }
 
-fn reserve_gap(ann: &BigInt, gamma: &BigInt, d: &BigInt, xp: &[BigInt]) -> Option<(BigInt, BigInt)> {
+fn reserve_gap(
+    ann: &BigInt,
+    gamma: &BigInt,
+    d: &BigInt,
+    xp: &[BigInt],
+) -> Option<(BigInt, BigInt)> {
     let mut total = BigInt::zero();
     let mut worst = BigInt::zero();
     for index in 0..3 {
@@ -1570,7 +1668,9 @@ fn search_consistent_ann(
         };
         let replace = match &*best {
             None => true,
-            Some((best_rel, best_total, _)) => &rel < best_rel || (&rel == best_rel && &total < best_total),
+            Some((best_rel, best_total, _)) => {
+                &rel < best_rel || (&rel == best_rel && &total < best_total)
+            }
         };
         if replace {
             *best = Some((rel, total, ann));
@@ -1595,7 +1695,9 @@ fn search_consistent_ann(
             break;
         }
         let left_better = right_rel.is_none()
-            || left_rel.as_ref().is_some_and(|left| right_rel.as_ref().is_none_or(|right| left <= right));
+            || left_rel
+                .as_ref()
+                .is_some_and(|left| right_rel.as_ref().is_none_or(|right| left <= right));
         if left_better {
             right = second;
             take(&mut best, first);
@@ -1619,7 +1721,9 @@ fn search_consistent_ann(
             break;
         }
         let left_better = right_total.is_none()
-            || left_total.as_ref().is_some_and(|left| right_total.as_ref().is_none_or(|right| left <= right));
+            || left_total
+                .as_ref()
+                .is_some_and(|left| right_total.as_ref().is_none_or(|right| left <= right));
         if left_better {
             right = second;
             take(&mut best, first);
@@ -1676,7 +1780,9 @@ fn crypto3_consistent_candidate(
         }
         let replace = match &best {
             None => true,
-            Some((best_rel, best_total, _, _)) => &rel < best_rel || (&rel == best_rel && &total < best_total),
+            Some((best_rel, best_total, _, _)) => {
+                &rel < best_rel || (&rel == best_rel && &total < best_total)
+            }
         };
         if replace {
             best = Some((rel, total, ann, precs));
@@ -1690,13 +1796,27 @@ fn crypto3_consistent_candidate(
     let precs = (precs[0].clone(), precs[1].clone(), precs[2].clone());
     if !hold.is_empty() {
         let predict = crypto3_predict(
-            &balances, &scales, &ann, &gamma, &d, i, j, precs.clone(), &mid, &out_fee, &fee_gamma,
+            &balances,
+            &scales,
+            &ann,
+            &gamma,
+            &d,
+            i,
+            j,
+            precs.clone(),
+            &mid,
+            &out_fee,
+            &fee_gamma,
         );
         if worst_bps(predict.predict().as_ref(), &hold).is_none_or(|score| score > 10) {
             return Ok(None);
         }
     }
-    let scored = if rows.is_empty() { train } else { rows.to_vec() };
+    let scored = if rows.is_empty() {
+        train
+    } else {
+        rows.to_vec()
+    };
     let predict = crypto3_predict(
         &balances, &scales, &ann, &gamma, &d, i, j, precs, &mid, &out_fee, &fee_gamma,
     );
@@ -1770,7 +1890,19 @@ fn scale_window(
 ) -> Option<(i64, usize, BigInt)> {
     let mut best: Option<(i64, usize, BigInt)> = None;
     let take = |best: &mut Option<(i64, usize, BigInt)>, which: usize, ppm: BigInt| {
-        let (score, _) = stable_scale_at(xp, amp, i, j, fee, rates, which, &ppm, target, denom, fee_on_input);
+        let (score, _) = stable_scale_at(
+            xp,
+            amp,
+            i,
+            j,
+            fee,
+            rates,
+            which,
+            &ppm,
+            target,
+            denom,
+            fee_on_input,
+        );
         let Some(score) = score else { return };
         if best.as_ref().map(|item| score < item.0).unwrap_or(true) {
             *best = Some((score, which, ppm));
@@ -1794,10 +1926,30 @@ fn scale_window(
             }
             let (first, second) = ternary_points(&left, &right);
             let (left_score, _) = stable_scale_at(
-                xp, amp, i, j, fee, rates, which, &first, target, denom, fee_on_input,
+                xp,
+                amp,
+                i,
+                j,
+                fee,
+                rates,
+                which,
+                &first,
+                target,
+                denom,
+                fee_on_input,
             );
             let (right_score, _) = stable_scale_at(
-                xp, amp, i, j, fee, rates, which, &second, target, denom, fee_on_input,
+                xp,
+                amp,
+                i,
+                j,
+                fee,
+                rates,
+                which,
+                &second,
+                target,
+                denom,
+                fee_on_input,
             );
             if left_score.is_none() && right_score.is_none() {
                 break;
@@ -1806,20 +1958,32 @@ fn scale_window(
                 (_, None) => true,
                 (None, Some(_)) => false,
                 (Some(left), Some(right)) => {
-                    if prefer_left { left <= right } else { left < right }
+                    if prefer_left {
+                        left <= right
+                    } else {
+                        left < right
+                    }
                 }
             };
             if left_better {
                 right = second;
                 if let Some(left_score) = left_score {
-                    if best.as_ref().map(|item| left_score < item.0).unwrap_or(true) {
+                    if best
+                        .as_ref()
+                        .map(|item| left_score < item.0)
+                        .unwrap_or(true)
+                    {
                         best = Some((left_score, which, first));
                     }
                 }
             } else {
                 left = first;
                 if let Some(right_score) = right_score {
-                    if best.as_ref().map(|item| right_score < item.0).unwrap_or(true) {
+                    if best
+                        .as_ref()
+                        .map(|item| right_score < item.0)
+                        .unwrap_or(true)
+                    {
                         best = Some((right_score, which, second));
                     }
                 }
@@ -1847,14 +2011,42 @@ fn finish_scale(
         return None;
     }
     if !hold.is_empty() {
-        let (hold_score, _) = stable_scale_at(xp, amp, i, j, fee, rates, which, &ppm, hold, denom, fee_on_input);
+        let (hold_score, _) = stable_scale_at(
+            xp,
+            amp,
+            i,
+            j,
+            fee,
+            rates,
+            which,
+            &ppm,
+            hold,
+            denom,
+            fee_on_input,
+        );
         if hold_score.is_none_or(|score| score > 10) {
             return None;
         }
     }
-    let (score, predict) = stable_scale_at(xp, amp, i, j, fee, rates, which, &ppm, rows, denom, fee_on_input);
+    let (score, predict) = stable_scale_at(
+        xp,
+        amp,
+        i,
+        j,
+        fee,
+        rates,
+        which,
+        &ppm,
+        rows,
+        denom,
+        fee_on_input,
+    );
     let score = score?;
-    if score > 10 { None } else { Some((score, predict)) }
+    if score > 10 {
+        None
+    } else {
+        Some((score, predict))
+    }
 }
 
 const NEAR_ANCHORS: [i64; 9] = [10000, 9800, 10200, 9600, 10400, 9400, 10600, 9000, 11000];
@@ -1875,15 +2067,67 @@ fn scale_candidate(
     let (train, hold) = split_holdout(direction)?;
     let target = train_rows(&train, rows);
     let narrow = scale_window(
-        xp, amp, i, j, fee, rates, target, &NEAR_ANCHORS, 9000, 11000, 18, 5, denom, fee_on_input, false,
+        xp,
+        amp,
+        i,
+        j,
+        fee,
+        rates,
+        target,
+        &NEAR_ANCHORS,
+        9000,
+        11000,
+        18,
+        5,
+        denom,
+        fee_on_input,
+        false,
     );
-    if let Some(accepted) = finish_scale(narrow, xp, amp, i, j, fee, rates, &hold, rows, denom, fee_on_input) {
+    if let Some(accepted) = finish_scale(
+        narrow,
+        xp,
+        amp,
+        i,
+        j,
+        fee,
+        rates,
+        &hold,
+        rows,
+        denom,
+        fee_on_input,
+    ) {
         return Ok(Some(accepted));
     }
     let wide = scale_window(
-        xp, amp, i, j, fee, rates, target, &WIDE_ANCHORS, 5000, 20000, 22, 8, denom, fee_on_input, true,
+        xp,
+        amp,
+        i,
+        j,
+        fee,
+        rates,
+        target,
+        &WIDE_ANCHORS,
+        5000,
+        20000,
+        22,
+        8,
+        denom,
+        fee_on_input,
+        true,
     );
-    Ok(finish_scale(wide, xp, amp, i, j, fee, rates, &hold, rows, denom, fee_on_input))
+    Ok(finish_scale(
+        wide,
+        xp,
+        amp,
+        i,
+        j,
+        fee,
+        rates,
+        &hold,
+        rows,
+        denom,
+        fee_on_input,
+    ))
 }
 
 fn curve_book(state: &Value) -> Result<Option<(Vec<BigInt>, BigInt, BigInt, Vec<BigInt>)>, String> {
@@ -1907,7 +2151,11 @@ fn curve_book(state: &Value) -> Result<Option<(Vec<BigInt>, BigInt, BigInt, Vec<
     }
     let mut xp = Vec::new();
     for (balance, rate) in balances.iter().zip(&rates) {
-        xp.push(if rate.is_zero() { balance.clone() } else { fd(&(balance * rate), &wad()) });
+        xp.push(if rate.is_zero() {
+            balance.clone()
+        } else {
+            fd(&(balance * rate), &wad())
+        });
     }
     Ok(Some((xp, amp, fee, rates)))
 }
@@ -1922,7 +2170,18 @@ fn stable_scale_candidate(
     let Some((xp, amp, fee, rates)) = curve_book(state)? else {
         return Ok(None);
     };
-    scale_candidate(&xp, &amp, i, j, &fee, &rates, direction, rows, &fee_denom(), false)
+    scale_candidate(
+        &xp,
+        &amp,
+        i,
+        j,
+        &fee,
+        &rates,
+        direction,
+        rows,
+        &fee_denom(),
+        false,
+    )
 }
 
 fn rate_index(len: usize, index: i64) -> Option<usize> {
@@ -1940,7 +2199,11 @@ fn stable_flat_quote(
 ) -> Option<BigInt> {
     let rate_i = rates.get(i)?;
     let rate_j = rates.get(j)?;
-    let paid = if rate_i.is_zero() { dx.clone() } else { fd(&(dx * rate_i), &wad()) };
+    let paid = if rate_i.is_zero() {
+        dx.clone()
+    } else {
+        fd(&(dx * rate_i), &wad())
+    };
     let dy = stable_swap_out(
         xp,
         amp.clone(),
@@ -2034,7 +2297,9 @@ fn stable_output_candidate(
         rates: rates.clone(),
         ppm,
     };
-    if !hold.is_empty() && worst_bps(formula.predict().as_ref(), &hold).is_none_or(|score| score > 10) {
+    if !hold.is_empty()
+        && worst_bps(formula.predict().as_ref(), &hold).is_none_or(|score| score > 10)
+    {
         return Ok(None);
     }
     match worst_bps(formula.predict().as_ref(), rows) {
@@ -2110,11 +2375,24 @@ fn refine_precs(
             let options = choices[prefix.len()].clone();
             for prec in options {
                 prefix.push(prec);
-                rec(choices, balances, rates, amp, i, j, fee, target, prefix, best);
+                rec(
+                    choices, balances, rates, amp, i, j, fee, target, prefix, best,
+                );
                 prefix.pop();
             }
         }
-        rec(choices.as_slice(), balances, rates, amp, i, j, fee, target, prefix, best);
+        rec(
+            choices.as_slice(),
+            balances,
+            rates,
+            amp,
+            i,
+            j,
+            fee,
+            target,
+            prefix,
+            best,
+        );
     };
     walk(&mut Vec::new(), &mut best);
     best
@@ -2169,7 +2447,9 @@ fn coord_search(
                     break;
                 }
                 let left_better = right_score.is_none()
-                    || left_score.as_ref().is_some_and(|left| right_score.as_ref().is_none_or(|right| left <= right));
+                    || left_score
+                        .as_ref()
+                        .is_some_and(|left| right_score.as_ref().is_none_or(|right| left <= right));
                 if left_better {
                     right = second;
                     params[idx] = first;
@@ -2177,7 +2457,10 @@ fn coord_search(
                     left = first;
                     params[idx] = second;
                 }
-                if best.as_ref().is_some_and(|hit| hit.rel == BigRational::zero()) {
+                if best
+                    .as_ref()
+                    .is_some_and(|hit| hit.rel == BigRational::zero())
+                {
                     return best;
                 }
             }
@@ -2200,7 +2483,11 @@ fn he_at(value: BigDecimal, prec: u64) -> BigDecimal {
     if value.sign() == Sign::NoSign {
         return BigDecimal::from(0);
     }
-    Context::new(NonZeroU64::new(prec).expect("precision"), RoundingMode::HalfEven).round_decimal(value)
+    Context::new(
+        NonZeroU64::new(prec).expect("precision"),
+        RoundingMode::HalfEven,
+    )
+    .round_decimal(value)
 }
 
 fn he_div_at(numer: &BigDecimal, denom: &BigDecimal, prec: u64) -> BigDecimal {
@@ -2208,7 +2495,10 @@ fn he_div_at(numer: &BigDecimal, denom: &BigDecimal, prec: u64) -> BigDecimal {
         return BigDecimal::from(0);
     }
     let guard = prec.saturating_add(8).max(16);
-    let ctx = Context::new(NonZeroU64::new(guard).expect("precision"), RoundingMode::HalfEven);
+    let ctx = Context::new(
+        NonZeroU64::new(guard).expect("precision"),
+        RoundingMode::HalfEven,
+    );
     he_at(numer * denom.inverse_with_context(&ctx), prec)
 }
 
@@ -2253,7 +2543,11 @@ fn round_div(numer: &BigInt, denom: &BigInt) -> BigInt {
     if &twice < denom {
         q
     } else if &twice > denom || !(&q % 2u32).is_zero() {
-        if numer.is_negative() { q - 1 } else { q + 1 }
+        if numer.is_negative() {
+            q - 1
+        } else {
+            q + 1
+        }
     } else {
         q
     }
@@ -2448,7 +2742,11 @@ fn softens(rows: &[(BigInt, BigInt)]) -> bool {
     arrived(rows, 6)
 }
 
-fn gated(formula: &Formula, hold: &[(BigInt, BigInt)], rows: &[(BigInt, BigInt)]) -> Option<Scored> {
+fn gated(
+    formula: &Formula,
+    hold: &[(BigInt, BigInt)],
+    rows: &[(BigInt, BigInt)],
+) -> Option<Scored> {
     let predict = formula.predict();
     if !hold.is_empty() && worst_bps(predict.as_ref(), hold).is_none_or(|score| score > 10) {
         return None;
@@ -2461,7 +2759,11 @@ fn gated(formula: &Formula, hold: &[(BigInt, BigInt)], rows: &[(BigInt, BigInt)]
     }
 }
 
-fn accept_cap(formula: Formula, hold: &[(BigInt, BigInt)], rows: &[(BigInt, BigInt)]) -> Option<Scored> {
+fn accept_cap(
+    formula: Formula,
+    hold: &[(BigInt, BigInt)],
+    rows: &[(BigInt, BigInt)],
+) -> Option<Scored> {
     let (score, formula) = gated(&formula, hold, rows)?;
     let predict = formula.predict();
     let mut previous = bi(-1);
@@ -2483,7 +2785,11 @@ fn opening(target: &[(BigInt, BigInt)]) -> Option<(BigRational, BigRational, Big
             return None;
         }
         let slope = BigRational::new(out.clone(), amount.clone());
-        if slope0.as_ref().map(|so_far| &slope > so_far).unwrap_or(true) {
+        if slope0
+            .as_ref()
+            .map(|so_far| &slope > so_far)
+            .unwrap_or(true)
+        {
             slope0 = Some(slope);
         }
         if cap_int.as_ref().map(|so_far| out > so_far).unwrap_or(true) {
@@ -2552,7 +2858,13 @@ fn logistic_quote(slope: &BigRational, rate: &BigRational, knee: &BigRational) -
     })
 }
 
-fn logistic_at(slope0: &BigRational, knee0: &BigRational, s_ppm: i64, sharp: i64, x_ppm: i64) -> Option<Formula> {
+fn logistic_at(
+    slope0: &BigRational,
+    knee0: &BigRational,
+    s_ppm: i64,
+    sharp: i64,
+    x_ppm: i64,
+) -> Option<Formula> {
     if s_ppm <= 0 || sharp <= 0 || x_ppm <= 0 || knee0 <= &BigRational::zero() {
         return None;
     }
@@ -2564,7 +2876,10 @@ fn logistic_at(slope0: &BigRational, knee0: &BigRational, s_ppm: i64, sharp: i64
 }
 
 fn scaled_formula(base: Formula, ppm: i64) -> Formula {
-    Formula::Scaled { base: Box::new(base), ppm }
+    Formula::Scaled {
+        base: Box::new(base),
+        ppm,
+    }
 }
 
 fn wave_formula(base: Formula, cap: &BigInt, x_last: &BigInt, a_ppm: i64, b_ppm: i64) -> Formula {
@@ -2590,7 +2905,11 @@ fn i64s(ppm: &[BigInt]) -> Option<Vec<i64>> {
 }
 
 fn keep_rel(best: &mut Option<(BigRational, Formula)>, rel: BigRational, formula: Formula) {
-    if best.as_ref().map(|(so_far, _)| &rel < so_far).unwrap_or(true) {
+    if best
+        .as_ref()
+        .map(|(so_far, _)| &rel < so_far)
+        .unwrap_or(true)
+    {
         *best = Some((rel, formula));
     }
 }
@@ -2600,7 +2919,10 @@ fn thirds_i(left: i64, right: i64) -> (i64, i64) {
     (left + third, right - third)
 }
 
-fn fillet_cap_candidate(direction: &Value, rows: &[(BigInt, BigInt)]) -> Result<Option<Scored>, String> {
+fn fillet_cap_candidate(
+    direction: &Value,
+    rows: &[(BigInt, BigInt)],
+) -> Result<Option<Scored>, String> {
     let (train, hold) = split_holdout(direction)?;
     let target = train_rows(&train, rows);
     if !flattens(target) {
@@ -2671,7 +2993,9 @@ fn fillet_cap_candidate(direction: &Value, rows: &[(BigInt, BigInt)]) -> Result<
                         break;
                     }
                     let left_better = right_score.is_none()
-                        || left_score.as_ref().is_some_and(|left| right_score.as_ref().is_none_or(|right| left <= right));
+                        || left_score.as_ref().is_some_and(|left| {
+                            right_score.as_ref().is_none_or(|right| left <= right)
+                        });
                     if left_better {
                         right = second;
                         params[idx] = first;
@@ -2686,7 +3010,10 @@ fn fillet_cap_candidate(direction: &Value, rows: &[(BigInt, BigInt)]) -> Result<
     Ok(best.and_then(|(_, formula)| accept_cap(formula, &hold, rows)))
 }
 
-fn logistic_cap_candidate(direction: &Value, rows: &[(BigInt, BigInt)]) -> Result<Option<Scored>, String> {
+fn logistic_cap_candidate(
+    direction: &Value,
+    rows: &[(BigInt, BigInt)],
+) -> Result<Option<Scored>, String> {
     let (train, hold) = split_holdout(direction)?;
     let target = train_rows(&train, rows);
     if !flattens(target) {
@@ -2712,7 +3039,10 @@ fn logistic_cap_candidate(direction: &Value, rows: &[(BigInt, BigInt)]) -> Resul
     Ok(best.and_then(|(_, formula)| accept_cap(formula, &hold, rows)))
 }
 
-fn logistic_refine_candidate(direction: &Value, rows: &[(BigInt, BigInt)]) -> Result<Option<Scored>, String> {
+fn logistic_refine_candidate(
+    direction: &Value,
+    rows: &[(BigInt, BigInt)],
+) -> Result<Option<Scored>, String> {
     let (train, hold) = split_holdout(direction)?;
     let target = train_rows(&train, rows);
     if !flattens(target) {
@@ -2722,7 +3052,11 @@ fn logistic_refine_candidate(direction: &Value, rows: &[(BigInt, BigInt)]) -> Re
         return Ok(None);
     };
     let mut best: Option<(BigRational, Formula)> = None;
-    let consider = |best: &mut Option<(BigRational, Formula)>, s_ppm: i64, sharp: i64, x_ppm: i64| -> Option<BigRational> {
+    let consider = |best: &mut Option<(BigRational, Formula)>,
+                    s_ppm: i64,
+                    sharp: i64,
+                    x_ppm: i64|
+     -> Option<BigRational> {
         let formula = logistic_at(&slope0, &knee0, s_ppm, sharp, x_ppm)?;
         let rel = worst_rel(&formula.predict(), target)?;
         let saved = rel.clone();
@@ -2752,7 +3086,9 @@ fn logistic_refine_candidate(direction: &Value, rows: &[(BigInt, BigInt)]) -> Re
                         break;
                     }
                     let left_better = right_score.is_none()
-                        || left_score.as_ref().is_some_and(|left| right_score.as_ref().is_none_or(|right| left <= right));
+                        || left_score.as_ref().is_some_and(|left| {
+                            right_score.as_ref().is_none_or(|right| left <= right)
+                        });
                     if left_better {
                         right = second;
                         params[idx] = first;
@@ -2896,7 +3232,10 @@ fn logistic_wave_search(
     };
     let mut ordered = target.clone();
     ordered.sort();
-    let x_last = ordered.last().map(|row| row.0.clone()).unwrap_or_else(BigInt::zero);
+    let x_last = ordered
+        .last()
+        .map(|row| row.0.clone())
+        .unwrap_or_else(BigInt::zero);
     if x_last <= BigInt::zero() || cap <= BigInt::zero() {
         return Ok(None);
     }
@@ -2942,7 +3281,10 @@ fn near_wave(direction: &Value, rows: &[(BigInt, BigInt)]) -> Result<Option<Form
     )
 }
 
-fn logistic_wave_candidate(direction: &Value, rows: &[(BigInt, BigInt)]) -> Result<Option<Scored>, String> {
+fn logistic_wave_candidate(
+    direction: &Value,
+    rows: &[(BigInt, BigInt)],
+) -> Result<Option<Scored>, String> {
     let Some(predict) = near_wave(direction, rows)? else {
         return Ok(None);
     };
@@ -2950,12 +3292,19 @@ fn logistic_wave_candidate(direction: &Value, rows: &[(BigInt, BigInt)]) -> Resu
     Ok(accept_cap(predict, &hold, rows))
 }
 
-fn logistic_wide_candidate(direction: &Value, rows: &[(BigInt, BigInt)]) -> Result<Option<Scored>, String> {
+fn logistic_wide_candidate(
+    direction: &Value,
+    rows: &[(BigInt, BigInt)],
+) -> Result<Option<Scored>, String> {
     let Some(predict) = logistic_wave_search(
         direction,
         rows,
         WaveWindow {
-            starts: &[[10000, 10000, 10000], [10000, 4000, 10000], [10000, 20000, 10000]],
+            starts: &[
+                [10000, 10000, 10000],
+                [10000, 4000, 10000],
+                [10000, 20000, 10000],
+            ],
             bounds: [(7000, 14000), (2000, 100000), (9700, 10300)],
             steps: 12,
             stop_on_zero: true,
@@ -2980,7 +3329,11 @@ fn stable_ppms_predict(
     rates: &[BigInt],
     ppms: &[BigInt],
 ) -> Formula {
-    let scaled: Vec<BigInt> = xp.iter().zip(ppms).map(|(value, ppm)| fd(&(value * ppm), &bi(10_000))).collect();
+    let scaled: Vec<BigInt> = xp
+        .iter()
+        .zip(ppms)
+        .map(|(value, ppm)| fd(&(value * ppm), &bi(10_000)))
+        .collect();
     Formula::StablePpms {
         xp: scaled,
         amp: amp.clone(),
@@ -2993,7 +3346,15 @@ fn stable_ppms_predict(
 }
 
 fn joint_amps(amp0: &BigInt) -> Vec<BigInt> {
-    let seeds = [amp0.clone(), fd(amp0, &bi(10)), amp0 * bi(10), bi(100), bi(1000), bi(10_000), bi(100_000)];
+    let seeds = [
+        amp0.clone(),
+        fd(amp0, &bi(10)),
+        amp0 * bi(10),
+        bi(100),
+        bi(1000),
+        bi(10_000),
+        bi(100_000),
+    ];
     let mut amps = Vec::new();
     for amp in seeds {
         if amp.is_positive() && !amps.contains(&amp) {
@@ -3017,7 +3378,12 @@ fn score_ppms(
     ppms: &[BigInt],
     target: &[(BigInt, BigInt)],
 ) -> Option<i64> {
-    worst_bps(stable_ppms_predict(xp, amp, i, j, fee, rates, ppms).predict().as_ref(), target)
+    worst_bps(
+        stable_ppms_predict(xp, amp, i, j, fee, rates, ppms)
+            .predict()
+            .as_ref(),
+        target,
+    )
 }
 
 struct JointFound {
@@ -3061,7 +3427,9 @@ fn refine_joint(
                     break;
                 }
                 let left_better = right_score.is_none()
-                    || left_score.is_some_and(|left_score| right_score.is_none_or(|right_score| left_score <= right_score));
+                    || left_score.is_some_and(|left_score| {
+                        right_score.is_none_or(|right_score| left_score <= right_score)
+                    });
                 if left_better {
                     right = second;
                     if let Some(score) = left_score {
@@ -3086,7 +3454,11 @@ fn refine_joint(
             };
             chosen[coin] = ppm;
             if local_score < best.score {
-                best = JointFound { score: local_score, amp: amp.clone(), ppms: chosen.clone() };
+                best = JointFound {
+                    score: local_score,
+                    amp: amp.clone(),
+                    ppms: chosen.clone(),
+                };
             }
             if stop_at_bar && best.score <= 10 {
                 return best;
@@ -3098,7 +3470,11 @@ fn refine_joint(
 
 fn remember(best: &mut Option<JointFound>, score: i64, amp: &BigInt, ppms: Vec<BigInt>) {
     if best.as_ref().map(|item| score < item.score).unwrap_or(true) {
-        *best = Some(JointFound { score, amp: amp.clone(), ppms });
+        *best = Some(JointFound {
+            score,
+            amp: amp.clone(),
+            ppms,
+        });
     }
 }
 
@@ -3128,7 +3504,8 @@ fn joint_search(
                         let mut trial = vec![bi(10_000); n];
                         trial[left_coin] = joint_ppm(left_exp);
                         trial[right_coin] = joint_ppm(right_exp);
-                        let Some(score) = score_ppms(xp, &amp, i, j, fee, rates, &trial, target) else {
+                        let Some(score) = score_ppms(xp, &amp, i, j, fee, rates, &trial, target)
+                        else {
                             continue;
                         };
                         remember(&mut best, score, &amp, trial);
@@ -3182,7 +3559,9 @@ fn joint_best(
     best.map(|found| refine_joint(xp, i, j, fee, rates, target, found, 18, 4, false))
 }
 
-fn joint_state(state: &Value) -> Result<Option<(Vec<BigInt>, BigInt, BigInt, Vec<BigInt>)>, String> {
+fn joint_state(
+    state: &Value,
+) -> Result<Option<(Vec<BigInt>, BigInt, BigInt, Vec<BigInt>)>, String> {
     let Some(coins) = state.get("coins").and_then(Value::as_array) else {
         return Ok(None);
     };
@@ -3206,7 +3585,11 @@ fn finish_joint(
     if found.score > 10 {
         return None;
     }
-    gated(&stable_ppms_predict(xp, &found.amp, i, j, fee, rates, &found.ppms), hold, rows)
+    gated(
+        &stable_ppms_predict(xp, &found.amp, i, j, fee, rates, &found.ppms),
+        hold,
+        rows,
+    )
 }
 
 fn stable_joint_candidate(
@@ -3221,7 +3604,16 @@ fn stable_joint_candidate(
     };
     let (train, hold) = split_holdout(direction)?;
     let target = train_rows(&train, rows);
-    Ok(finish_joint(joint_search(&xp, &amp, i, j, &fee, &rates, target), &xp, i, j, &fee, &rates, &hold, rows))
+    Ok(finish_joint(
+        joint_search(&xp, &amp, i, j, &fee, &rates, target),
+        &xp,
+        i,
+        j,
+        &fee,
+        &rates,
+        &hold,
+        rows,
+    ))
 }
 
 fn stable_joint_best_candidate(
@@ -3236,7 +3628,16 @@ fn stable_joint_best_candidate(
     };
     let (train, hold) = split_holdout(direction)?;
     let target = train_rows(&train, rows);
-    Ok(finish_joint(joint_best(&xp, &amp, i, j, &fee, &rates, target), &xp, i, j, &fee, &rates, &hold, rows))
+    Ok(finish_joint(
+        joint_best(&xp, &amp, i, j, &fee, &rates, target),
+        &xp,
+        i,
+        j,
+        &fee,
+        &rates,
+        &hold,
+        rows,
+    ))
 }
 
 fn stable_refine_candidate(
@@ -3246,7 +3647,10 @@ fn stable_refine_candidate(
     direction: &Value,
     rows: &[(BigInt, BigInt)],
 ) -> Result<Option<Scored>, String> {
-    let coins = state.get("coins").and_then(Value::as_array).ok_or_else(|| "coins".to_string())?;
+    let coins = state
+        .get("coins")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "coins".to_string())?;
     let amp0 = amount_or_zero(state.get("amp"))?;
     let mut fee0 = amount_or_zero(state.get("fee"))?;
     if fee0 > fee_denom() {
@@ -3263,7 +3667,9 @@ fn stable_refine_candidate(
     }
     let (train, hold) = split_holdout(direction)?;
     let target = train_rows(&train, rows).to_vec();
-    let Some((_stored, precs, base_xp)) = refine_precs(&balances, &rates, &amp0, i, j, &fee0, &target) else {
+    let Some((_stored, precs, base_xp)) =
+        refine_precs(&balances, &rates, &amp0, i, j, &fee0, &target)
+    else {
         return Ok(None);
     };
     let amp_lo = max_bi(BigInt::one(), fd(&(&amp0 * bi(9)), &bi(10)));
@@ -3277,8 +3683,13 @@ fn stable_refine_candidate(
             if ppm.len() != 5 {
                 return None;
             }
-            let (amp, ppm_i, ppm_j, out_ppm, fee) =
-                (ppm[0].clone(), ppm[1].clone(), ppm[2].clone(), ppm[3].clone(), ppm[4].clone());
+            let (amp, ppm_i, ppm_j, out_ppm, fee) = (
+                ppm[0].clone(),
+                ppm[1].clone(),
+                ppm[2].clone(),
+                ppm[3].clone(),
+                ppm[4].clone(),
+            );
             if amp <= BigInt::zero()
                 || ppm_i <= BigInt::zero()
                 || ppm_j <= BigInt::zero()
@@ -3306,7 +3717,10 @@ fn stable_refine_candidate(
                 prec_j: precs[j].clone(),
                 out_ppm,
             };
-            Some(RelHit { rel: worst_rel(&formula.predict(), &target)?, formula })
+            Some(RelHit {
+                rel: worst_rel(&formula.predict(), &target)?,
+                formula,
+            })
         };
         for start_fee in [fee0.clone(), max_bi(fd(&fee0, &bi(4)), BigInt::zero())] {
             let start = [amp0.clone(), bi(10_000), bi(10_000), bi(10_000), start_fee];
@@ -3369,10 +3783,16 @@ fn flat_residual_candidate(
 
 fn scaled_quote(knots: &[(BigInt, BigInt)], ppm: &BigInt) -> Option<Formula> {
     residual_quote(knots)?;
-    Some(Formula::ScaledResidual { knots: knots.to_vec(), ppm: ppm.clone() })
+    Some(Formula::ScaledResidual {
+        knots: knots.to_vec(),
+        ppm: ppm.clone(),
+    })
 }
 
-fn scaled_residual_candidate(direction: &Value, rows: &[(BigInt, BigInt)]) -> Result<Option<Scored>, String> {
+fn scaled_residual_candidate(
+    direction: &Value,
+    rows: &[(BigInt, BigInt)],
+) -> Result<Option<Scored>, String> {
     let (train, hold) = split_holdout(direction)?;
     if train.len() < 3 {
         return Ok(None);
@@ -3381,8 +3801,12 @@ fn scaled_residual_candidate(direction: &Value, rows: &[(BigInt, BigInt)]) -> Re
     let take = |best: &mut Option<(i64, BigInt)>, ppm: &BigInt| -> Option<i64> {
         let mut worst = 0i64;
         for index in 0..train.len() {
-            let knots: Vec<(BigInt, BigInt)> =
-                train.iter().enumerate().filter(|(n, _)| *n != index).map(|(_, row)| row.clone()).collect();
+            let knots: Vec<(BigInt, BigInt)> = train
+                .iter()
+                .enumerate()
+                .filter(|(n, _)| *n != index)
+                .map(|(_, row)| row.clone())
+                .collect();
             let predict = scaled_quote(&knots, ppm)?;
             let score = worst_bps(predict.predict().as_ref(), &train[index..index + 1])?;
             worst = worst.max(score);
@@ -3390,12 +3814,20 @@ fn scaled_residual_candidate(direction: &Value, rows: &[(BigInt, BigInt)]) -> Re
         let tie_closer = best.as_ref().is_some_and(|(score, chosen)| {
             *score == worst && (ppm - bi(10_000)).abs() < (chosen - bi(10_000)).abs()
         });
-        if best.as_ref().map(|(score, _)| worst < *score).unwrap_or(true) || tie_closer {
+        if best
+            .as_ref()
+            .map(|(score, _)| worst < *score)
+            .unwrap_or(true)
+            || tie_closer
+        {
             *best = Some((worst, ppm.clone()));
         }
         Some(worst)
     };
-    for ppm in [10_000, 9990, 10010, 9980, 10020, 9970, 10030, 9950, 10050, 9940, 10060, 9920, 10080, 9900, 10100] {
+    for ppm in [
+        10_000, 9990, 10010, 9980, 10020, 9970, 10030, 9950, 10050, 9940, 10060, 9920, 10080, 9900,
+        10100,
+    ] {
         take(&mut best, &bi(ppm));
         if best.as_ref().is_some_and(|(score, _)| *score == 0) {
             break;
@@ -3416,7 +3848,10 @@ fn scaled_residual_candidate(direction: &Value, rows: &[(BigInt, BigInt)]) -> Re
         if left_score.is_none() && right_score.is_none() {
             break;
         }
-        if right_score.is_none() || left_score.is_some_and(|left_score| right_score.is_none_or(|right_score| left_score <= right_score))
+        if right_score.is_none()
+            || left_score.is_some_and(|left_score| {
+                right_score.is_none_or(|right_score| left_score <= right_score)
+            })
         {
             right = second;
         } else {
@@ -3435,8 +3870,12 @@ fn scaled_residual_candidate(direction: &Value, rows: &[(BigInt, BigInt)]) -> Re
 fn loo_worst(base: &Formula, train: &[(BigInt, BigInt)], alpha: &BigRational) -> Option<i64> {
     let mut worst = 0i64;
     for index in 0..train.len() {
-        let knots: Vec<(BigInt, BigInt)> =
-            train.iter().enumerate().filter(|(n, _)| *n != index).map(|(_, row)| row.clone()).collect();
+        let knots: Vec<(BigInt, BigInt)> = train
+            .iter()
+            .enumerate()
+            .filter(|(n, _)| *n != index)
+            .map(|(_, row)| row.clone())
+            .collect();
         let predict = added_residual(base.predict(), &knots, alpha)?;
         let score = worst_bps(predict.as_ref(), &train[index..index + 1])?;
         worst = worst.max(score);
@@ -3459,7 +3898,11 @@ fn alphas() -> Vec<BigRational> {
     ]
 }
 
-fn loo_alpha_candidate(base: &Formula, direction: &Value, rows: &[(BigInt, BigInt)]) -> Result<Option<Scored>, String> {
+fn loo_alpha_candidate(
+    base: &Formula,
+    direction: &Value,
+    rows: &[(BigInt, BigInt)],
+) -> Result<Option<Scored>, String> {
     let (train, hold) = split_holdout(direction)?;
     if train.len() < 3 {
         return Ok(None);
@@ -3470,7 +3913,11 @@ fn loo_alpha_candidate(base: &Formula, direction: &Value, rows: &[(BigInt, BigIn
             continue;
         };
         let prefer = if alpha == BigRational::one() { 0 } else { 1 };
-        if best.as_ref().map(|(so_far, pref, _)| (score, prefer) < (*so_far, *pref)).unwrap_or(true) {
+        if best
+            .as_ref()
+            .map(|(so_far, pref, _)| (score, prefer) < (*so_far, *pref))
+            .unwrap_or(true)
+        {
             best = Some((score, prefer, alpha));
         }
     }
@@ -3511,7 +3958,10 @@ fn wave_loo_from(
     Ok(Some((score, predict)))
 }
 
-fn wave_loo_candidate(direction: &Value, rows: &[(BigInt, BigInt)]) -> Result<Option<Scored>, String> {
+fn wave_loo_candidate(
+    direction: &Value,
+    rows: &[(BigInt, BigInt)],
+) -> Result<Option<Scored>, String> {
     wave_loo_from(near_wave(direction, rows)?, direction, rows)
 }
 
@@ -3521,9 +3971,24 @@ fn through_sample_candidates(
 ) -> Result<Vec<(&'static str, Scored)>, String> {
     let (train, hold) = split_holdout(direction)?;
     let made = [
-        ("chord", Formula::Chord { knots: train.clone() }),
-        ("cubic", Formula::Cubic { knots: train.clone() }),
-        ("residual", Formula::HyperResidual { knots: train.clone() }),
+        (
+            "chord",
+            Formula::Chord {
+                knots: train.clone(),
+            },
+        ),
+        (
+            "cubic",
+            Formula::Cubic {
+                knots: train.clone(),
+            },
+        ),
+        (
+            "residual",
+            Formula::HyperResidual {
+                knots: train.clone(),
+            },
+        ),
     ];
     let mut found = Vec::new();
     for (name, formula) in made {
@@ -3535,7 +4000,11 @@ fn through_sample_candidates(
     Ok(found)
 }
 
-fn ladder_candidate(state: &Value, direction: &Value, rows: &[(BigInt, BigInt)]) -> Result<Option<Scored>, String> {
+fn ladder_candidate(
+    state: &Value,
+    direction: &Value,
+    rows: &[(BigInt, BigInt)],
+) -> Result<Option<Scored>, String> {
     let (Some(fee), Some(sqrt_price), Some(liquidity), Some(tick)) = (
         whole(state.get("fee_pips"))?,
         amount(state.get("sqrt_price_x96"))?,
@@ -3571,7 +4040,9 @@ fn ladder_candidate(state: &Value, direction: &Value, rows: &[(BigInt, BigInt)])
         let Some(word) = word.as_object() else {
             return Err("tick".to_string());
         };
-        let (Some(tick_at), Some(net)) = (whole(word.get("tick"))?, amount(word.get("liquidity_net"))?) else {
+        let (Some(tick_at), Some(net)) =
+            (whole(word.get("tick"))?, amount(word.get("liquidity_net"))?)
+        else {
             return Err("tick".to_string());
         };
         ticks.push((tick_at, net));
@@ -3589,7 +4060,11 @@ fn ladder_candidate(state: &Value, direction: &Value, rows: &[(BigInt, BigInt)])
     ))
 }
 
-fn product_candidate(state: &Value, direction: &Value, rows: &[(BigInt, BigInt)]) -> Result<Option<Scored>, String> {
+fn product_candidate(
+    state: &Value,
+    direction: &Value,
+    rows: &[(BigInt, BigInt)],
+) -> Result<Option<Scored>, String> {
     let (Some(reserve0), Some(reserve1), Some(fee)) = (
         amount(state.get("reserve0"))?,
         amount(state.get("reserve1"))?,
@@ -3605,13 +4080,14 @@ fn product_candidate(state: &Value, direction: &Value, rows: &[(BigInt, BigInt)]
     ) else {
         return Ok(None);
     };
-    let (reserve_in, reserve_out) = if tin.eq_ignore_ascii_case(token0) && tout.eq_ignore_ascii_case(token1) {
-        (reserve0, reserve1)
-    } else if tin.eq_ignore_ascii_case(token1) && tout.eq_ignore_ascii_case(token0) {
-        (reserve1, reserve0)
-    } else {
-        return Ok(None);
-    };
+    let (reserve_in, reserve_out) =
+        if tin.eq_ignore_ascii_case(token0) && tout.eq_ignore_ascii_case(token1) {
+            (reserve0, reserve1)
+        } else if tin.eq_ignore_ascii_case(token1) && tout.eq_ignore_ascii_case(token0) {
+            (reserve1, reserve0)
+        } else {
+            return Ok(None);
+        };
     Ok(score_predict(
         Formula::Product {
             reserve_in,
@@ -3623,11 +4099,17 @@ fn product_candidate(state: &Value, direction: &Value, rows: &[(BigInt, BigInt)]
     ))
 }
 
-fn weighted_candidate(state: &Value, i: usize, j: usize, rows: &[(BigInt, BigInt)]) -> Result<Option<Scored>, String> {
+fn weighted_candidate(
+    state: &Value,
+    i: usize,
+    j: usize,
+    rows: &[(BigInt, BigInt)],
+) -> Result<Option<Scored>, String> {
     let balances = amount_vec(state.get("balances"))?;
     let weights = amount_vec(state.get("weights"))?;
     let fee = amount_or_zero(state.get("fee"))?;
-    if weights.len() != balances.len() || fee > wad() || i >= balances.len() || j >= balances.len() {
+    if weights.len() != balances.len() || fee > wad() || i >= balances.len() || j >= balances.len()
+    {
         return Ok(None);
     }
     let (balance_in, balance_out) = (balances[i].clone(), balances[j].clone());
@@ -3665,7 +4147,11 @@ fn balancer_stable_candidate(
     let amp = fd(&amp_word, &precision);
     let choices = vec![precisions(); balances.len()];
     Ok(best_over(balances.len(), &choices, |precs| {
-        let xp: Vec<BigInt> = balances.iter().zip(precs).map(|(balance, prec)| balance * prec).collect();
+        let xp: Vec<BigInt> = balances
+            .iter()
+            .zip(precs)
+            .map(|(balance, prec)| balance * prec)
+            .collect();
         score_predict(
             Formula::BalancerStable {
                 xp,
@@ -3692,15 +4178,33 @@ fn balancer_scale_candidate(
     let amp_word = amount_or_zero(state.get("amp"))?;
     let precision = nonzero_amount(state.get("amp_precision"), BigInt::one())?;
     let fee = amount_or_zero(state.get("fee"))?;
-    if amp_word <= BigInt::zero() || fee > wad() || balances.iter().any(|balance| balance <= &BigInt::zero()) {
+    if amp_word <= BigInt::zero()
+        || fee > wad()
+        || balances.iter().any(|balance| balance <= &BigInt::zero())
+    {
         return Ok(None);
     }
     let amp = fd(&amp_word, &precision);
     let rates = vec![BigInt::zero(); balances.len()];
-    scale_candidate(&balances, &amp, i, j, &fee, &rates, direction, rows, &wad(), true)
+    scale_candidate(
+        &balances,
+        &amp,
+        i,
+        j,
+        &fee,
+        &rates,
+        direction,
+        rows,
+        &wad(),
+        true,
+    )
 }
 
-fn bin_candidate(state: &Value, direction: &Value, rows: &[(BigInt, BigInt)]) -> Result<Option<Scored>, String> {
+fn bin_candidate(
+    state: &Value,
+    direction: &Value,
+    rows: &[(BigInt, BigInt)],
+) -> Result<Option<Scored>, String> {
     let reference = amount(state.get("reference_x64"))?.unwrap_or_else(BigInt::zero);
     if reference <= BigInt::zero() {
         return Ok(None);
@@ -3713,18 +4217,28 @@ fn bin_candidate(state: &Value, direction: &Value, rows: &[(BigInt, BigInt)]) ->
     ) else {
         return Ok(None);
     };
-    let (selling0, scale_key) = if tin.eq_ignore_ascii_case(token0) && tout.eq_ignore_ascii_case(token1) {
-        (true, "scale1")
-    } else if tin.eq_ignore_ascii_case(token1) && tout.eq_ignore_ascii_case(token0) {
-        (false, "scale0")
-    } else {
-        return Ok(None);
-    };
+    let (selling0, scale_key) =
+        if tin.eq_ignore_ascii_case(token0) && tout.eq_ignore_ascii_case(token1) {
+            (true, "scale1")
+        } else if tin.eq_ignore_ascii_case(token1) && tout.eq_ignore_ascii_case(token0) {
+            (false, "scale0")
+        } else {
+            return Ok(None);
+        };
     let scale_out = amount(state.get(scale_key))?.unwrap_or_else(BigInt::zero);
+    let scale_in_key = if selling0 { "scale0" } else { "scale1" };
+    let scale_in = amount(state.get(scale_in_key))?.unwrap_or_else(BigInt::zero);
+    // The oracle price is whole tokens. Fold the scale ratio into the reference the quote divides by.
+    let reference = if scale_in.is_positive() && scale_out.is_positive() {
+        (&reference * &scale_in) / &scale_out
+    } else {
+        reference
+    };
     let bin_index = whole(state.get("bin_index"))?;
     let mut scaled_out = BigInt::zero();
     let mut length = BigInt::zero();
-    if let (Some(bins), Some(bin_index)) = (state.get("bins").and_then(Value::as_array), bin_index) {
+    if let (Some(bins), Some(bin_index)) = (state.get("bins").and_then(Value::as_array), bin_index)
+    {
         for word in bins {
             let Some(word) = word.as_object() else {
                 continue;
@@ -3733,7 +4247,11 @@ fn bin_candidate(state: &Value, direction: &Value, rows: &[(BigInt, BigInt)]) ->
                 continue;
             }
             length = whole(word.get("length_e6"))?.unwrap_or_else(BigInt::zero);
-            let key = if selling0 { "token1_scaled" } else { "token0_scaled" };
+            let key = if selling0 {
+                "token1_scaled"
+            } else {
+                "token0_scaled"
+            };
             scaled_out = amount(word.get(key))?.unwrap_or_else(BigInt::zero);
             break;
         }
@@ -3754,7 +4272,11 @@ fn bin_candidate(state: &Value, direction: &Value, rows: &[(BigInt, BigInt)]) ->
     ))
 }
 
-pub(crate) fn choose(state: &Value, direction: &Value, rows: &[(BigInt, BigInt)]) -> Result<Option<Chosen>, String> {
+pub(crate) fn choose(
+    state: &Value,
+    direction: &Value,
+    rows: &[(BigInt, BigInt)],
+) -> Result<Option<Chosen>, String> {
     let shape = state.get("shape").and_then(Value::as_str);
     let mut found: Vec<Found> = Vec::new();
     let mut fit_three = None;
@@ -3765,7 +4287,11 @@ pub(crate) fn choose(state: &Value, direction: &Value, rows: &[(BigInt, BigInt)]
     let mut flat_got = None;
     let mut bal_got = None;
     match shape {
-        Some("constant_product") => consider(&mut found, "product", &product_candidate(state, direction, rows)?),
+        Some("constant_product") => consider(
+            &mut found,
+            "product",
+            &product_candidate(state, direction, rows)?,
+        ),
         Some("concentrated") => {
             ladder_got = ladder_candidate(state, direction, rows)?;
             consider(&mut found, "ladder", &ladder_got);
@@ -3805,8 +4331,10 @@ pub(crate) fn choose(state: &Value, direction: &Value, rows: &[(BigInt, BigInt)]
         Some("balancer") => {
             if let Some(tokens) = state.get("tokens").and_then(Value::as_array) {
                 if tokens.iter().all(Value::is_string) {
-                    let typed: Vec<String> =
-                        tokens.iter().filter_map(|token| token.as_str().map(str::to_string)).collect();
+                    let typed: Vec<String> = tokens
+                        .iter()
+                        .filter_map(|token| token.as_str().map(str::to_string))
+                        .collect();
                     let i = index_of(&typed, direction.get("token_in"));
                     let j = index_of(&typed, direction.get("token_out"));
                     if let (Some(i), Some(j)) = (i, j) {
@@ -3817,7 +4345,11 @@ pub(crate) fn choose(state: &Value, direction: &Value, rows: &[(BigInt, BigInt)]
                                 fit_balancer = Some((i, j));
                             }
                         } else if i != j {
-                            consider(&mut found, "weighted", &weighted_candidate(state, i, j, rows)?);
+                            consider(
+                                &mut found,
+                                "weighted",
+                                &weighted_candidate(state, i, j, rows)?,
+                            );
                         }
                     }
                 }
@@ -3835,35 +4367,95 @@ pub(crate) fn choose(state: &Value, direction: &Value, rows: &[(BigInt, BigInt)]
             let Some((_, formula)) = got else {
                 continue;
             };
-            consider(&mut found, "residual", &base_residual_candidate(formula, direction, rows)?);
-            consider(&mut found, "residual", &flat_residual_candidate(formula, direction, rows)?);
+            consider(
+                &mut found,
+                "residual",
+                &base_residual_candidate(formula, direction, rows)?,
+            );
+            consider(
+                &mut found,
+                "residual",
+                &flat_residual_candidate(formula, direction, rows)?,
+            );
         }
-        consider(&mut found, "residual", &scaled_residual_candidate(direction, rows)?);
+        consider(
+            &mut found,
+            "residual",
+            &scaled_residual_candidate(direction, rows)?,
+        );
         if let Some((_, formula)) = hyperbola_candidate(rows) {
-            consider(&mut found, "residual", &loo_alpha_candidate(&formula, direction, rows)?);
+            consider(
+                &mut found,
+                "residual",
+                &loo_alpha_candidate(&formula, direction, rows)?,
+            );
         }
         if let Some((i, j)) = fit_three {
-            consider(&mut found, "three-coin", &crypto3_fit_candidate(state, i, j, direction, rows)?);
-            consider(&mut found, "three-coin", &crypto3_consistent_candidate(state, i, j, direction, rows)?);
+            consider(
+                &mut found,
+                "three-coin",
+                &crypto3_fit_candidate(state, i, j, direction, rows)?,
+            );
+            consider(
+                &mut found,
+                "three-coin",
+                &crypto3_consistent_candidate(state, i, j, direction, rows)?,
+            );
         }
         if let Some((i, j)) = fit_stable {
-            consider(&mut found, "stable", &stable_mixed_candidate(state, i, j, direction, rows)?);
-            consider(&mut found, "stable", &stable_scale_candidate(state, i, j, direction, rows)?);
-            consider(&mut found, "stable", &stable_output_candidate(state, i, j, direction, rows)?);
+            consider(
+                &mut found,
+                "stable",
+                &stable_mixed_candidate(state, i, j, direction, rows)?,
+            );
+            consider(
+                &mut found,
+                "stable",
+                &stable_scale_candidate(state, i, j, direction, rows)?,
+            );
+            consider(
+                &mut found,
+                "stable",
+                &stable_output_candidate(state, i, j, direction, rows)?,
+            );
             if stable_got.as_ref().is_some_and(|item| item.0 <= 400) {
-                consider(&mut found, "stable", &stable_refine_candidate(state, i, j, direction, rows)?);
-                if state.get("coins").and_then(Value::as_array).is_some_and(|coins| coins.len() >= 3) {
-                    consider(&mut found, "stable", &stable_joint_candidate(state, i, j, direction, rows)?);
-                    consider(&mut found, "stable", &stable_joint_best_candidate(state, i, j, direction, rows)?);
+                consider(
+                    &mut found,
+                    "stable",
+                    &stable_refine_candidate(state, i, j, direction, rows)?,
+                );
+                if state
+                    .get("coins")
+                    .and_then(Value::as_array)
+                    .is_some_and(|coins| coins.len() >= 3)
+                {
+                    consider(
+                        &mut found,
+                        "stable",
+                        &stable_joint_candidate(state, i, j, direction, rows)?,
+                    );
+                    consider(
+                        &mut found,
+                        "stable",
+                        &stable_joint_best_candidate(state, i, j, direction, rows)?,
+                    );
                 }
             }
         }
         if let Some((i, j)) = fit_balancer {
-            consider(&mut found, "balancer-stable", &balancer_scale_candidate(state, i, j, direction, rows)?);
+            consider(
+                &mut found,
+                "balancer-stable",
+                &balancer_scale_candidate(state, i, j, direction, rows)?,
+            );
         }
         consider(&mut found, "cap", &fillet_cap_candidate(direction, rows)?);
         consider(&mut found, "cap", &logistic_cap_candidate(direction, rows)?);
-        consider(&mut found, "cap", &logistic_refine_candidate(direction, rows)?);
+        consider(
+            &mut found,
+            "cap",
+            &logistic_refine_candidate(direction, rows)?,
+        );
         let near = near_wave(direction, rows)?;
         let (_, hold) = split_holdout(direction)?;
         let near_scored = near
@@ -3871,11 +4463,22 @@ pub(crate) fn choose(state: &Value, direction: &Value, rows: &[(BigInt, BigInt)]
             .and_then(|formula| accept_cap(formula.clone(), &hold, rows));
         consider(&mut found, "cap", &near_scored);
         consider(&mut found, "cap", &wave_loo_from(near, direction, rows)?);
-        consider(&mut found, "cap", &logistic_wide_candidate(direction, rows)?);
+        consider(
+            &mut found,
+            "cap",
+            &logistic_wide_candidate(direction, rows)?,
+        );
     }
-    Ok(found.into_iter().min_by(|left, right| {
-        (left.score, left.rank, left.name).cmp(&(right.score, right.rank, right.name))
-    }).map(|item| Chosen { score: item.score, name: item.name, formula: item.formula }))
+    Ok(found
+        .into_iter()
+        .min_by(|left, right| {
+            (left.score, left.rank, left.name).cmp(&(right.score, right.rank, right.name))
+        })
+        .map(|item| Chosen {
+            score: item.score,
+            name: item.name,
+            formula: item.formula,
+        }))
 }
 
 /// Run the selector on one direction. The score is the all-label score.
@@ -3892,7 +4495,10 @@ pub fn logistic_outs(
     amounts: &[BigInt],
 ) -> Vec<Option<BigInt>> {
     let predict = logistic_quote(slope, rate, knee);
-    amounts.iter().map(|amount| predict(amount.clone())).collect()
+    amounts
+        .iter()
+        .map(|amount| predict(amount.clone()))
+        .collect()
 }
 
 /// Decode a formula or a fit payload and quote `amount`. Panics are bugs.
@@ -4114,7 +4720,10 @@ mod tests {
     }
 
     fn rows_of(samples: &[(&str, &str, &str)]) -> Vec<(BigInt, BigInt)> {
-        samples.iter().map(|(x, y, _)| (parse_bi(x), parse_bi(y))).collect()
+        samples
+            .iter()
+            .map(|(x, y, _)| (parse_bi(x), parse_bi(y)))
+            .collect()
     }
 
     #[test]
@@ -4168,8 +4777,14 @@ mod tests {
         let bytes = crate::fit_formula::encode_fit(0, &[stored]);
         let decoded = crate::fit_formula::decode_fit(&bytes).unwrap();
         assert!(decoded.directions[0].formula == formula);
-        assert_eq!(eval_formula(&decoded.directions[0].formula, &bi(50)).unwrap(), bi(67));
-        assert_eq!(eval_formula(&decoded.directions[0].formula, &bi(200)).unwrap(), bi(199));
+        assert_eq!(
+            eval_formula(&decoded.directions[0].formula, &bi(50)).unwrap(),
+            bi(67)
+        );
+        assert_eq!(
+            eval_formula(&decoded.directions[0].formula, &bi(200)).unwrap(),
+            bi(199)
+        );
     }
 
     #[test]
@@ -4181,7 +4796,11 @@ mod tests {
         let expect = he40("1.701413277982752409499482809057091105254".parse().unwrap());
         assert_eq!(got, expect);
         let ln2 = he40(ln_he(&BigDecimal::from(2)));
-        let expect_ln2 = he40("0.6931471805599453094172321214581765680755".parse().unwrap());
+        let expect_ln2 = he40(
+            "0.6931471805599453094172321214581765680755"
+                .parse()
+                .unwrap(),
+        );
         assert_eq!(ln2, expect_ln2);
     }
 
@@ -4192,8 +4811,22 @@ mod tests {
         let over = worst_bps(&|_| Some(bi(2_001)), &[(bi(1), bi(1_000))]);
         assert_eq!(over, Some(10_010));
 
-        let y_small = product_out(&bi(1000), &bi(1000), &bi(100), &BigInt::zero(), &bi(1_000_000)).unwrap();
-        let y_large = product_out(&bi(1000), &bi(1000), &bi(400), &BigInt::zero(), &bi(1_000_000)).unwrap();
+        let y_small = product_out(
+            &bi(1000),
+            &bi(1000),
+            &bi(100),
+            &BigInt::zero(),
+            &bi(1_000_000),
+        )
+        .unwrap();
+        let y_large = product_out(
+            &bi(1000),
+            &bi(1000),
+            &bi(400),
+            &BigInt::zero(),
+            &bi(1_000_000),
+        )
+        .unwrap();
         let product = json!({
             "shape": "constant_product",
             "reserve0": "1000",
@@ -4205,11 +4838,23 @@ mod tests {
         let small = y_small.to_string();
         let large = y_large.to_string();
         let tied_samples = [("100", small.as_str(), "0.1"), ("400", large.as_str(), "1")];
-        let tied = choose(&product, &direction(&tied_samples, "a", "b"), &rows_of(&tied_samples)).unwrap();
+        let tied = choose(
+            &product,
+            &direction(&tied_samples, "a", "b"),
+            &rows_of(&tied_samples),
+        )
+        .unwrap();
         let tied = tied.expect("product tie");
         assert_eq!((tied.score, tied.name), (0, "product"));
 
-        let bow = hyperbola_out(&bi(100_000), &bi(500_000), &bi(400_000), &bi(800_000), &bi(200_000)).unwrap();
+        let bow = hyperbola_out(
+            &bi(100_000),
+            &bi(500_000),
+            &bi(400_000),
+            &bi(800_000),
+            &bi(200_000),
+        )
+        .unwrap();
         let bow_text = bow.to_string();
         let wrong = json!({
             "shape": "constant_product",
@@ -4224,9 +4869,13 @@ mod tests {
             ("200000", bow_text.as_str(), "0.5"),
             ("400000", "800000", "1"),
         ];
-        let closer = choose(&wrong, &direction(&closer_samples, "a", "b"), &rows_of(&closer_samples))
-            .unwrap()
-            .expect("hyperbola");
+        let closer = choose(
+            &wrong,
+            &direction(&closer_samples, "a", "b"),
+            &rows_of(&closer_samples),
+        )
+        .unwrap()
+        .expect("hyperbola");
         assert_eq!(closer.name, "hyperbola");
         assert!(closer.score <= 10);
 
@@ -4238,7 +4887,9 @@ mod tests {
             ("1000000", "1900000", "1"),
         ];
         let blank = json!({"shape": "curve", "coins": [], "crypto": false});
-        let kept = choose(&blank, &direction(&line, "a", "b"), &rows_of(&line)).unwrap().expect("line");
+        let kept = choose(&blank, &direction(&line, "a", "b"), &rows_of(&line))
+            .unwrap()
+            .expect("line");
         assert!(kept.score <= 10);
         assert!(kept.name == "chord" || kept.name == "cubic");
 
@@ -4248,7 +4899,11 @@ mod tests {
             ("400", "500", "0.5"),
             ("900", "900", "1"),
         ];
-        assert!(choose(&blank, &direction(&spiked, "a", "b"), &rows_of(&spiked)).unwrap().is_none());
+        assert!(
+            choose(&blank, &direction(&spiked, "a", "b"), &rows_of(&spiked))
+                .unwrap()
+                .is_none()
+        );
 
         let train: Vec<(BigInt, BigInt)> = line
             .iter()
@@ -4264,21 +4919,35 @@ mod tests {
         assert!(worst_bps(refit.as_ref(), &hold).unwrap() <= 10);
     }
 
-    fn pack(samples: &[(&str, &str, &str)], token_in: &str, token_out: &str) -> (Value, Vec<(BigInt, BigInt)>) {
+    fn pack(
+        samples: &[(&str, &str, &str)],
+        token_in: &str,
+        token_out: &str,
+    ) -> (Value, Vec<(BigInt, BigInt)>) {
         (direction(samples, token_in, token_out), rows_of(samples))
     }
 
-    fn spike(samples: &[(&str, &str, &str)], token_in: &str, token_out: &str) -> (Value, Vec<(BigInt, BigInt)>) {
+    fn spike(
+        samples: &[(&str, &str, &str)],
+        token_in: &str,
+        token_out: &str,
+    ) -> (Value, Vec<(BigInt, BigInt)>) {
         let owned: Vec<(String, String, String)> = samples
             .iter()
             .map(|(x, y, fraction)| {
                 let y = parse_bi(y);
-                let y = if *fraction == "0.25" || *fraction == "0.8" { y * 2 } else { y };
+                let y = if *fraction == "0.25" || *fraction == "0.8" {
+                    y * 2
+                } else {
+                    y
+                };
                 ((*x).to_string(), y.to_string(), (*fraction).to_string())
             })
             .collect();
-        let refs: Vec<(&str, &str, &str)> =
-            owned.iter().map(|(x, y, fraction)| (x.as_str(), y.as_str(), fraction.as_str())).collect();
+        let refs: Vec<(&str, &str, &str)> = owned
+            .iter()
+            .map(|(x, y, fraction)| (x.as_str(), y.as_str(), fraction.as_str()))
+            .collect();
         pack(&refs, token_in, token_out)
     }
 
@@ -4297,8 +4966,17 @@ mod tests {
         })
     }
 
-    fn sized_quotes(maker: impl Fn(&BigInt) -> Option<BigInt>, stored: &BigInt) -> Vec<(String, String, String)> {
-        let cuts = [("0.1", fd(stored, &bi(50))), ("0.25", fd(stored, &bi(10))), ("0.5", fd(stored, &bi(3))), ("0.8", fd(stored, &bi(2))), ("1", fd(&(stored * bi(4)), &bi(5)))];
+    fn sized_quotes(
+        maker: impl Fn(&BigInt) -> Option<BigInt>,
+        stored: &BigInt,
+    ) -> Vec<(String, String, String)> {
+        let cuts = [
+            ("0.1", fd(stored, &bi(50))),
+            ("0.25", fd(stored, &bi(10))),
+            ("0.5", fd(stored, &bi(3))),
+            ("0.8", fd(stored, &bi(2))),
+            ("1", fd(&(stored * bi(4)), &bi(5))),
+        ];
         cuts.into_iter()
             .map(|(fraction, dx)| {
                 let quoted = maker(&dx).expect("quote");
@@ -4309,7 +4987,10 @@ mod tests {
     }
 
     fn refs_of(owned: &[(String, String, String)]) -> Vec<(&str, &str, &str)> {
-        owned.iter().map(|(x, y, fraction)| (x.as_str(), y.as_str(), fraction.as_str())).collect()
+        owned
+            .iter()
+            .map(|(x, y, fraction)| (x.as_str(), y.as_str(), fraction.as_str()))
+            .collect()
     }
 
     #[test]
@@ -4321,16 +5002,30 @@ mod tests {
         let wide_owned = sized_quotes(
             |dx| {
                 let paid = fd(&(dx * &ppm_true), &bi(10_000));
-                stable_swap_out(&true_xp, amp.clone(), bi(0), bi(1), paid, BigInt::zero(), fee_denom(), false, BigInt::zero())
+                stable_swap_out(
+                    &true_xp,
+                    amp.clone(),
+                    bi(0),
+                    bi(1),
+                    paid,
+                    BigInt::zero(),
+                    fee_denom(),
+                    false,
+                    BigInt::zero(),
+                )
             },
             &stored,
         );
         let wide_refs = refs_of(&wide_owned);
         let (wide_dir, wide_rows) = pack(&wide_refs, "a", "b");
         let wide_state = curve_coins(&[&stored.to_string(), &stored.to_string()], "100", "0");
-        let wide_got = stable_scale_candidate(&wide_state, 0, 1, &wide_dir, &wide_rows).unwrap().expect("wide scale");
+        let wide_got = stable_scale_candidate(&wide_state, 0, 1, &wide_dir, &wide_rows)
+            .unwrap()
+            .expect("wide scale");
         assert!(wide_got.0 <= 10);
-        let chosen = choose(&wide_state, &wide_dir, &wide_rows).unwrap().expect("wide choose");
+        let chosen = choose(&wide_state, &wide_dir, &wide_rows)
+            .unwrap()
+            .expect("wide choose");
         assert!(chosen.score <= wide_got.0);
         if chosen.score == wide_got.0 {
             assert_eq!(chosen.name, "stable");
@@ -4339,7 +5034,17 @@ mod tests {
         let bal_owned = sized_quotes(
             |dx| {
                 let paid = fd(&(dx * &ppm_true), &bi(10_000));
-                stable_swap_out(&true_xp, amp.clone(), bi(0), bi(1), paid, BigInt::zero(), wad(), true, BigInt::zero())
+                stable_swap_out(
+                    &true_xp,
+                    amp.clone(),
+                    bi(0),
+                    bi(1),
+                    paid,
+                    BigInt::zero(),
+                    wad(),
+                    true,
+                    BigInt::zero(),
+                )
             },
             &stored,
         );
@@ -4355,13 +5060,25 @@ mod tests {
             "weights": [],
             "tokens": ["a", "b"],
         });
-        let bal_got = balancer_scale_candidate(&bal_state, 0, 1, &bal_dir, &bal_rows).unwrap().expect("balancer scale");
+        let bal_got = balancer_scale_candidate(&bal_state, 0, 1, &bal_dir, &bal_rows)
+            .unwrap()
+            .expect("balancer scale");
         assert!(bal_got.0 <= 10);
 
         let out_xp = vec![stored.clone(), stored.clone()];
         let out_owned = sized_quotes(
             |dx| {
-                let quoted = stable_swap_out(&out_xp, bi(100), bi(0), bi(1), dx.clone(), BigInt::zero(), fee_denom(), false, BigInt::zero())?;
+                let quoted = stable_swap_out(
+                    &out_xp,
+                    bi(100),
+                    bi(0),
+                    bi(1),
+                    dx.clone(),
+                    BigInt::zero(),
+                    fee_denom(),
+                    false,
+                    BigInt::zero(),
+                )?;
                 Some(fd(&(&quoted * bi(9960)), &bi(10_000)))
             },
             &stored,
@@ -4370,12 +5087,26 @@ mod tests {
         let (out_dir, out_rows) = pack(&out_refs, "a", "b");
         let raw: Predict = Arc::new({
             let out_xp = out_xp.clone();
-            move |dx| stable_swap_out(&out_xp, bi(100), bi(0), bi(1), dx, BigInt::zero(), fee_denom(), false, BigInt::zero())
+            move |dx| {
+                stable_swap_out(
+                    &out_xp,
+                    bi(100),
+                    bi(0),
+                    bi(1),
+                    dx,
+                    BigInt::zero(),
+                    fee_denom(),
+                    false,
+                    BigInt::zero(),
+                )
+            }
         });
         let bare = worst_bps(raw.as_ref(), &out_rows).expect("bare");
         assert!(bare > 10);
         let out_state = curve_coins(&[&stored.to_string(), &stored.to_string()], "100", "0");
-        let out_got = stable_output_candidate(&out_state, 0, 1, &out_dir, &out_rows).unwrap().expect("output scale");
+        let out_got = stable_output_candidate(&out_state, 0, 1, &out_dir, &out_rows)
+            .unwrap()
+            .expect("output scale");
         assert!(out_got.0 <= 10);
     }
 
@@ -4390,7 +5121,9 @@ mod tests {
             ("1000000", "1005000", "1"),
         ];
         let (level_dir, level_rows) = pack(&level, "a", "b");
-        let lifted = base_residual_candidate(&identity, &level_dir, &level_rows).unwrap().expect("lifted");
+        let lifted = base_residual_candidate(&identity, &level_dir, &level_rows)
+            .unwrap()
+            .expect("lifted");
         assert!(lifted.0 <= 10);
 
         let spiked_level = [
@@ -4401,10 +5134,20 @@ mod tests {
             ("1000000", "1000000", "1"),
         ];
         let (spiked_dir, spiked_rows) = pack(&spiked_level, "a", "b");
-        assert!(base_residual_candidate(&identity, &spiked_dir, &spiked_rows).unwrap().is_none());
-        let thin = [("100000", "105000", "0.1"), ("250000", "255000", "0.25"), ("800000", "805000", "0.8")];
+        assert!(
+            base_residual_candidate(&identity, &spiked_dir, &spiked_rows)
+                .unwrap()
+                .is_none()
+        );
+        let thin = [
+            ("100000", "105000", "0.1"),
+            ("250000", "255000", "0.25"),
+            ("800000", "805000", "0.8"),
+        ];
         let (thin_dir, thin_rows) = pack(&thin, "a", "b");
-        assert!(base_residual_candidate(&identity, &thin_dir, &thin_rows).unwrap().is_none());
+        assert!(base_residual_candidate(&identity, &thin_dir, &thin_rows)
+            .unwrap()
+            .is_none());
 
         let scaled_book = [
             ("115031368", "40565", "0.0001"),
@@ -4422,10 +5165,16 @@ mod tests {
         let (scaled_train, _) = split_holdout(&scaled_dir).unwrap();
         let bare_residual = residual_quote(&scaled_train).expect("residual");
         assert!(worst_bps(bare_residual.as_ref(), &scaled_rows).unwrap() > 10);
-        let scaled_got = scaled_residual_candidate(&scaled_dir, &scaled_rows).unwrap().expect("scaled");
+        let scaled_got = scaled_residual_candidate(&scaled_dir, &scaled_rows)
+            .unwrap()
+            .expect("scaled");
         assert!(scaled_got.0 <= 10);
-        assert!(scaled_residual_candidate(&spiked_dir, &spiked_rows).unwrap().is_none());
-        assert!(scaled_residual_candidate(&thin_dir, &thin_rows).unwrap().is_none());
+        assert!(scaled_residual_candidate(&spiked_dir, &spiked_rows)
+            .unwrap()
+            .is_none());
+        assert!(scaled_residual_candidate(&thin_dir, &thin_rows)
+            .unwrap()
+            .is_none());
 
         let flat_book = [
             ("14548", "2395240484", "2461420875", "0.0001"),
@@ -4448,11 +5197,18 @@ mod tests {
         let ladder = Formula::Lookup { pairs };
         let (flat_dir, flat_rows) = pack(&flat_samples, "a", "b");
         let (flat_train, _) = split_holdout(&flat_dir).unwrap();
-        let clamped = added_residual(ladder.predict(), &flat_train, &BigRational::one()).expect("clamped");
+        let clamped =
+            added_residual(ladder.predict(), &flat_train, &BigRational::one()).expect("clamped");
         assert!(worst_bps(clamped.as_ref(), &flat_rows).unwrap() > 10);
-        let flat_got = flat_residual_candidate(&ladder, &flat_dir, &flat_rows).unwrap().expect("flat");
+        let flat_got = flat_residual_candidate(&ladder, &flat_dir, &flat_rows)
+            .unwrap()
+            .expect("flat");
         assert!(flat_got.0 <= 10);
-        assert!(flat_residual_candidate(&identity, &spiked_dir, &spiked_rows).unwrap().is_none());
+        assert!(
+            flat_residual_candidate(&identity, &spiked_dir, &spiked_rows)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -4472,17 +5228,26 @@ mod tests {
         let (alpha_dir, alpha_rows) = pack(&alpha_samples, "a", "b");
         let (alpha_train, _) = split_holdout(&alpha_dir).unwrap();
         let alpha_base = hyperbola_candidate(&alpha_rows).expect("hyperbola");
-        let clamped = added_residual(alpha_base.1.predict(), &alpha_train, &BigRational::one()).expect("clamped alpha");
+        let clamped = added_residual(alpha_base.1.predict(), &alpha_train, &BigRational::one())
+            .expect("clamped alpha");
         assert!(worst_bps(clamped.as_ref(), &alpha_rows).unwrap() > 10);
-        let alpha_got = loo_alpha_candidate(&alpha_base.1, &alpha_dir, &alpha_rows).unwrap().expect("loo");
+        let alpha_got = loo_alpha_candidate(&alpha_base.1, &alpha_dir, &alpha_rows)
+            .unwrap()
+            .expect("loo");
         assert!(alpha_got.0 <= 10);
         let alpha_state = json!({"shape": "curve", "coins": []});
-        let choice = choose(&alpha_state, &alpha_dir, &alpha_rows).unwrap().expect("alpha choose");
+        let choice = choose(&alpha_state, &alpha_dir, &alpha_rows)
+            .unwrap()
+            .expect("alpha choose");
         assert!(choice.score <= 10);
         assert!(choice.score <= alpha_got.0);
         let (spiked_dir, spiked_rows) = spike(&alpha_samples, "a", "b");
         let spiked_base = hyperbola_candidate(&spiked_rows).expect("spiked hyperbola");
-        assert!(loo_alpha_candidate(&spiked_base.1, &spiked_dir, &spiked_rows).unwrap().is_none());
+        assert!(
+            loo_alpha_candidate(&spiked_base.1, &spiked_dir, &spiked_rows)
+                .unwrap()
+                .is_none()
+        );
     }
 
     fn assert_named(choice: &Chosen, name: &str, limit: i64) {
@@ -4506,17 +5271,27 @@ mod tests {
             ("6178334189", "2313808815", "1"),
         ];
         let (joint_dir, joint_rows) = pack(&joint_samples, "a", "b");
-        let stored = stable_candidate(&state, 0, 1, &joint_rows).unwrap().expect("stored");
+        let stored = stable_candidate(&state, 0, 1, &joint_rows)
+            .unwrap()
+            .expect("stored");
         assert!(stored.0 > 10);
         let one = stable_scale_candidate(&state, 0, 1, &joint_dir, &joint_rows).unwrap();
         assert!(one.as_ref().is_none_or(|item| item.0 > 10));
-        let joint_got = stable_joint_candidate(&state, 0, 1, &joint_dir, &joint_rows).unwrap().expect("joint");
+        let joint_got = stable_joint_candidate(&state, 0, 1, &joint_dir, &joint_rows)
+            .unwrap()
+            .expect("joint");
         assert!(joint_got.0 <= 10);
-        let choice = choose(&state, &joint_dir, &joint_rows).unwrap().expect("joint choose");
+        let choice = choose(&state, &joint_dir, &joint_rows)
+            .unwrap()
+            .expect("joint choose");
         assert!(choice.score <= joint_got.0);
         assert_named(&choice, "stable", 10);
         let (spiked_dir, spiked_rows) = spike(&joint_samples, "a", "b");
-        assert!(stable_joint_candidate(&state, 0, 1, &spiked_dir, &spiked_rows).unwrap().is_none());
+        assert!(
+            stable_joint_candidate(&state, 0, 1, &spiked_dir, &spiked_rows)
+                .unwrap()
+                .is_none()
+        );
 
         let back_samples = [
             ("615342", "621588", "0.0001"),
@@ -4531,18 +5306,30 @@ mod tests {
             ("6153427116", "2543146698", "1"),
         ];
         let (back_dir, back_rows) = pack(&back_samples, "b", "a");
-        let back_stored = stable_candidate(&state, 1, 0, &back_rows).unwrap().expect("back stored");
+        let back_stored = stable_candidate(&state, 1, 0, &back_rows)
+            .unwrap()
+            .expect("back stored");
         assert!(back_stored.0 > 10);
         let back_one = stable_scale_candidate(&state, 1, 0, &back_dir, &back_rows).unwrap();
         assert!(back_one.as_ref().is_none_or(|item| item.0 > 10));
-        assert!(stable_joint_candidate(&state, 1, 0, &back_dir, &back_rows).unwrap().is_none());
-        let back_got = stable_joint_best_candidate(&state, 1, 0, &back_dir, &back_rows).unwrap().expect("joint best");
+        assert!(stable_joint_candidate(&state, 1, 0, &back_dir, &back_rows)
+            .unwrap()
+            .is_none());
+        let back_got = stable_joint_best_candidate(&state, 1, 0, &back_dir, &back_rows)
+            .unwrap()
+            .expect("joint best");
         assert!(back_got.0 <= 10);
-        let back_choice = choose(&state, &back_dir, &back_rows).unwrap().expect("back choose");
+        let back_choice = choose(&state, &back_dir, &back_rows)
+            .unwrap()
+            .expect("back choose");
         assert!(back_choice.score <= back_got.0);
         assert_named(&back_choice, "stable", 10);
         let (spiked_back_dir, spiked_back_rows) = spike(&back_samples, "b", "a");
-        assert!(stable_joint_best_candidate(&state, 1, 0, &spiked_back_dir, &spiked_back_rows).unwrap().is_none());
+        assert!(
+            stable_joint_best_candidate(&state, 1, 0, &spiked_back_dir, &spiked_back_rows)
+                .unwrap()
+                .is_none()
+        );
     }
 
     fn blank_curve() -> Value {
@@ -4557,7 +5344,9 @@ mod tests {
         let (dir, rows) = pack(samples, "a", "b");
         let got = run(&dir, &rows).unwrap().expect("candidate");
         assert!(got.0 <= limit, "{}", got.0);
-        let choice = choose(&blank_curve(), &dir, &rows).unwrap().expect("choose");
+        let choice = choose(&blank_curve(), &dir, &rows)
+            .unwrap()
+            .expect("choose");
         assert!(choice.score <= got.0, "{} > {}", choice.score, got.0);
         assert_named(&choice, "cap", 10);
         let (spiked_dir, spiked_rows) = spike(samples, "a", "b");
@@ -4593,7 +5382,9 @@ mod tests {
             ("30221852412", "79504017100", "1"),
         ];
         let (grid_dir, grid_rows) = pack(&grid, "a", "b");
-        assert!(logistic_refine_candidate(&grid_dir, &grid_rows).unwrap().is_none());
+        assert!(logistic_refine_candidate(&grid_dir, &grid_rows)
+            .unwrap()
+            .is_none());
         expect_cap(&grid, logistic_cap_candidate, 10);
 
         let refined = [
@@ -4609,7 +5400,9 @@ mod tests {
             ("4118262088518600096103440", "3018543490", "1"),
         ];
         let (refine_dir, refine_rows) = pack(&refined, "a", "b");
-        assert!(logistic_cap_candidate(&refine_dir, &refine_rows).unwrap().is_none());
+        assert!(logistic_cap_candidate(&refine_dir, &refine_rows)
+            .unwrap()
+            .is_none());
         expect_cap(&refined, logistic_refine_candidate, 10);
     }
 
@@ -4736,15 +5529,23 @@ mod tests {
             let names = ["a", "b"];
             let state = curve_coins(&[left, right], "200", "4000000");
             let (dir, rows) = pack(samples, names[coin_in], names[coin_out]);
-            let stored = stable_candidate(&state, coin_in, coin_out, &rows).unwrap().expect("stored");
+            let stored = stable_candidate(&state, coin_in, coin_out, &rows)
+                .unwrap()
+                .expect("stored");
             assert!(stored.0 > 10 && stored.0 <= 400, "{}", stored.0);
-            let got = stable_refine_candidate(&state, coin_in, coin_out, &dir, &rows).unwrap().expect("refine");
+            let got = stable_refine_candidate(&state, coin_in, coin_out, &dir, &rows)
+                .unwrap()
+                .expect("refine");
             assert!(got.0 <= 10, "{}", got.0);
             let choice = choose(&state, &dir, &rows).unwrap().expect("refine choose");
             assert!(choice.score <= got.0);
             assert_named(&choice, "stable", 10);
             let (spiked_dir, spiked_rows) = spike(samples, names[coin_in], names[coin_out]);
-            assert!(stable_refine_candidate(&state, coin_in, coin_out, &spiked_dir, &spiked_rows).unwrap().is_none());
+            assert!(
+                stable_refine_candidate(&state, coin_in, coin_out, &spiked_dir, &spiked_rows)
+                    .unwrap()
+                    .is_none()
+            );
         }
     }
 
@@ -4778,13 +5579,21 @@ mod tests {
             ("1914246883653147602242", "2137063828523", "1"),
         ];
         let (dir, rows) = pack(&first_samples, "c", "a");
-        let got = crypto3_consistent_candidate(&first, 2, 0, &dir, &rows).unwrap().expect("consistent");
+        let got = crypto3_consistent_candidate(&first, 2, 0, &dir, &rows)
+            .unwrap()
+            .expect("consistent");
         assert!(got.0 <= 2, "{}", got.0);
-        let choice = choose(&first, &dir, &rows).unwrap().expect("consistent choose");
+        let choice = choose(&first, &dir, &rows)
+            .unwrap()
+            .expect("consistent choose");
         assert!(choice.score <= got.0);
         assert_named(&choice, "three-coin", 2);
         let (spiked_dir, spiked_rows) = spike(&first_samples, "c", "a");
-        assert!(crypto3_consistent_candidate(&first, 2, 0, &spiked_dir, &spiked_rows).unwrap().is_none());
+        assert!(
+            crypto3_consistent_candidate(&first, 2, 0, &spiked_dir, &spiked_rows)
+                .unwrap()
+                .is_none()
+        );
 
         let second = json!({
             "shape": "curve",
@@ -4814,16 +5623,29 @@ mod tests {
             ("125226144", "21491455947841976087", "1"),
         ];
         let (dir, rows) = pack(&second_samples, "b", "c");
-        let got = crypto3_consistent_candidate(&second, 1, 2, &dir, &rows).unwrap().expect("consistent 2");
+        let got = crypto3_consistent_candidate(&second, 1, 2, &dir, &rows)
+            .unwrap()
+            .expect("consistent 2");
         assert!(got.0 <= 2, "{}", got.0);
-        let choice = choose(&second, &dir, &rows).unwrap().expect("consistent choose 2");
+        let choice = choose(&second, &dir, &rows)
+            .unwrap()
+            .expect("consistent choose 2");
         assert!(choice.score <= got.0);
         assert_named(&choice, "three-coin", 2);
         let (spiked_dir, spiked_rows) = spike(&second_samples, "b", "c");
-        assert!(crypto3_consistent_candidate(&second, 1, 2, &spiked_dir, &spiked_rows).unwrap().is_none());
+        assert!(
+            crypto3_consistent_candidate(&second, 1, 2, &spiked_dir, &spiked_rows)
+                .unwrap()
+                .is_none()
+        );
 
         let mixed_a = curve_coins(
-            &["6616494140643702778", "226374747", "721", "1550859921615324669071"],
+            &[
+                "6616494140643702778",
+                "226374747",
+                "721",
+                "1550859921615324669071",
+            ],
             "100",
             "4000000",
         );
@@ -4840,16 +5662,29 @@ mod tests {
             ("1550859921615324669071", "5539336923065416677", "1"),
         ];
         let (dir, rows) = pack(&mixed_a_samples, "d", "a");
-        let got = stable_mixed_candidate(&mixed_a, 3, 0, &dir, &rows).unwrap().expect("mixed");
+        let got = stable_mixed_candidate(&mixed_a, 3, 0, &dir, &rows)
+            .unwrap()
+            .expect("mixed");
         assert_eq!(got.0, 0);
-        let choice = choose(&mixed_a, &dir, &rows).unwrap().expect("mixed choose");
+        let choice = choose(&mixed_a, &dir, &rows)
+            .unwrap()
+            .expect("mixed choose");
         assert!(choice.score <= got.0);
         assert_named(&choice, "stable", 0);
         let (spiked_dir, spiked_rows) = spike(&mixed_a_samples, "d", "a");
-        assert!(stable_mixed_candidate(&mixed_a, 3, 0, &spiked_dir, &spiked_rows).unwrap().is_none());
+        assert!(
+            stable_mixed_candidate(&mixed_a, 3, 0, &spiked_dir, &spiked_rows)
+                .unwrap()
+                .is_none()
+        );
 
         let mixed_b = curve_coins(
-            &["333055825", "332496894", "184585815059", "334947017487739244032"],
+            &[
+                "333055825",
+                "332496894",
+                "184585815059",
+                "334947017487739244032",
+            ],
             "500",
             "3000000",
         );
@@ -4866,12 +5701,20 @@ mod tests {
             ("3065409788784288955330", "104658453324", "1"),
         ];
         let (dir, rows) = pack(&mixed_b_samples, "d", "c");
-        let got = stable_mixed_candidate(&mixed_b, 3, 2, &dir, &rows).unwrap().expect("mixed b");
+        let got = stable_mixed_candidate(&mixed_b, 3, 2, &dir, &rows)
+            .unwrap()
+            .expect("mixed b");
         assert_eq!(got.0, 0);
-        let choice = choose(&mixed_b, &dir, &rows).unwrap().expect("mixed choose b");
+        let choice = choose(&mixed_b, &dir, &rows)
+            .unwrap()
+            .expect("mixed choose b");
         assert!(choice.score <= got.0);
         assert_named(&choice, "stable", 0);
         let (spiked_dir, spiked_rows) = spike(&mixed_b_samples, "d", "c");
-        assert!(stable_mixed_candidate(&mixed_b, 3, 2, &spiked_dir, &spiked_rows).unwrap().is_none());
+        assert!(
+            stable_mixed_candidate(&mixed_b, 3, 2, &spiked_dir, &spiked_rows)
+                .unwrap()
+                .is_none()
+        );
     }
 }

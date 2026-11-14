@@ -190,6 +190,22 @@ impl Rpc {
         call_bytes(response)
     }
 
+    /// `eth_call` at one snapshot block, with a state override.
+    ///
+    /// Block 0 is rejected here so a quote cannot fall through to `latest`.
+    pub fn eth_call_block(
+        &self,
+        data: &[u8],
+        to: Option<Address>,
+        gas: u64,
+        block: u64,
+        overrides: &Value,
+    ) -> eyre::Result<CallBytes> {
+        let params = call_params(data, to, gas, block, overrides)?;
+        let response = self.exchange("eth_call", params)?;
+        call_bytes(response)
+    }
+
     pub fn call_word(&self, to: Address, data: &[u8]) -> eyre::Result<U256> {
         let call = self.eth_call(data, Some(to), 1_000_000)?;
         if call.reverted || call.bytes.len() != 32 {
@@ -393,6 +409,30 @@ fn block_tag(block: Option<u64>) -> Value {
         Some(number) => json!(format!("0x{number:x}")),
         None => json!("latest"),
     }
+}
+
+/// JSON-RPC params for one overridden `eth_call`. The block is required.
+pub(crate) fn call_params(
+    data: &[u8],
+    to: Option<Address>,
+    gas: u64,
+    block: u64,
+    overrides: &Value,
+) -> eyre::Result<Value> {
+    if block == 0 {
+        return Err(eyre!("snapshot block is 0"));
+    }
+    let mut tx = serde_json::Map::new();
+    tx.insert("data".into(), json!(hex_0x(data)));
+    tx.insert("gas".into(), json!(format!("0x{gas:x}")));
+    if let Some(to) = to {
+        tx.insert("to".into(), json!(to.to_string()));
+    }
+    Ok(json!([
+        Value::Object(tx),
+        format!("0x{block:x}"),
+        overrides
+    ]))
 }
 
 fn values_unsupported(response: &RpcResponse) -> bool {
@@ -608,6 +648,20 @@ mod tests {
         let out = redact_secret(text);
         assert!(!out.contains("secretkeyvalue"), "{out}");
         assert!(out.contains("redacted"), "{out}");
+    }
+
+    #[test]
+    fn execution_call_pins_the_snapshot_block() {
+        let to: Address = "0x0000000000000000000000000000000000510e51"
+            .parse()
+            .unwrap();
+        let overrides = json!({ to.to_string(): { "code": "0x00" } });
+        let params = call_params(&[0xab], Some(to), 100, 16, &overrides).unwrap();
+        let items = params.as_array().unwrap();
+        assert_eq!(items[1], json!("0x10"));
+        assert_eq!(items[2], overrides);
+        assert!(items[2].get(to.to_string()).unwrap().get("code").is_some());
+        assert!(call_params(&[0xab], Some(to), 100, 0, &overrides).is_err());
     }
 
     #[test]

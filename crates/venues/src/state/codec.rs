@@ -316,6 +316,17 @@ pub(super) fn encode_balancer_mutable(pool: &crate::detail::BalancerPool) -> Vec
     for weight in &pool.weights {
         push_word(&mut out, *weight);
     }
+    if pool.scaling.len() == pool.balances.len()
+        && pool.rates.len() == pool.balances.len()
+        && !pool.scaling.is_empty()
+    {
+        for factor in &pool.scaling {
+            push_word(&mut out, *factor);
+        }
+        for rate in &pool.rates {
+            push_word(&mut out, *rate);
+        }
+    }
     out
 }
 
@@ -356,6 +367,21 @@ pub(super) fn decode_balancer(
     for _ in 0..weights_n {
         weights.push(body.word()?);
     }
+    let (scaling, rates) = if body.rest() == 0 {
+        (Vec::new(), Vec::new())
+    } else if body.rest() == balances.len() * 64 {
+        let mut scaling = Vec::with_capacity(balances.len());
+        let mut rates = Vec::with_capacity(balances.len());
+        for _ in 0..balances.len() {
+            scaling.push(body.word()?);
+        }
+        for _ in 0..balances.len() {
+            rates.push(body.word()?);
+        }
+        (scaling, rates)
+    } else {
+        return Err("trailing".into());
+    };
     body.finish()?;
     Ok(crate::detail::BalancerPool {
         kind,
@@ -368,6 +394,8 @@ pub(super) fn decode_balancer(
         tokens,
         balances,
         weights,
+        scaling,
+        rates,
         flags,
     })
 }
@@ -399,6 +427,11 @@ pub(super) fn encode_curve_mutable(pool: &CurvePool) -> Vec<u8> {
         push_word(&mut out, coin.balance);
         push_word(&mut out, coin.rate);
         push_word(&mut out, coin.price_scale);
+    }
+    if pool.coins.iter().any(|coin| !coin.precision.is_zero()) {
+        for coin in &pool.coins {
+            push_word(&mut out, coin.precision);
+        }
     }
     out
 }
@@ -438,7 +471,15 @@ pub(super) fn decode_curve(immutable: &[u8], body: &[u8]) -> Result<CurvePool, S
             balance: body.word()?,
             rate: body.word()?,
             price_scale: body.word()?,
+            precision: U256::ZERO,
         });
+    }
+    if body.rest() == n * 32 {
+        for coin in &mut coins {
+            coin.precision = body.word()?;
+        }
+    } else if body.rest() != 0 {
+        return Err("trailing".into());
     }
     body.finish()?;
     Ok(CurvePool {

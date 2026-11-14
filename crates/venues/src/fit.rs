@@ -15,15 +15,16 @@
 //! Dust is geometric. The upper end is closer to linear, because price impact
 //! and tick crosses pile up there.
 //!
-//! Chain amounts come from the protocol quoter via Multicall3 at the mutable
-//! snapshot block. One multicall carries 16 quotes, and eight of those calls
-//! are in flight at once. A quoter that reverts the whole batch is split in
-//! half and retried. `local` is this crate's quote of the same snapshot and is
-//! recomputed when the file is written. It is not stored.
+//! Chain amounts come from an execution lens via Multicall3 at the mutable
+//! snapshot block. The lens swaps and returns the output-token balance delta.
+//! One multicall carries 16 quotes, and eight of those calls are in flight at
+//! once. A call that reverts the whole batch is split in half and retried.
+//! `local` is this crate's quote of the same snapshot and is recomputed when
+//! the file is written. It is not stored.
 
 use crate::catalog::{
-    kind_name, AERO, BALANCER_V2, BALANCER_V3, METRIC, PANCAKE_V2, PANCAKE_V3, SUSHI_V2, SUSHI_V3,
-    UNI_V2, UNI_V3, UNI_V4, V2_FORK, V3_FORK,
+    kind_name, AERO, BALANCER_V2, BALANCER_V3, METRIC, PANCAKE_V3, SUSHI_V3, UNI_V3, UNI_V4,
+    V3_FORK,
 };
 use crate::detail::{product_fee_pips, PoolDetail, Quote};
 use crate::fit_formula::{decode_fit, encode_fit, Formula, StoredFit};
@@ -53,12 +54,12 @@ const CALLS_PER_BATCH: usize = 16;
 const QUOTE_IN_FLIGHT: usize = 8;
 const CALL_GAS: u64 = 50_000_000;
 
+/// Runtime is installed with a state override. Nothing is deployed at this address.
+const QUOTE_LENS: Address = alloy_primitives::address!("0000000000000000000000000000000000510e51");
+const LENS_RUNTIME: &str = include_str!("../../../contracts/lens/QuoteLens.bin");
+
 fn multicall() -> Address {
     crate::seeds::document().multicall
-}
-
-fn quote_of(kind: u8, factory: Option<Address>) -> Option<Address> {
-    crate::seeds::quoter(kind, factory)
 }
 
 const SEL_AGGREGATE3: [u8; 4] = [0x82, 0xad, 0x56, 0xcb];
@@ -69,8 +70,6 @@ const SEL_DY_INT: [u8; 4] = [0x5e, 0x0d, 0x44, 0x3f];
 const SEL_DY_UINT: [u8; 4] = [0x55, 0x6d, 0x6e, 0x9f];
 const SEL_BAL3: [u8; 4] = [0x3e, 0xbc, 0x54, 0xe5];
 const SEL_BAL2: [u8; 4] = [0xf8, 0x4d, 0x06, 0x6e];
-const SEL_AERO_QUOTE: [u8; 4] = [0x0a, 0x67, 0x41, 0x42];
-const SEL_METRIC_QUOTE: [u8; 4] = [0x7a, 0x6e, 0xfb, 0xfd];
 
 /// Fractions of `max_in`. The first four are geometric. The rest sit where
 /// the book bends.
@@ -103,10 +102,6 @@ enum Family {
     Metric,
 }
 
-fn batch_of(_family: Family) -> (usize, u64) {
-    (CALLS_PER_BATCH, CALL_GAS)
-}
-
 /// Pools written, plus chain-quote counts. `resumed` were already in the file.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FitReport {
@@ -119,6 +114,8 @@ pub struct FitReport {
 
 struct Quoters {
     code: BTreeMap<(Address, u64), bool>,
+    /// Probed ERC-20 balance slot for the lens, at one snapshot block.
+    slots: BTreeMap<(Address, u64), Option<B256>>,
 }
 
 impl Quoters {
@@ -202,6 +199,8 @@ struct Prepared {
     data: Vec<u8>,
     alt: Option<Vec<u8>>,
     alt_method: Option<&'static str>,
+    token_in: Address,
+    fund_eth: bool,
 }
 
 struct Staged {
@@ -220,10 +219,11 @@ enum Prep {
 #[derive(Clone)]
 struct RawCall {
     block: u64,
-    family: Family,
     target: Address,
     data: Vec<u8>,
     method: &'static str,
+    token_in: Address,
+    fund_eth: bool,
 }
 
 struct RawOut {
@@ -428,6 +428,7 @@ pub(crate) async fn drive_quotes<S: EntityStore>(
         match tokio::task::spawn_blocking(move || {
             let mut quoters = Quoters {
                 code: BTreeMap::new(),
+                slots: BTreeMap::new(),
             };
             quote_page(&rpc, &mut quoters, &mut plans)?;
             Ok::<_, eyre::Report>(plans)
@@ -521,56 +522,27 @@ fn header_value() -> Value {
         "curve_version": CURVE_VERSION,
         "fits": "Each pool carries fits: the closed form stored for that direction. score is the all-label worst basis points. formula.kind is the stored formula. A direction with no fit is absent. Skip reasons are not formulas.",
         "units": "Raw token amounts. Decimals are not stored. Do not assume 18.",
-        "ground_truth": "chain_out is a protocol quoter sample stored for validation. The state pipeline does not fetch new samples and does not fit curves to them. A stored curve is chosen from local quotes of the ingested snapshot. local_out is recomputed from that snapshot when this file is written.",
+        "ground_truth": "chain_out is an execution sample at the stored snapshot block. The lens swaps and returns the output-token balance delta. The state pipeline does not fetch new samples and does not fit curves to them. A stored curve is chosen from local quotes of the ingested snapshot. local_out is recomputed from that snapshot when this file is written.",
         "domain": "max_in is the top of the fit domain. cp_99 buys 99% of the output reserve. ladder is the last step of the concentrated book. balance_search bisects the local quote toward 99% of the output balance, capped at 1000x the input balance. balance is the input balance when that search cannot run. uninitialized and empty_book and none have no samples.",
         "grid": "Fractions of max_in: 0.0001, 0.001, 0.01, 0.05, 0.1, 0.25, 0.5, 0.8, 0.95, 1. A fraction that rounds to 0 is omitted. Two fractions that land on the same amount keep the larger fraction.",
         "chain_max": "If the fraction-1 quote reverts, an 8-step bisection records the largest accepted input. larger_input_reverted is then true. If fraction 1 is accepted, chain_max_in equals that input and larger_input_reverted is false: the domain top worked, and a constant-product pool still has no hard maximum.",
         "pairs": "Every ordered pair when the pool has at most 4 tokens. A larger pool keeps the first 4 and sets pairs_capped.",
         "resume": "Stored chain samples are copied out of the catalog. The state pipeline does not fetch new ones. A repeated pool id is a torn line; keep the last copy.",
         "gaps": {
-            "v2_fork": "A v2 fork quotes through the router named with its factory. A factory with no router is skipped. The Uniswap router hardcodes a 0.3% fee and the canonical factory.",
-            "v3_fork": "A v3 fork quotes through the quoter named with its factory. A factory with no quoter is skipped.",
-            "uniswap_v4": "quoteExactInputSingle takes uint128. A larger input is left unquoted."
+            "v2_fork": "A fork is swapped on the pair. The fee is the pair's fee, or 30 bps (Pancake 25 bps) when the fee view was unset.",
+            "v3_fork": "A fork is swapped on the pool. Callbacks are uniswapV3SwapCallback, pancakeV3SwapCallback, and algebraSwapCallback.",
+            "uniswap_v4": "The swap is unlocked on the PoolManager. A hook that reverts fails the quote.",
+            "snapshot": "eth_call uses the stored snapshot block. Block 0 is not quoted."
         },
         "quoters": quoter_header()
     })
 }
 
 fn quoter_header() -> Value {
-    let v2_fork = quoted_root(V2_FORK);
-    let v3_fork = quoted_root(V3_FORK);
     json!({
-        "uniswap_v2": { "address": addr(quote_of(UNI_V2, None).unwrap_or(Address::ZERO)), "method": "getAmountsOut" },
-        "sushi_v2": { "address": addr(quote_of(SUSHI_V2, None).unwrap_or(Address::ZERO)), "method": "getAmountsOut" },
-        "pancake_v2": { "address": addr(quote_of(PANCAKE_V2, None).unwrap_or(Address::ZERO)), "method": "getAmountsOut" },
-        "uniswap_v3": { "address": addr(quote_of(UNI_V3, None).unwrap_or(Address::ZERO)), "method": "quoteExactInputSingle" },
-        "pancake_v3": { "address": addr(quote_of(PANCAKE_V3, None).unwrap_or(Address::ZERO)), "method": "quoteExactInputSingle" },
-        "sushi_v3": { "address": addr(quote_of(SUSHI_V3, None).unwrap_or(Address::ZERO)), "method": "quoteExactInputSingle" },
-        "uniswap_v4": { "address": addr(quote_of(UNI_V4, None).unwrap_or(Address::ZERO)), "method": "quoteExactInputSingle" },
-        "balancer_v2": { "method": "queryBatchSwap" },
-        "balancer_v3": { "address": addr(quote_of(BALANCER_V3, None).unwrap_or(Address::ZERO)), "method": "querySwapSingleTokenExactIn" },
-        "curve": { "method": "get_dy", "int128": "0x5e0d443f", "uint256": "0x556d6e9f" },
-        "aero": { "address": addr(quote_of(AERO, None).unwrap_or(Address::ZERO)), "method": "quoteExactInputSingleV3" },
-        "metric": { "address": addr(quote_of(METRIC, None).unwrap_or(Address::ZERO)), "method": "quoteLiveExactInSingle" },
-        "v2_fork": {
-            "factory": addr(v2_fork.map(|root| root.address).unwrap_or(Address::ZERO)),
-            "address": addr(v2_fork.and_then(|root| root.quote).unwrap_or(Address::ZERO)),
-            "method": "getAmountsOut"
-        },
-        "v3_fork": {
-            "factory": addr(v3_fork.map(|root| root.address).unwrap_or(Address::ZERO)),
-            "address": addr(v3_fork.and_then(|root| root.quote).unwrap_or(Address::ZERO)),
-            "method": "quoteExactInputSingle"
-        },
+        "lens": { "address": addr(QUOTE_LENS), "method": "swap" },
         "multicall3": addr(multicall())
     })
-}
-
-fn quoted_root(kind: u8) -> Option<&'static crate::seeds::Root> {
-    crate::seeds::document()
-        .roots
-        .iter()
-        .find(|root| root.kind == kind && root.quote.is_some())
 }
 
 /// Smallest grid knot is `1/10_000` of `max_in`. A smaller domain rounds to 0.
@@ -928,7 +900,10 @@ fn balances(detail: &PoolDetail, token_in: Address, token_out: Address) -> Optio
         PoolDetail::Balancer(pool) => {
             let input = pool.tokens.iter().position(|token| *token == token_in)?;
             let output = pool.tokens.iter().position(|token| *token == token_out)?;
-            Some((*pool.balances.get(input)?, *pool.balances.get(output)?))
+            Some((
+                crate::detail::v3_raw_balance(pool, input).ok()?,
+                crate::detail::v3_raw_balance(pool, output).ok()?,
+            ))
         }
         PoolDetail::Curve(pool) => {
             let input = pool.coins.iter().position(|coin| coin.token == token_in)?;
@@ -1103,7 +1078,6 @@ fn quote_page(rpc: &Rpc, quoters: &mut Quoters, plans: &mut [PoolPlan]) -> eyre:
             for (sample_index, sample) in dir.samples.iter_mut().enumerate() {
                 match prepare(
                     &detail,
-                    plan.factory,
                     dir.token_in,
                     dir.token_out,
                     sample.amount_in,
@@ -1130,6 +1104,7 @@ fn quote_page(rpc: &Rpc, quoters: &mut Quoters, plans: &mut [PoolPlan]) -> eyre:
     }
     let keys: Vec<(Address, u64)> = staged
         .iter()
+        .filter(|item| item.prepared.target != QUOTE_LENS)
         .map(|item| (item.prepared.target, item.block))
         .collect();
     quoters.warm(rpc, &keys)?;
@@ -1137,7 +1112,9 @@ fn quote_page(rpc: &Rpc, quoters: &mut Quoters, plans: &mut [PoolPlan]) -> eyre:
     let mut back: Vec<(usize, usize, usize)> = Vec::new();
     for item in staged {
         let sample = &mut plans[item.pool].directions[item.dir].samples[item.sample];
-        if !quoters.has_cached(item.prepared.target, item.block) {
+        if item.prepared.target != QUOTE_LENS
+            && !quoters.has_cached(item.prepared.target, item.block)
+        {
             sample.chain_error = Some("quoter has no code at this block".into());
             sample.alt = None;
             continue;
@@ -1145,14 +1122,15 @@ fn quote_page(rpc: &Rpc, quoters: &mut Quoters, plans: &mut [PoolPlan]) -> eyre:
         sample.attempted = true;
         calls.push(RawCall {
             block: item.block,
-            family: item.prepared.family,
             target: item.prepared.target,
             data: item.prepared.data,
             method: item.prepared.method,
+            token_in: item.prepared.token_in,
+            fund_eth: item.prepared.fund_eth,
         });
         back.push((item.pool, item.dir, item.sample));
     }
-    apply_calls(rpc, plans, &calls, &back)?;
+    apply_calls(rpc, quoters, plans, &calls, &back)?;
     calls.clear();
     back.clear();
     for (pool_index, plan) in plans.iter_mut().enumerate() {
@@ -1173,26 +1151,28 @@ fn quote_page(rpc: &Rpc, quoters: &mut Quoters, plans: &mut [PoolPlan]) -> eyre:
                 };
                 calls.push(RawCall {
                     block,
-                    family: Family::Curve,
                     target,
                     data,
                     method,
+                    token_in: dir.token_in,
+                    fund_eth: dir.token_in == Address::ZERO,
                 });
                 back.push((pool_index, dir_index, sample_index));
             }
         }
     }
-    apply_calls(rpc, plans, &calls, &back)?;
+    apply_calls(rpc, quoters, plans, &calls, &back)?;
     bisect(rpc, quoters, plans)
 }
 
 fn apply_calls(
     rpc: &Rpc,
+    quoters: &mut Quoters,
     plans: &mut [PoolPlan],
     calls: &[RawCall],
     back: &[(usize, usize, usize)],
 ) -> eyre::Result<()> {
-    let outs = dispatch_raw(rpc, calls)?;
+    let outs = dispatch_raw(rpc, quoters, calls)?;
     for (index, out) in outs.into_iter().enumerate() {
         let (pool, dir, sample) = back[index];
         let slot = &mut plans[pool].directions[dir].samples[sample];
@@ -1261,14 +1241,7 @@ fn bisect(rpc: &Rpc, quoters: &mut Quoters, plans: &mut [PoolPlan]) -> eyre::Res
                     continue;
                 };
                 let dir = &plan.directions[dir_index];
-                prepare(
-                    detail,
-                    plan.factory,
-                    dir.token_in,
-                    dir.token_out,
-                    mid,
-                    plan.block,
-                )
+                prepare(detail, dir.token_in, dir.token_out, mid, plan.block)
             };
             let Prep::Ready(prepared) = prepared else {
                 bounds[index].hi = mid;
@@ -1280,11 +1253,12 @@ fn bisect(rpc: &Rpc, quoters: &mut Quoters, plans: &mut [PoolPlan]) -> eyre::Res
         }
         let keys: Vec<(Address, u64)> = staged
             .iter()
+            .filter(|(_, _, _, prepared)| prepared.target != QUOTE_LENS)
             .map(|(_, _, block, prepared)| (prepared.target, *block))
             .collect();
         quoters.warm(rpc, &keys)?;
         for (index, mid, block, prepared) in staged {
-            if !quoters.has_cached(prepared.target, block) {
+            if prepared.target != QUOTE_LENS && !quoters.has_cached(prepared.target, block) {
                 bounds[index].hi = mid;
                 bounds[index].steps = bounds[index].steps.saturating_add(1);
                 continue;
@@ -1292,16 +1266,17 @@ fn bisect(rpc: &Rpc, quoters: &mut Quoters, plans: &mut [PoolPlan]) -> eyre::Res
             which.push((index, mid));
             calls.push(RawCall {
                 block,
-                family: prepared.family,
                 target: prepared.target,
                 data: prepared.data,
                 method: prepared.method,
+                token_in: prepared.token_in,
+                fund_eth: prepared.fund_eth,
             });
         }
         if calls.is_empty() {
             break;
         }
-        let outs = dispatch_raw(rpc, &calls)?;
+        let outs = dispatch_raw(rpc, quoters, &calls)?;
         for ((index, mid), out) in which.into_iter().zip(outs) {
             let bound = &mut bounds[index];
             bound.steps = bound.steps.saturating_add(1);
@@ -1361,7 +1336,6 @@ fn bisect(rpc: &Rpc, quoters: &mut Quoters, plans: &mut [PoolPlan]) -> eyre::Res
 
 fn prepare(
     detail: &PoolDetail,
-    factory: Option<Address>,
     token_in: Address,
     token_out: Address,
     amount: U256,
@@ -1371,12 +1345,8 @@ fn prepare(
         return Prep::Skip("snapshot block is 0".into());
     }
     let built = match detail {
-        PoolDetail::ConstantProduct(pool) => {
-            prepare_product(pool.kind, factory, token_in, token_out, amount)
-        }
-        PoolDetail::Concentrated(pool) => {
-            prepare_concentrated(pool, factory, token_in, token_out, amount)
-        }
+        PoolDetail::ConstantProduct(pool) => prepare_product(pool, token_in, token_out, amount),
+        PoolDetail::Concentrated(pool) => prepare_concentrated(pool, token_in, token_out, amount),
         PoolDetail::Balancer(pool) => prepare_balancer(pool, token_in, token_out, amount),
         PoolDetail::Curve(pool) => prepare_curve(pool, token_in, token_out, amount),
         PoolDetail::Metric(pool) => prepare_metric(pool, token_in, token_out, amount),
@@ -1389,69 +1359,44 @@ fn prepare(
 }
 
 fn prepare_product(
-    kind: u8,
-    factory: Option<Address>,
+    pool: &crate::detail::ConstantProduct,
     token_in: Address,
     token_out: Address,
     amount: U256,
 ) -> Result<Prepared, String> {
-    let target = match kind {
-        UNI_V2 | SUSHI_V2 | PANCAKE_V2 => {
-            quote_of(kind, None).ok_or_else(|| "no v2 quoter".to_string())?
-        }
-        V2_FORK => quote_of(kind, factory)
-            .ok_or_else(|| "no shared quoter for a v2 fork; fee is per pair".to_string())?,
-        _ => return Err("no v2 quoter".into()),
-    };
-    Ok(ready(
+    if pool.pair == Address::ZERO {
+        return Err("pair".into());
+    }
+    if token_in == Address::ZERO || token_out == Address::ZERO {
+        return Err("token".into());
+    }
+    let fee = product_fee_pips(pool.kind, pool.fee_pips);
+    Ok(execution(
         Family::V2,
-        target,
-        "getAmountsOut",
-        encode_amounts_out(amount, token_in, token_out),
+        encode_quote_v2(pool.pair, token_in, token_out, amount, fee),
+        token_in,
     ))
 }
 
 fn prepare_concentrated(
     pool: &crate::detail::Concentrated,
-    factory: Option<Address>,
     token_in: Address,
     token_out: Address,
     amount: U256,
 ) -> Result<Prepared, String> {
-    let zero_for_one = if token_in == pool.token0 && token_out == pool.token1 {
-        true
-    } else if token_in == pool.token1 && token_out == pool.token0 {
-        false
-    } else {
-        return Err("token".into());
-    };
+    if exceeds_positive_i256(amount) {
+        return Err("amount exceeds int256".into());
+    }
+    let zero_for_one = zero_for_one(pool.token0, pool.token1, token_in, token_out)?;
     match pool.kind {
-        UNI_V3 | PANCAKE_V3 | SUSHI_V3 => {
-            let target =
-                quote_of(pool.kind, None).ok_or_else(|| "no concentrated quoter".to_string())?;
-            let fee = pool.fee_pips.ok_or_else(|| "fee unread".to_string())?;
-            Ok(ready(
-                Family::V3,
-                target,
-                "quoteExactInputSingle",
-                encode_v3_quote(token_in, token_out, amount, fee),
-            ))
-        }
         UNI_V4 => {
             let fee = pool.fee_pips.ok_or_else(|| "fee unread".to_string())?;
             if !fits_i24(pool.tick_spacing) {
                 return Err("tick spacing".into());
             }
-            if amount > U256::from(u128::MAX) {
-                return Err("amount exceeds uint128".into());
-            }
-            let target =
-                quote_of(UNI_V4, None).ok_or_else(|| "no concentrated quoter".to_string())?;
-            Ok(ready(
+            Ok(execution(
                 Family::V4,
-                target,
-                "quoteExactInputSingle",
-                encode_v4_quote(
+                encode_quote_v4(
                     pool.token0,
                     pool.token1,
                     fee,
@@ -1460,30 +1405,28 @@ fn prepare_concentrated(
                     zero_for_one,
                     amount,
                 ),
+                token_in,
             ))
         }
-        V3_FORK => {
-            let target = quote_of(V3_FORK, factory)
-                .ok_or_else(|| "no confirmed quoter for this v3 fork".to_string())?;
-            let fee = pool.fee_pips.ok_or_else(|| "fee unread".to_string())?;
-            Ok(ready(
-                Family::V3,
-                target,
-                "quoteExactInputSingle",
-                encode_v3_quote(token_in, token_out, amount, fee),
+        UNI_V3 | PANCAKE_V3 | SUSHI_V3 | V3_FORK | AERO => {
+            if pool.home == Address::ZERO {
+                return Err("pool".into());
+            }
+            if token_in == Address::ZERO || token_out == Address::ZERO {
+                return Err("token".into());
+            }
+            let family = if pool.kind == AERO {
+                Family::Aero
+            } else {
+                Family::V3
+            };
+            Ok(execution(
+                family,
+                encode_quote_v3(pool.home, token_in, token_out, zero_for_one, amount),
+                token_in,
             ))
         }
-        AERO => {
-            let target =
-                quote_of(AERO, None).ok_or_else(|| "no concentrated quoter".to_string())?;
-            Ok(ready(
-                Family::Aero,
-                target,
-                "quoteExactInputSingleV3",
-                encode_aero_quote(pool.home, token_in, amount),
-            ))
-        }
-        _ => Err("no concentrated quoter".into()),
+        _ => Err("pool".into()),
     }
 }
 
@@ -1493,14 +1436,10 @@ fn prepare_metric(
     token_out: Address,
     amount: U256,
 ) -> Result<Prepared, String> {
-    let zero_for_one = if token_in == pool.token0 && token_out == pool.token1 {
-        true
-    } else if token_in == pool.token1 && token_out == pool.token0 {
-        false
-    } else {
-        return Err("token".into());
-    };
-    // `quoteLiveExactInSingle` reverts AmountTooLarge above `int128`.
+    if pool.pool == Address::ZERO {
+        return Err("pool".into());
+    }
+    let zero_for_one = zero_for_one(pool.token0, pool.token1, token_in, token_out)?;
     if amount > U256::from(i128::MAX as u128) {
         return Err("amount exceeds int128".into());
     }
@@ -1510,12 +1449,10 @@ fn prepare_metric(
     } else {
         U256::from(u128::MAX)
     };
-    let target = quote_of(METRIC, None).ok_or_else(|| "no concentrated quoter".to_string())?;
-    Ok(ready(
+    Ok(execution(
         Family::Metric,
-        target,
-        "quoteLiveExactInSingle",
-        encode_metric_quote(pool.pool, zero_for_one, amount, limit),
+        encode_quote_metric(pool.pool, token_in, token_out, zero_for_one, amount, limit),
+        token_in,
     ))
 }
 
@@ -1525,24 +1462,29 @@ fn prepare_balancer(
     token_out: Address,
     amount: U256,
 ) -> Result<Prepared, String> {
+    if token_in == Address::ZERO || token_out == Address::ZERO {
+        return Err("token".into());
+    }
+    if pool.vault == Address::ZERO {
+        return Err("vault".into());
+    }
     match pool.kind {
-        BALANCER_V2 => Ok(ready(
+        BALANCER_V2 => Ok(execution(
             Family::Bal2,
-            pool.vault,
-            "queryBatchSwap",
-            encode_bal2(pool.id, token_in, token_out, amount),
+            encode_quote_bal2(pool.vault, pool.id, token_in, token_out, amount),
+            token_in,
         )),
         BALANCER_V3 => {
-            let target =
-                quote_of(BALANCER_V3, None).ok_or_else(|| "no balancer quoter".to_string())?;
-            Ok(ready(
+            if pool.pool == Address::ZERO {
+                return Err("pool".into());
+            }
+            Ok(execution(
                 Family::Bal3,
-                target,
-                "querySwapSingleTokenExactIn",
-                encode_bal3(pool.pool, token_in, token_out, amount),
+                encode_quote_bal3(pool.vault, pool.pool, token_in, token_out, amount),
+                token_in,
             ))
         }
-        _ => Err("no balancer quoter".into()),
+        _ => Err("vault".into()),
     }
 }
 
@@ -1562,40 +1504,69 @@ fn prepare_curve(
         .iter()
         .position(|coin| coin.token == token_out)
         .ok_or("token")?;
+    if pool.pool == Address::ZERO {
+        return Err("pool".into());
+    }
+    if token_in == Address::ZERO || token_out == Address::ZERO {
+        return Err("native curve".into());
+    }
     let preferred_uint = pool.coins_indexed_by_uint;
-    let mut prepared = ready(
+    let mut prepared = execution(
         Family::Curve,
-        pool.pool,
-        if preferred_uint {
-            "get_dy_uint256"
-        } else {
-            "get_dy_int128"
-        },
-        encode_get_dy(preferred_uint, input as u64, output as u64, amount),
+        encode_quote_curve(
+            pool.pool,
+            token_in,
+            token_out,
+            input as u64,
+            output as u64,
+            amount,
+            preferred_uint,
+        ),
+        token_in,
     );
-    prepared.alt = Some(encode_get_dy(
-        !preferred_uint,
+    prepared.alt = Some(encode_quote_curve(
+        pool.pool,
+        token_in,
+        token_out,
         input as u64,
         output as u64,
         amount,
+        !preferred_uint,
     ));
-    prepared.alt_method = Some(if preferred_uint {
-        "get_dy_int128"
-    } else {
-        "get_dy_uint256"
-    });
+    prepared.alt_method = Some("swap");
     Ok(prepared)
 }
 
-fn ready(family: Family, target: Address, method: &'static str, data: Vec<u8>) -> Prepared {
+fn execution(family: Family, data: Vec<u8>, token_in: Address) -> Prepared {
     Prepared {
         family,
-        target,
-        method,
+        target: QUOTE_LENS,
+        method: "swap",
         data,
         alt: None,
         alt_method: None,
+        token_in,
+        fund_eth: token_in == Address::ZERO,
     }
+}
+
+fn zero_for_one(
+    token0: Address,
+    token1: Address,
+    token_in: Address,
+    token_out: Address,
+) -> Result<bool, String> {
+    if token_in == token0 && token_out == token1 {
+        Ok(true)
+    } else if token_in == token1 && token_out == token0 {
+        Ok(false)
+    } else {
+        Err("token".into())
+    }
+}
+
+fn exceeds_positive_i256(amount: U256) -> bool {
+    amount.bit(255)
 }
 
 fn fits_i24(value: i32) -> bool {
@@ -1606,31 +1577,17 @@ struct CallChunk {
     block: u64,
     gas: u64,
     indices: Vec<usize>,
+    overrides: Value,
 }
 
-fn dispatch_raw(rpc: &Rpc, calls: &[RawCall]) -> eyre::Result<Vec<ChainOut>> {
+fn dispatch_raw(
+    rpc: &Rpc,
+    quoters: &mut Quoters,
+    calls: &[RawCall],
+) -> eyre::Result<Vec<ChainOut>> {
     if calls.is_empty() {
         return Ok(Vec::new());
     }
-    let mut order: BTreeMap<(u64, Family), Vec<usize>> = BTreeMap::new();
-    for (index, call) in calls.iter().enumerate() {
-        order
-            .entry((call.block, call.family))
-            .or_default()
-            .push(index);
-    }
-    let mut chunks = Vec::new();
-    for ((block, family), indices) in order {
-        let (size, gas) = batch_of(family);
-        for chunk in indices.chunks(size) {
-            chunks.push(CallChunk {
-                block,
-                gas,
-                indices: chunk.to_vec(),
-            });
-        }
-    }
-    let groups = run_chunks(rpc, calls, &chunks)?;
     let mut outs = vec![
         ChainOut {
             amount_out: None,
@@ -1638,6 +1595,52 @@ fn dispatch_raw(rpc: &Rpc, calls: &[RawCall]) -> eyre::Result<Vec<ChainOut>> {
         };
         calls.len()
     ];
+    let mut runnable = Vec::new();
+    for (index, call) in calls.iter().enumerate() {
+        if call.block == 0 {
+            outs[index] = ChainOut {
+                amount_out: None,
+                error: Some("snapshot block is 0".into()),
+            };
+            continue;
+        }
+        if call.token_in == Address::ZERO && !call.fund_eth {
+            outs[index] = ChainOut {
+                amount_out: None,
+                error: Some("token".into()),
+            };
+            continue;
+        }
+        if call.token_in != Address::ZERO
+            && slot_for(rpc, quoters, call.token_in, call.block)?.is_none()
+        {
+            outs[index] = ChainOut {
+                amount_out: None,
+                error: Some("balance slot".into()),
+            };
+            continue;
+        }
+        runnable.push(index);
+    }
+    let mut order: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+    for index in runnable {
+        order.entry(calls[index].block).or_default().push(index);
+    }
+    let mut chunks = Vec::new();
+    for (block, indices) in order {
+        for chunk in indices.chunks(CALLS_PER_BATCH) {
+            chunks.push(CallChunk {
+                block,
+                gas: CALL_GAS,
+                indices: chunk.to_vec(),
+                overrides: chunk_override(quoters, calls, block, chunk)?,
+            });
+        }
+    }
+    if chunks.is_empty() {
+        return Ok(outs);
+    }
+    let groups = run_chunks(rpc, calls, &chunks)?;
     for (chunk, raws) in chunks.iter().zip(groups) {
         if raws.len() != chunk.indices.len() {
             return Err(eyre::eyre!("quote batch length"));
@@ -1647,6 +1650,117 @@ fn dispatch_raw(rpc: &Rpc, calls: &[RawCall]) -> eyre::Result<Vec<ChainOut>> {
         }
     }
     Ok(outs)
+}
+
+fn slot_for(
+    rpc: &Rpc,
+    quoters: &mut Quoters,
+    token: Address,
+    block: u64,
+) -> eyre::Result<Option<B256>> {
+    let key = (token, block);
+    if let Some(found) = quoters.slots.get(&key) {
+        return Ok(*found);
+    }
+    let found = probe_balance_slot(rpc, token, block)?;
+    quoters.slots.insert(key, found);
+    Ok(found)
+}
+
+fn probe_balance_slot(rpc: &Rpc, token: Address, block: u64) -> eyre::Result<Option<B256>> {
+    let mut diff = serde_json::Map::new();
+    let mut keys = Vec::with_capacity(10);
+    for slot in 0..10u64 {
+        let key = balance_slot(QUOTE_LENS, slot);
+        let pattern = probe_pattern(slot);
+        diff.insert(hex_prefix(key.as_slice()), json!(word_hex(pattern)));
+        keys.push((key, pattern));
+    }
+    let mut token_override = serde_json::Map::new();
+    token_override.insert("stateDiff".into(), Value::Object(diff));
+    let mut accounts = serde_json::Map::new();
+    accounts.insert(token.to_string(), Value::Object(token_override));
+    let overrides = Value::Object(accounts);
+    let mut data = Vec::with_capacity(36);
+    data.extend_from_slice(&[0x70, 0xa0, 0x82, 0x31]);
+    push_addr(&mut data, QUOTE_LENS);
+    let call = rpc.eth_call_block(&data, Some(token), 1_000_000, block, &overrides)?;
+    if call.reverted || call.bytes.len() < 32 {
+        return Ok(None);
+    }
+    let got = U256::from_be_slice(&call.bytes[..32]);
+    Ok(keys
+        .into_iter()
+        .find(|(_, pattern)| *pattern == got)
+        .map(|(key, _)| key))
+}
+
+fn chunk_override(
+    quoters: &Quoters,
+    calls: &[RawCall],
+    block: u64,
+    indices: &[usize],
+) -> eyre::Result<Value> {
+    let mut funded = BTreeMap::new();
+    let mut fund_eth = false;
+    for index in indices {
+        let call = &calls[*index];
+        fund_eth |= call.fund_eth;
+        if call.token_in == Address::ZERO {
+            continue;
+        }
+        let slot = quoters
+            .slots
+            .get(&(call.token_in, block))
+            .copied()
+            .flatten()
+            .ok_or_else(|| eyre::eyre!("balance slot missing"))?;
+        funded.insert(call.token_in, slot);
+    }
+    Ok(execution_override(fund_eth, &funded))
+}
+
+fn execution_override(fund_eth: bool, funded: &BTreeMap<Address, B256>) -> Value {
+    let mut lens = serde_json::Map::new();
+    lens.insert("code".into(), json!(format!("0x{}", LENS_RUNTIME.trim())));
+    if fund_eth {
+        lens.insert("balance".into(), json!(word_hex(fund_balance())));
+    }
+    let mut accounts = serde_json::Map::new();
+    accounts.insert(QUOTE_LENS.to_string(), Value::Object(lens));
+    let balance = word_hex(fund_balance());
+    for (token, slot) in funded {
+        let mut diff = serde_json::Map::new();
+        diff.insert(hex_prefix(slot.as_slice()), json!(balance.clone()));
+        let mut token_override = serde_json::Map::new();
+        token_override.insert("stateDiff".into(), Value::Object(diff));
+        accounts.insert(token.to_string(), Value::Object(token_override));
+    }
+    Value::Object(accounts)
+}
+
+fn balance_slot(holder: Address, slot: u64) -> B256 {
+    let mut encoded = [0u8; 64];
+    encoded[12..32].copy_from_slice(holder.as_slice());
+    encoded[32..].copy_from_slice(&U256::from(slot).to_be_bytes::<32>());
+    alloy_primitives::keccak256(encoded)
+}
+
+fn probe_pattern(slot: u64) -> U256 {
+    let mut bytes = [0x51u8; 32];
+    bytes[31] = u8::try_from(slot).unwrap_or(0);
+    U256::from_be_bytes(bytes)
+}
+
+fn fund_balance() -> U256 {
+    U256::from(1u8) << 128
+}
+
+fn word_hex(value: U256) -> String {
+    format!(
+        "0x{}",
+        alloy_primitives::hex::encode(value.to_be_bytes::<32>())
+    )
 }
 
 /// Run multicalls on a few threads. Each thread has its own `Rpc` clone so the
@@ -1681,7 +1795,8 @@ fn run_chunks(
                             .iter()
                             .map(|call| (calls[*call].target, calls[*call].data.as_slice()))
                             .collect();
-                        let raws = execute(&rpc, Some(chunk.block), &prepared, chunk.gas)?;
+                        let raws =
+                            execute(&rpc, chunk.block, &prepared, chunk.gas, &chunk.overrides)?;
                         done.push((index, raws));
                     }
                     Ok(done)
@@ -1709,17 +1824,18 @@ fn run_chunks(
 
 fn execute(
     rpc: &Rpc,
-    block: Option<u64>,
+    block: u64,
     calls: &[(Address, &[u8])],
     gas: u64,
+    overrides: &Value,
 ) -> eyre::Result<Vec<RawOut>> {
     if calls.is_empty() {
         return Ok(Vec::new());
     }
     let data = encode_aggregate3(calls);
-    let call = rpc.eth_call_at(&data, Some(multicall()), gas, block)?;
+    let call = rpc.eth_call_block(&data, Some(multicall()), gas, block, overrides)?;
     if call.reverted {
-        return split_or_fail(rpc, block, calls, gas, &call.message);
+        return split_or_fail(rpc, block, calls, gas, overrides, &call.message);
     }
     match decode_aggregate(&call.bytes) {
         Some(inners) if inners.len() == calls.len() => Ok(inners
@@ -1730,15 +1846,16 @@ fn execute(
                 error: None,
             })
             .collect()),
-        _ => split_or_fail(rpc, block, calls, gas, "aggregate decode"),
+        _ => split_or_fail(rpc, block, calls, gas, overrides, "aggregate decode"),
     }
 }
 
 fn split_or_fail(
     rpc: &Rpc,
-    block: Option<u64>,
+    block: u64,
     calls: &[(Address, &[u8])],
     gas: u64,
+    overrides: &Value,
     message: &str,
 ) -> eyre::Result<Vec<RawOut>> {
     if calls.len() == 1 {
@@ -1749,8 +1866,8 @@ fn split_or_fail(
         }]);
     }
     let mid = calls.len() / 2;
-    let mut outs = execute(rpc, block, &calls[..mid], gas)?;
-    outs.extend(execute(rpc, block, &calls[mid..], gas)?);
+    let mut outs = execute(rpc, block, &calls[..mid], gas, overrides)?;
+    outs.extend(execute(rpc, block, &calls[mid..], gas, overrides)?);
     Ok(outs)
 }
 
@@ -2017,6 +2134,7 @@ fn method_static(name: Option<&str>) -> Option<&'static str> {
         Some("get_dy_uint256") => Some("get_dy_uint256"),
         Some("queryBatchSwap") => Some("queryBatchSwap"),
         Some("querySwapSingleTokenExactIn") => Some("querySwapSingleTokenExactIn"),
+        Some("swap") => Some("swap"),
         _ => None,
     }
 }
@@ -2622,6 +2740,8 @@ fn state_json(detail: &PoolDetail) -> Value {
             "tokens": pool.tokens.iter().copied().map(addr).collect::<Vec<_>>(),
             "balances": pool.balances.iter().map(|value| value.to_string()).collect::<Vec<_>>(),
             "weights": pool.weights.iter().map(|value| value.to_string()).collect::<Vec<_>>(),
+            "scaling": pool.scaling.iter().map(|value| value.to_string()).collect::<Vec<_>>(),
+            "rates": pool.rates.iter().map(|value| value.to_string()).collect::<Vec<_>>(),
             "stable": pool.flags & crate::detail::FLAG_STABLE != 0,
             "flags": pool.flags,
         }),
@@ -2643,6 +2763,7 @@ fn state_json(detail: &PoolDetail) -> Value {
                 "balance": coin.balance.to_string(),
                 "rate": coin.rate.to_string(),
                 "price_scale": coin.price_scale.to_string(),
+                "precision": coin.precision.to_string(),
             })).collect::<Vec<_>>(),
         }),
         PoolDetail::Metric(pool) => json!({
@@ -2719,6 +2840,134 @@ fn push_bytes_tail(out: &mut Vec<u8>, data: &[u8]) {
     out.extend(std::iter::repeat_n(0u8, pad));
 }
 
+fn selector(signature: &str) -> [u8; 4] {
+    let hash = alloy_primitives::keccak256(signature.as_bytes());
+    [hash[0], hash[1], hash[2], hash[3]]
+}
+
+fn encode_quote_v2(
+    pair: Address,
+    token_in: Address,
+    token_out: Address,
+    amount: U256,
+    fee_pips: u32,
+) -> Vec<u8> {
+    let mut out = selector("quoteV2(address,address,address,uint256,uint256)").to_vec();
+    push_addr(&mut out, pair);
+    push_addr(&mut out, token_in);
+    push_addr(&mut out, token_out);
+    push_u256(&mut out, amount);
+    push_u256(&mut out, U256::from(fee_pips));
+    out
+}
+
+fn encode_quote_v3(
+    pool: Address,
+    token_in: Address,
+    token_out: Address,
+    zero_for_one: bool,
+    amount: U256,
+) -> Vec<u8> {
+    let mut out = selector("quoteV3(address,address,address,bool,int256)").to_vec();
+    push_addr(&mut out, pool);
+    push_addr(&mut out, token_in);
+    push_addr(&mut out, token_out);
+    push_bool(&mut out, zero_for_one);
+    push_u256(&mut out, amount);
+    out
+}
+
+fn encode_quote_v4(
+    currency0: Address,
+    currency1: Address,
+    fee: u32,
+    tick_spacing: i32,
+    hooks: Address,
+    zero_for_one: bool,
+    amount: U256,
+) -> Vec<u8> {
+    let mut out = selector("quoteV4(address,address,uint24,int24,address,bool,int256)").to_vec();
+    push_addr(&mut out, currency0);
+    push_addr(&mut out, currency1);
+    push_u256(&mut out, U256::from(fee));
+    push_i32_word(&mut out, tick_spacing);
+    push_addr(&mut out, hooks);
+    push_bool(&mut out, zero_for_one);
+    push_u256(&mut out, amount);
+    out
+}
+
+fn encode_quote_metric(
+    pool: Address,
+    token_in: Address,
+    token_out: Address,
+    zero_for_one: bool,
+    amount: U256,
+    limit: U256,
+) -> Vec<u8> {
+    let mut out = selector("quoteMetric(address,address,address,bool,int128,uint128)").to_vec();
+    push_addr(&mut out, pool);
+    push_addr(&mut out, token_in);
+    push_addr(&mut out, token_out);
+    push_bool(&mut out, zero_for_one);
+    push_u256(&mut out, amount);
+    push_u256(&mut out, limit);
+    out
+}
+
+fn encode_quote_curve(
+    pool: Address,
+    token_in: Address,
+    token_out: Address,
+    i: u64,
+    j: u64,
+    amount: U256,
+    uint_index: bool,
+) -> Vec<u8> {
+    let mut out =
+        selector("quoteCurve(address,address,address,uint256,uint256,uint256,bool)").to_vec();
+    push_addr(&mut out, pool);
+    push_addr(&mut out, token_in);
+    push_addr(&mut out, token_out);
+    push_u256(&mut out, U256::from(i));
+    push_u256(&mut out, U256::from(j));
+    push_u256(&mut out, amount);
+    push_bool(&mut out, uint_index);
+    out
+}
+
+fn encode_quote_bal2(
+    vault: Address,
+    pool_id: B256,
+    token_in: Address,
+    token_out: Address,
+    amount: U256,
+) -> Vec<u8> {
+    let mut out = selector("quoteBalancerV2(address,bytes32,address,address,uint256)").to_vec();
+    push_addr(&mut out, vault);
+    out.extend_from_slice(pool_id.as_slice());
+    push_addr(&mut out, token_in);
+    push_addr(&mut out, token_out);
+    push_u256(&mut out, amount);
+    out
+}
+
+fn encode_quote_bal3(
+    vault: Address,
+    pool: Address,
+    token_in: Address,
+    token_out: Address,
+    amount: U256,
+) -> Vec<u8> {
+    let mut out = selector("quoteBalancerV3(address,address,address,address,uint256)").to_vec();
+    push_addr(&mut out, vault);
+    push_addr(&mut out, pool);
+    push_addr(&mut out, token_in);
+    push_addr(&mut out, token_out);
+    push_u256(&mut out, amount);
+    out
+}
+
 fn encode_amounts_out(amount: U256, token_in: Address, token_out: Address) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&SEL_GET_AMOUNTS);
@@ -2727,27 +2976,6 @@ fn encode_amounts_out(amount: U256, token_in: Address, token_out: Address) -> Ve
     push_u256(&mut out, U256::from(2u8));
     push_addr(&mut out, token_in);
     push_addr(&mut out, token_out);
-    out
-}
-
-fn encode_aero_quote(pool: Address, token_in: Address, amount: U256) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(&SEL_AERO_QUOTE);
-    push_addr(&mut out, pool);
-    push_addr(&mut out, token_in);
-    push_u256(&mut out, amount);
-    push_u256(&mut out, U256::ZERO);
-    out
-}
-
-fn encode_metric_quote(pool: Address, zero_for_one: bool, amount: U256, limit: U256) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(&SEL_METRIC_QUOTE);
-    push_addr(&mut out, pool);
-    push_addr(&mut out, Address::ZERO);
-    push_bool(&mut out, zero_for_one);
-    push_u256(&mut out, amount);
-    push_u256(&mut out, limit);
     out
 }
 
@@ -3112,11 +3340,11 @@ mod tests {
         assert_eq!(out.amount_out, Some(U256::from(9u8)));
     }
 
-    fn product(kind: u8) -> PoolDetail {
+    fn product(kind: u8, pair: Address) -> PoolDetail {
         PoolDetail::ConstantProduct(ConstantProduct {
             kind,
             id: B256::ZERO,
-            pair: Address::ZERO,
+            pair,
             token0: address!("0000000000000000000000000000000000000001"),
             token1: address!("0000000000000000000000000000000000000002"),
             reserve0: U256::from(1u64),
@@ -3182,111 +3410,95 @@ mod tests {
     }
 
     #[test]
-    fn fork_quoters_select_the_confirmed_factory() {
+    fn execution_quotes_swap_through_the_lens() {
         let token_in = address!("0000000000000000000000000000000000000001");
         let token_out = address!("0000000000000000000000000000000000000002");
+        let pair = address!("00000000000000000000000000000000000000aa");
         let amount = U256::from(1_000_000u64);
-        let doc = crate::seeds::document();
-        let dx_root = doc.by_name("v2:0xd34971bab6e5e356fd250715f5de0492bb070452");
         let dx = ready_of(prepare(
-            &product(crate::catalog::V2_FORK),
-            Some(dx_root.address),
+            &product(crate::catalog::V2_FORK, pair),
             token_in,
             token_out,
             amount,
             1,
         ));
-        assert_eq!(dx.target, dx_root.quote.unwrap());
-        assert_eq!(dx.method, "getAmountsOut");
-        assert_eq!(dx.data, encode_amounts_out(amount, token_in, token_out));
-        let quiet_v2 = doc.by_name("v2:0x7de800467afce442019884f51a4a1b9143a34fac");
+        assert_eq!(dx.target, QUOTE_LENS);
+        assert_eq!(dx.method, "swap");
+        assert_eq!(dx.token_in, token_in);
+        assert!(!dx.fund_eth);
+        assert_eq!(
+            &dx.data[..4],
+            &selector("quoteV2(address,address,address,uint256,uint256)")
+        );
+        // fee_pips 25 is 25 bps, stored as 2500 pips.
+        assert_eq!(word_at(&dx.data[4..], 4), Some(U256::from(2500u32)));
         match prepare(
-            &product(crate::catalog::V2_FORK),
-            Some(quiet_v2.address),
+            &product(crate::catalog::V2_FORK, Address::ZERO),
             token_in,
             token_out,
             amount,
             1,
         ) {
-            Prep::Skip(reason) => {
-                assert_eq!(reason, "no shared quoter for a v2 fork; fee is per pair");
-            }
-            Prep::Ready(_) => panic!("xchange has no router"),
+            Prep::Skip(reason) => assert_eq!(reason, "pair"),
+            Prep::Ready(_) => panic!("pair is unset"),
+        }
+        match prepare(
+            &product(crate::catalog::V2_FORK, pair),
+            token_in,
+            token_out,
+            amount,
+            0,
+        ) {
+            Prep::Skip(reason) => assert_eq!(reason, "snapshot block is 0"),
+            Prep::Ready(_) => panic!("block 0"),
         }
 
         let home = address!("2D90ebFfC87BBE29E4d78e7627adFE9D0f3D7978");
-        let aero_root = doc.by_name("aero");
         let aero = ready_of(prepare(
             &concentrated(crate::catalog::AERO, home, 1),
-            None,
             token_in,
             token_out,
             amount,
             1,
         ));
-        assert_eq!(aero.target, aero_root.quote.unwrap());
-        assert_eq!(aero.method, "quoteExactInputSingleV3");
+        assert_eq!(aero.target, QUOTE_LENS);
+        assert_eq!(aero.family, Family::Aero);
         assert_eq!(
-            hex_of(&aero.data),
-            "0x0a6741420000000000000000000000002d90ebffc87bbe29e4d78e7627adfe9d0f3d7978000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000f42400000000000000000000000000000000000000000000000000000000000000000"
+            &aero.data[..4],
+            &selector("quoteV3(address,address,address,bool,int256)")
         );
-
-        let lista = doc.by_name("v3:0x956920f97690bdd76a6a10c7ba931dec14f61169");
-        let lista_quote = ready_of(prepare(
-            &concentrated(crate::catalog::V3_FORK, Address::ZERO, 1),
-            Some(lista.address),
+        let fork = ready_of(prepare(
+            &concentrated(crate::catalog::V3_FORK, home, 3000),
             token_in,
             token_out,
             amount,
             1,
         ));
-        assert_eq!(lista_quote.target, lista.quote.unwrap());
-        assert_eq!(
-            lista_quote.data,
-            encode_v3_quote(token_in, token_out, amount, 1)
-        );
-        let quiet_v3 = doc.by_name("v3:0x88695a239a0a3f70729c4cb30fd32f9b4978513d");
+        assert_eq!(fork.target, QUOTE_LENS);
+        assert_eq!(fork.method, "swap");
         match prepare(
             &concentrated(crate::catalog::V3_FORK, Address::ZERO, 3000),
-            Some(quiet_v3.address),
             token_in,
             token_out,
             amount,
             1,
         ) {
-            Prep::Skip(reason) => assert_eq!(reason, "no confirmed quoter for this v3 fork"),
-            Prep::Ready(_) => panic!("bambaswap has no quoter"),
+            Prep::Skip(reason) => assert_eq!(reason, "pool"),
+            Prep::Ready(_) => panic!("pool is unset"),
         }
 
-        let metric_root = doc.by_name("metric");
-        let metric = ready_of(prepare(
-            &metric_pool(),
-            None,
-            token_in,
-            token_out,
-            amount,
-            1,
-        ));
-        assert_eq!(metric.target, metric_root.quote.unwrap());
+        let metric = ready_of(prepare(&metric_pool(), token_in, token_out, amount, 1));
+        assert_eq!(metric.target, QUOTE_LENS);
         assert_eq!(metric.family, Family::Metric);
         assert_eq!(
-            hex_of(&metric.data),
-            "0x7a6efbfd000000000000000000000000aef2ad7abb651945e6d24276715f25bded0ad41e0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000f42400000000000000000000000000000000000000000000000000000000000000000"
+            &metric.data[..4],
+            &selector("quoteMetric(address,address,address,bool,int128,uint128)")
         );
-        let back = ready_of(prepare(
-            &metric_pool(),
-            None,
-            token_out,
-            token_in,
-            amount,
-            1,
-        ));
-        assert_eq!(
-            hex_of(&back.data),
-            "0x7a6efbfd000000000000000000000000aef2ad7abb651945e6d24276715f25bded0ad41e0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000ffffffffffffffffffffffffffffffff"
-        );
+        assert_eq!(word_at(&metric.data[4..], 5), Some(U256::ZERO));
+        let back = ready_of(prepare(&metric_pool(), token_out, token_in, amount, 1));
+        assert_eq!(word_at(&back.data[4..], 5), Some(U256::from(u128::MAX)));
         let too_big = U256::from(i128::MAX as u128) + U256::from(1u8);
-        match prepare(&metric_pool(), None, token_in, token_out, too_big, 1) {
+        match prepare(&metric_pool(), token_in, token_out, too_big, 1) {
             Prep::Skip(reason) => assert_eq!(reason, "amount exceeds int128"),
             Prep::Ready(_) => panic!("amount above int128"),
         }
@@ -3302,18 +3514,64 @@ mod tests {
             },
         );
         assert_eq!(out.amount_out, Some(U256::from(100_099_602u64)));
+        let swapped = interpret(
+            "swap",
+            RawOut {
+                ok: true,
+                bytes: {
+                    let mut raw = Vec::new();
+                    push_u256(&mut raw, U256::from(42u8));
+                    raw
+                },
+                error: None,
+            },
+        );
+        assert_eq!(swapped.amount_out, Some(U256::from(42u8)));
+
+        let funded = execution_override(
+            false,
+            &BTreeMap::from([(token_in, B256::from(U256::from(7u8)))]),
+        );
+        let lens = funded.get(QUOTE_LENS.to_string()).unwrap();
+        assert!(lens
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap()
+            .starts_with("0x"));
+        assert!(lens.get("balance").is_none());
+        let diff = funded
+            .get(token_in.to_string())
+            .unwrap()
+            .get("stateDiff")
+            .unwrap();
+        assert!(diff.as_object().unwrap().len() == 1);
+        let with_eth = execution_override(true, &BTreeMap::new());
+        assert!(with_eth
+            .get(QUOTE_LENS.to_string())
+            .unwrap()
+            .get("balance")
+            .is_some());
 
         let header = header_value();
-        assert!(header["quoters"]["aero"]["address"].is_string());
+        assert_eq!(header["quoters"]["lens"]["method"], "swap");
+        assert!(header["quoters"]["lens"]["address"]
+            .as_str()
+            .unwrap()
+            .to_ascii_lowercase()
+            .ends_with("510e51"));
         assert!(header["gaps"].get("aero").is_none());
         assert!(header["gaps"].get("metric").is_none());
         assert_eq!(
             header["gaps"]["v2_fork"].as_str().unwrap(),
-            "A v2 fork quotes through the router named with its factory. A factory with no router is skipped. The Uniswap router hardcodes a 0.3% fee and the canonical factory."
+            "A fork is swapped on the pair. The fee is the pair's fee, or 30 bps (Pancake 25 bps) when the fee view was unset."
         );
         assert_eq!(
             header["gaps"]["v3_fork"].as_str().unwrap(),
-            "A v3 fork quotes through the quoter named with its factory. A factory with no quoter is skipped."
+            "A fork is swapped on the pool. Callbacks are uniswapV3SwapCallback, pancakeV3SwapCallback, and algebraSwapCallback."
+        );
+        assert_eq!(
+            header["gaps"]["snapshot"].as_str().unwrap(),
+            "eth_call uses the stored snapshot block. Block 0 is not quoted."
         );
     }
 }
