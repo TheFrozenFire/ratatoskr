@@ -35,4 +35,4 @@ cargo run -p ratatoskr --release -- --pipeline venues
 
 Header sync asks the peer service for header ranges and appends them. Each row is the block hash, parent hash, receipts root, and logs bloom. The chain has to link back to mainnet genesis. A restart continues from the saved cursor. Receipts are not downloaded.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the ingestion pipeline, the file owners, and the cursor rule. See [docs/venues.md](docs/venues.md) for the mainnet venues in use and how each set of pools is listed.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the ingestion pipeline, the file owners, and the cursor rule. See [docs/venues.md](docs/venues.md) for the mainnet venues in use and how each set of pools is listed. See [PROBLEM.md](PROBLEM.md) for the ingestion problem, [docs/search.md](docs/search.md) for the search problem, [docs/quotes.md](docs/quotes.md) for how a quote is checked, and [docs/catalog.md](docs/catalog.md) for who may open the files.

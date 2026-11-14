@@ -257,7 +257,7 @@ An output amount computed from the quote inputs.
 _Avoid_: chain quote, estimate, label
 
 **Chain quote**:
-An output amount from the venue's own quoter at the quoting state's block.
+An output amount from executing the swap through QuoteLens at the quoting state's block. The amount is the output-token balance delta.
 _Avoid_: local quote, label, price curve
 
 **Quote record**:
@@ -265,8 +265,8 @@ The stored chain quotes for one quoting state and its generation.
 _Avoid_: price curve, local quote, grid
 
 **Quoter**:
-The venue contract that returns a chain quote.
-_Avoid_: lens, router
+The quote address on an enumeration root in `corpus/mainnet.yaml`. It is configuration. A chain quote calls QuoteLens, not that address.
+_Avoid_: router
 
 **Estimate**:
 The output amount a stored price curve assigns to an input on one direction.
@@ -573,7 +573,7 @@ _Avoid_: live catalog, quote record, grid
 - A weighted **Balancer pool**'s price curve is determined by the two balances, the two **Weights**, and the **Pool fee**
 - A stable **Balancer pool**'s price curve is determined by the balances, **Amplification**, and the **Pool fee**
 - A **Metric pool**'s structural formula is its current **Bin**
-- A **Crypto pool**'s **Local quote** is a spot line through its price scales, not the crypto invariant
+- A **Crypto pool**'s **Local quote** is the crypto invariant on its balances, precisions, price scales, amplification, and gamma. It is not a spot line. A stableswap with gamma zero and without the crypto flag stays on the stableswap invariant
 - **Selection** scores formulas against **Labels**. A label whose source is a **Local quote** is not a **Chain quote**
 - A **Grid** is the series of quotes used to sample a **Price curve**. A **Knot** is a grid point a **Sample formula** is drawn through. A **Holdout** is a grid point that is not a knot
 - A **Quote record** stores **Chain quotes** for checking a price curve. Building a **Price curve** does not read a quote record
@@ -602,7 +602,7 @@ _Avoid_: live catalog, quote record, grid
 ## Example dialogue
 
 > **Dev:** "When we build a price curve, do we call the quoter at a few sizes?"
-> **Domain expert:** "No. **Fit** stores a **Price curve** from the **Quote inputs**: the **Configuration**, the **Quoting state**, and the **Tick book**. A **Local quote** is an output computed from those records. **Selection** may score formulas on a **Grid** of local quotes. A **Chain quote** is a **Quote record**, kept for checking, and it is not an input to fit."
+> **Domain expert:** "No. **Fit** stores a **Price curve** from the **Quote inputs**: the **Configuration**, the **Quoting state**, and the **Tick book**. A **Local quote** is an output computed from those records. **Selection** may score formulas on a **Grid** of local quotes. A **Chain quote** is the output of executing the swap through QuoteLens at the quoting state's block. It is stored as a **Quote record** for checking, and it is not an input to fit."
 
 > **Dev:** "So the product formula is the reserves and the fee?"
 > **Domain expert:** "The **Product formula** is the formula of a **Constant-product pool**. That formula is determined by the two **Reserves** and the **Pool fee**. The reserves are inputs. They are not the formula."
@@ -668,5 +668,5 @@ _Avoid_: live catalog, quote record, grid
 - **"Route"** and **"hop"** are not names for a **Pair conduit**. The conduit is one ordered pair of tokens. A path through a third token is a composition of pair conduits. A **Basket** is the count of fixed-weight outputs. It is not a pair conduit.
 - A **Score** marks a finished **Plan** in one numeraire. The **Searcher** and the **Optimizer** quote in the tokens' own units. The prices are read after the plan exists. An **Acceptance bar** is the formula error of a stored price curve, and it is a different number.
 - **Unequal-weight Balancer.** The local quote and the stored weighted formula are both determined by balances, weights, and the pool fee, and they are different evaluations. Selection can store a **Sample formula** instead. Do not treat the local quote and the stored formula as one object.
-- **Crypto pool.** Its local quote is a spot line on the price scales. That line is not the crypto invariant and not a chain quote.
+- **Crypto pool.** Its local quote is the crypto invariant on balances, precisions, price scales, amplification, and gamma. That quote is not a spot line and not a chain quote. Gamma zero without the crypto flag stays on the stableswap.
 - **Kind and shape.** Kind is the family on the pool identity. Shape is the quoting rule of the pool.

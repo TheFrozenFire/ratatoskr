@@ -7,3 +7,10 @@ Read CONTEXT.md before naming a domain concept. Use its term for that concept. D
 Read ARCHITECTURE.md before describing how a pool moves through discovery, the detail read, the tick book, and fit. The joined inputs a local quote reads are the quote inputs.
 
 The language covers pool identity, pool shape, quote inputs, price curves, chain history, peers, and the services that own them.
+
+## Further reading
+
+- [PROBLEM.md](PROBLEM.md) is the ingestion problem.
+- [docs/search.md](docs/search.md) is the search problem.
+- [docs/quotes.md](docs/quotes.md) is local quotes and chain quotes.
+- [docs/catalog.md](docs/catalog.md) is who may open the catalog.
