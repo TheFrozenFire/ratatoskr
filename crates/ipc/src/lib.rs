@@ -4,6 +4,12 @@
 //! `chunk` and `headers` answer with a JSON line and then a raw body whose
 //! length is the `bytes` field.
 
+mod board;
+pub use board::{
+    note_corpus, note_feeds, note_header_cursor, note_headers, note_peers, note_token_lens,
+    note_token_reading, note_token_records, snapshot as board_snapshot,
+};
+
 use eyre::{eyre, WrapErr};
 use model::{decode_block_records, decode_header_records, BlockRecord, HeaderRecord};
 use serde_json::Value;

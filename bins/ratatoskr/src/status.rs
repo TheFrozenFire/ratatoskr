@@ -1,4 +1,6 @@
-//! Full-screen status for the state pipeline. It polls the exporter.
+//! Full-screen status. It polls the exporter for the state pipeline and for
+//! the header chain, discovery, the token lens, feeds, the peer directory,
+//! and the corpus.
 
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
@@ -126,6 +128,7 @@ fn draw(frame: &mut ratatui::Frame, view: &View, url: &str) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(4),
+            Constraint::Length(8),
             Constraint::Length(3),
             Constraint::Length(8),
             Constraint::Length(7),
@@ -133,10 +136,11 @@ fn draw(frame: &mut ratatui::Frame, view: &View, url: &str) {
         ])
         .split(area);
     frame.render_widget(header(view, url), chunks[0]);
-    frame.render_widget(catalog(view), chunks[1]);
-    frame.render_widget(stages(view), chunks[2]);
-    frame.render_widget(queues(view, chunks[3]), chunks[3]);
-    frame.render_widget(job_errors(lines), chunks[4]);
+    frame.render_widget(pipelines(view), chunks[1]);
+    frame.render_widget(catalog(view), chunks[2]);
+    frame.render_widget(stages(view), chunks[3]);
+    frame.render_widget(queues(view, chunks[4]), chunks[4]);
+    frame.render_widget(job_errors(lines), chunks[5]);
 }
 
 fn header(view: &View, url: &str) -> Paragraph<'static> {
@@ -164,7 +168,7 @@ fn header(view: &View, url: &str) -> Paragraph<'static> {
     Paragraph::new(text).block(
         Block::default()
             .title(format!(
-                " ratatoskr state    {}    q quits ",
+                " ratatoskr    {}    q quits ",
                 control_label(paused)
             ))
             .borders(Borders::ALL),
@@ -204,6 +208,166 @@ fn control_label(paused: bool) -> &'static str {
     }
 }
 
+fn pipelines(view: &View) -> Paragraph<'static> {
+    let lines = pipeline_text(view.snap.as_ref())
+        .into_iter()
+        .map(Line::from)
+        .collect::<Vec<_>>();
+    Paragraph::new(lines).block(Block::default().title(" pipelines ").borders(Borders::ALL))
+}
+
+fn pipeline_text(snap: Option<&Value>) -> Vec<String> {
+    let board = snap.and_then(|snap| snap.get("board"));
+    let identities = snap
+        .and_then(|snap| snap["identities"].as_u64())
+        .unwrap_or(0);
+    vec![
+        row("header sync", "header chain", &header_detail(board)),
+        row(
+            "discovery",
+            "venue catalog",
+            &format!("identities {}", commas(identities)),
+        ),
+        row("token lens", "token records", &token_detail(board)),
+        row("oracles", "feeds", &feed_detail(board)),
+        row("peer service", "peer directory", &peer_detail(board)),
+        row("corpus", "corpus", &corpus_detail(board)),
+    ]
+}
+
+fn row(pipeline: &str, catalog: &str, detail: &str) -> String {
+    format!(" {pipeline:<13} {catalog:<16} {detail}")
+}
+
+fn header_detail(board: Option<&Value>) -> String {
+    let Some(headers) = board_row(board, "headers") else {
+        return "not running".into();
+    };
+    if !headers["live"].as_bool().unwrap_or(false) {
+        return "not running".into();
+    }
+    let cursor = headers["cursor"].as_u64().unwrap_or(0);
+    if !headers["head_known"].as_bool().unwrap_or(false) {
+        return format!("cursor {}", commas(cursor));
+    }
+    let head = headers["head"].as_u64().unwrap_or(0);
+    format!(
+        "cursor {}   head {}   behind {}",
+        commas(cursor),
+        commas(head),
+        commas(head.saturating_sub(cursor))
+    )
+}
+
+fn token_detail(board: Option<&Value>) -> String {
+    let Some(tokens) = board_row(board, "tokens") else {
+        return "not running".into();
+    };
+    let records_known = tokens["records_known"].as_bool().unwrap_or(false);
+    let missing_known = tokens["missing_known"].as_bool().unwrap_or(false);
+    if !records_known && !missing_known {
+        return "not running".into();
+    }
+    let mut parts = Vec::new();
+    if records_known {
+        parts.push(format!(
+            "{} stored",
+            commas(tokens["records"].as_u64().unwrap_or(0))
+        ));
+    }
+    if missing_known {
+        let missing = commas(tokens["missing"].as_u64().unwrap_or(0));
+        if tokens["capped"].as_bool().unwrap_or(false) {
+            parts.push(format!("at least {missing} missing"));
+        } else {
+            parts.push(format!("{missing} missing"));
+        }
+    }
+    if tokens["reading"].as_bool().unwrap_or(false) {
+        parts.push("reading".into());
+    }
+    parts.join("   ")
+}
+
+fn feed_detail(board: Option<&Value>) -> String {
+    let Some(feeds) = board_row(board, "feeds") else {
+        return "not running".into();
+    };
+    if !feeds["live"].as_bool().unwrap_or(false) {
+        return "not running".into();
+    }
+    let mut text = format!(
+        "{} feeds   {} configured   {} answers",
+        commas(feeds["feeds"].as_u64().unwrap_or(0)),
+        commas(feeds["configured"].as_u64().unwrap_or(0)),
+        commas(feeds["answers"].as_u64().unwrap_or(0))
+    );
+    let jobs = feeds["jobs"].as_u64().unwrap_or(0);
+    if jobs > 0 {
+        text.push_str(&format!("   {} history jobs", commas(jobs)));
+    }
+    if feeds["follow_known"].as_bool().unwrap_or(false) {
+        text.push_str(&format!(
+            "   at {}",
+            commas(feeds["follow"].as_u64().unwrap_or(0))
+        ));
+    }
+    if feeds["lookback"].as_bool().unwrap_or(false) {
+        text.push_str("   following");
+    } else {
+        text.push_str("   lookback");
+    }
+    text
+}
+
+fn peer_detail(board: Option<&Value>) -> String {
+    let Some(peers) = board_row(board, "peers") else {
+        return "not running".into();
+    };
+    if !peers["live"].as_bool().unwrap_or(false) {
+        return "not running".into();
+    }
+    format!(
+        "{} sessions   {} summaries   {} sightings",
+        commas(peers["sessions"].as_u64().unwrap_or(0)),
+        commas(peers["summaries"].as_u64().unwrap_or(0)),
+        commas(peers["sightings"].as_u64().unwrap_or(0))
+    )
+}
+
+fn corpus_detail(board: Option<&Value>) -> String {
+    let Some(corpus) = board_row(board, "corpus") else {
+        return "not running".into();
+    };
+    if !corpus["live"].as_bool().unwrap_or(false) {
+        return "not running".into();
+    }
+    format!(
+        "{}   {} holes",
+        format_bytes(corpus["bytes"].as_u64().unwrap_or(0)),
+        commas(corpus["holes"].as_u64().unwrap_or(0))
+    )
+}
+
+fn board_row<'a>(board: Option<&'a Value>, name: &str) -> Option<&'a Value> {
+    board.and_then(|board| board.get(name))
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
 fn catalog(view: &View) -> Paragraph<'static> {
     let snap = view.snap.as_ref();
     let num = |field: &str| snap.and_then(|snap| snap[field].as_u64()).unwrap_or(0);
@@ -219,7 +383,11 @@ fn catalog(view: &View) -> Paragraph<'static> {
         commas(num("mismatches")),
         commas(num("jobs")),
     );
-    Paragraph::new(text).block(Block::default().title(" catalog ").borders(Borders::ALL))
+    Paragraph::new(text).block(
+        Block::default()
+            .title(" venue catalog ")
+            .borders(Borders::ALL),
+    )
 }
 
 fn stages(view: &View) -> Table<'static> {
@@ -288,7 +456,11 @@ fn stages(view: &View) -> Table<'static> {
         ],
     )
     .header(header)
-    .block(Block::default().title(" stages ").borders(Borders::ALL))
+    .block(
+        Block::default()
+            .title(" state pipeline ")
+            .borders(Borders::ALL),
+    )
 }
 
 fn queues(view: &View, area: Rect) -> Paragraph<'static> {
@@ -641,6 +813,52 @@ fn complete_response(buf: &[u8]) -> Option<(u16, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_status_names_the_token_lens_and_the_feeds() {
+        let snap = serde_json::json!({
+            "identities": 10,
+            "board": {
+                "headers": {"live": true, "cursor": 5, "head": 9, "head_known": true},
+                "corpus": {"live": true, "bytes": 2048, "holes": 1},
+                "tokens": {
+                    "records": 4,
+                    "records_known": true,
+                    "missing": 2,
+                    "missing_known": true,
+                    "capped": false,
+                    "reading": true
+                },
+                "feeds": {
+                    "live": true,
+                    "feeds": 3,
+                    "configured": 3,
+                    "answers": 8,
+                    "jobs": 1,
+                    "follow": 20,
+                    "follow_known": true,
+                    "lookback": true
+                },
+                "peers": {"live": false}
+            }
+        });
+        let text = pipeline_text(Some(&snap)).join("\n");
+        assert!(text.contains("header sync"), "{text}");
+        assert!(text.contains("cursor 5"), "{text}");
+        assert!(text.contains("behind 4"), "{text}");
+        assert!(text.contains("discovery"), "{text}");
+        assert!(text.contains("identities 10"), "{text}");
+        assert!(text.contains("token lens"), "{text}");
+        assert!(text.contains("4 stored"), "{text}");
+        assert!(text.contains("2 missing"), "{text}");
+        assert!(text.contains("reading"), "{text}");
+        assert!(text.contains("oracles"), "{text}");
+        assert!(text.contains("8 answers"), "{text}");
+        assert!(text.contains("following"), "{text}");
+        assert!(text.contains("2.0 KB"), "{text}");
+        assert!(text.contains("peer service"), "{text}");
+        assert!(text.contains("not running"), "{text}");
+    }
 
     #[test]
     fn p_pauses_until_the_snapshot_says_paused() {

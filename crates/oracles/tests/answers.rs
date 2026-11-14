@@ -119,6 +119,7 @@ fn an_answer_updated_log_stores_the_aggregator_round() {
     assert_eq!(answers[0].updated_at, 1_700_000_000);
     assert_eq!(answers[0].block, 100);
     assert_eq!(feeds.follow_block().unwrap(), Some(101));
+    assert_eq!(feeds.gauges().unwrap().answers, 1);
     assert_eq!(
         feeds
             .commit_follow(101, &[observed(NEXT_AGG, 42, 1_500)])

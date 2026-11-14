@@ -357,6 +357,7 @@ async fn supervise(args: Args) -> eyre::Result<()> {
         println!("quotes {}", summary.quotes);
         println!("tick_pages {}", summary.tick_pages);
         println!("mismatches {}", summary.mismatches);
+        println!("tokens {}", summary.tokens);
         println!("jobs {}", summary.jobs);
         for (stage, count) in &summary.jobs_by_stage {
             println!("jobs stage {stage} {count}");
@@ -509,6 +510,12 @@ fn spawn_sampler(store: LocalStore) {
             tokio::task::spawn_blocking(move || {
                 if let Ok(summary) = store.state_summary() {
                     venues::publish_summary(&summary);
+                }
+                if let Ok(cursor) = store.stored_header() {
+                    ipc::note_header_cursor(cursor);
+                }
+                if let Ok((bytes, holes)) = store.corpus_gauge() {
+                    ipc::note_corpus(bytes, holes);
                 }
                 busy.store(false, std::sync::atomic::Ordering::Release);
             });

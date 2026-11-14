@@ -112,6 +112,18 @@ impl LocalStore {
         self.catalog_db()?.state_summary()
     }
 
+    pub fn stored_header(&self) -> eyre::Result<u64> {
+        self.chain_db()?.cursor()
+    }
+
+    pub fn corpus_gauge(&self) -> eyre::Result<(u64, u64)> {
+        let corpus = self.corpus_db()?;
+        Ok((
+            corpus.meta("bytes")?.unwrap_or(0),
+            corpus.meta("holes")?.unwrap_or(0),
+        ))
+    }
+
     pub(crate) async fn page_blocks(
         &self,
         after: Option<u64>,

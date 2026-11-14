@@ -74,6 +74,17 @@ fn pass(
     };
     let rpc = venues::Rpc::new(rpcs)?;
     configure::configure(&feeds, &rpc)?;
+    let _ = feeds.remember_answers();
+    if let Ok(gauges) = feeds.gauges() {
+        ipc::note_feeds(
+            gauges.feeds,
+            gauges.configured,
+            gauges.answers,
+            gauges.jobs,
+            gauges.follow,
+            gauges.lookback,
+        );
+    }
     if *stop.borrow() {
         return Ok(listing);
     }

@@ -89,6 +89,7 @@ where
                     }
                 }
             }
+            ipc::note_headers(next, head);
             let tip = head.saturating_sub(TIP_LAG);
             if next > tip {
                 info!(target: "headers", next, head, "caught up");

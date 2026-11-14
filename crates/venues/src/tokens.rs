@@ -68,6 +68,17 @@ pub(crate) async fn walk<S: EntityStore>(
     store: &S,
     stop: &tokio::sync::watch::Receiver<bool>,
 ) -> eyre::Result<u64> {
+    ipc::note_token_reading(true);
+    let result = read_missing(rpc, store, stop).await;
+    ipc::note_token_reading(false);
+    result
+}
+
+async fn read_missing<S: EntityStore>(
+    rpc: &Rpc,
+    store: &S,
+    stop: &tokio::sync::watch::Receiver<bool>,
+) -> eyre::Result<u64> {
     write_links(store).await?;
     let mut wrote = fill(rpc, store, &blank_wrappers(store).await?, stop).await?;
     loop {
@@ -75,6 +86,7 @@ pub(crate) async fn walk<S: EntityStore>(
             return Ok(wrote);
         }
         let missing = store.missing_tokens(SCAN).await?;
+        ipc::note_token_lens(missing.len() as u64, missing.len() == SCAN);
         if missing.is_empty() {
             break;
         }

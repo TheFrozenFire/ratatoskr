@@ -371,6 +371,21 @@ impl Catalog {
         read_token_rows(&self.entities)
     }
 
+    pub fn token_count(&self) -> eyre::Result<u64> {
+        let read = self.entities.begin_read()?;
+        let table = match read.open_table(TOKENS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(0),
+            Err(err) => return Err(err.into()),
+        };
+        let mut count = 0_u64;
+        for item in table.iter()? {
+            item?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
     /// Write token rows. An empty symbol leaves a stored symbol and its decimals.
     pub fn put_tokens(&self, rows: &[TokenRecord]) -> eyre::Result<()> {
         if rows.is_empty() {
@@ -1991,5 +2006,6 @@ mod tests {
             }])
             .unwrap();
         assert_eq!(catalog.missing_tokens(10).unwrap(), vec![missing[1]]);
+        assert_eq!(catalog.token_count().unwrap(), 2);
     }
 }

@@ -20,7 +20,7 @@ A check that needs quote inputs uses the writer: `venues::catalog::Catalog::read
 
 `--until-idle` stops the state pipeline after the queue is quiet: two passes that claim nothing. It is not the tip-following process. Header sync plus the peer service are what let the watch see new blocks.
 
-The status view is `ratatoskr --status`. It polls the exporter at `127.0.0.1:9737`. `q` closes only that view. Do not kill tmux session `ratatoskr-status` or the foot client of class `ratatoskr-status`. SIGTERM of `ratatoskr --status` skips terminal restore: the view restores the terminal only after its event loop returns, and it installs no signal handler.
+The status view is `ratatoskr --status`. It polls the exporter at `127.0.0.1:9737` and draws header sync, discovery, the token lens, the state pipeline, feeds, the peer directory, and the corpus. `q` closes only that view. Do not kill tmux session `ratatoskr-status` or the foot client of class `ratatoskr-status`. SIGTERM of `ratatoskr --status` skips terminal restore: the view restores the terminal only after its event loop returns, and it installs no signal handler.
 
 Pause of stage claims is `venues::pause_work` in `crates/venues/src/lib.rs`. See [ARCHITECTURE.md](../ARCHITECTURE.md).
 

@@ -148,6 +148,7 @@ pub fn publish_summary(summary: &StateSummary) {
         .mismatches
         .store(summary.mismatches, Ordering::Relaxed);
     metrics.jobs.store(summary.jobs, Ordering::Relaxed);
+    ipc::note_token_records(summary.tokens);
     for meters in &metrics.stages {
         meters.queued.store(0, Ordering::Relaxed);
     }
@@ -381,6 +382,7 @@ fn snapshot() -> Value {
         "paused": crate::work_paused(),
         "stages": stages,
         "errors": errors,
+        "board": ipc::board_snapshot(),
     })
 }
 

@@ -14,7 +14,7 @@ use eth_p2p::{
     fetch_header_range, DnsPeer, Egress, OutboundSession, DNS_ALL, DNS_SNAP,
 };
 use eyre::WrapErr;
-use ipc::{BatchKind, HistoryPeer, SessionInfo};
+use ipc::{note_peers, BatchKind, HistoryPeer, SessionInfo};
 use model::{encode_header_records, BlockRecord, DiscoveryHit, HeaderRecord, ETHEREUM_MAINNET};
 use reth_network_peers::{pk2id, NodeRecord, PeerId};
 use secp256k1::{SecretKey, SECP256K1};
@@ -558,6 +558,11 @@ async fn maintain(
             guard.slots.retain(|slot| !slot.jobs.is_closed());
             guard.slots.len()
         };
+        note_peers(
+            live as u64,
+            catalog.summaries.len() as u64,
+            catalog.next_seq,
+        );
         if live >= target && dials.is_empty() {
             if pause(&mut stop, 5).await {
                 break 'run;

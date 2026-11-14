@@ -69,6 +69,7 @@ fn scan(
             .filter_map(decode_answer_updated)
             .collect::<Vec<_>>();
         written += feeds.commit_follow(end.saturating_add(1), &answers)?;
+        publish(feeds);
         tracing::info!(start, end, written, "answer follow");
     }
     Ok(written)
@@ -116,9 +117,24 @@ fn fill_quiet(feeds: &Feeds, rpc: &Rpc, stop: &dyn Fn() -> bool) -> eyre::Result
                 .collect::<Vec<_>>();
             // The follow cursor already sits at the recent head. These rows are older.
             written += commit_older(feeds, &answers)?;
+            publish(feeds);
         }
     }
     Ok(written)
+}
+
+fn publish(feeds: &Feeds) {
+    let Ok(gauges) = feeds.gauges() else {
+        return;
+    };
+    ipc::note_feeds(
+        gauges.feeds,
+        gauges.configured,
+        gauges.answers,
+        gauges.jobs,
+        gauges.follow,
+        gauges.lookback,
+    );
 }
 
 fn commit_older(feeds: &Feeds, answers: &[ObservedAnswer]) -> eyre::Result<usize> {

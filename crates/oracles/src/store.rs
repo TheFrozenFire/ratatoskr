@@ -22,6 +22,7 @@ const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 const LISTING: &str = "listing";
 const FOLLOW: &str = "follow";
 const LOOKBACK: &str = "lookback";
+const ANSWER_COUNT: &str = "answer_count";
 const IDENTITY_VERSION: u8 = 1;
 
 #[derive(Debug, thiserror::Error)]
@@ -36,6 +37,27 @@ pub enum Error {
 
 fn db_err(err: impl std::fmt::Display) -> Error {
     Error::Store(err.to_string())
+}
+
+fn count_rows(
+    read: &redb::ReadTransaction,
+    def: TableDefinition<&[u8], &[u8]>,
+) -> Result<u64, Error> {
+    let table = match read.open_table(def) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(0),
+        Err(err) => return Err(db_err(err)),
+    };
+    count_open(&table)
+}
+
+fn count_open(table: &impl ReadableTable<&'static [u8], &'static [u8]>) -> Result<u64, Error> {
+    let mut count = 0_u64;
+    for item in table.iter().map_err(db_err)? {
+        item.map_err(db_err)?;
+        count += 1;
+    }
+    Ok(count)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +92,17 @@ pub struct HistoryJob {
     pub proxy: Address,
     pub phase_id: u16,
     pub aggregator: Address,
+}
+
+/// Counts the status view reads for the feed file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Gauges {
+    pub feeds: u64,
+    pub configured: u64,
+    pub answers: u64,
+    pub jobs: u64,
+    pub follow: Option<u64>,
+    pub lookback: bool,
 }
 
 /// One answer taken from an aggregator `AnswerUpdated` log.
@@ -438,6 +471,61 @@ impl Feeds {
         Ok(out)
     }
 
+    /// Feeds, stored configuration, answers, and unclaimed history jobs.
+    pub fn gauges(&self) -> Result<Gauges, Error> {
+        let read = self.db.begin_read().map_err(db_err)?;
+        let feeds = count_rows(&read, IDENTITY)?;
+        let configured = count_rows(&read, CONFIG)?;
+        let jobs = count_rows(&read, JOBS)?;
+        let (answers, follow, lookback) = match read.open_table(META) {
+            Ok(meta) => {
+                let answers = meta
+                    .get(ANSWER_COUNT)
+                    .map_err(db_err)?
+                    .map(|value| value.value())
+                    .unwrap_or(0);
+                let follow = meta.get(FOLLOW).map_err(db_err)?.map(|value| value.value());
+                let lookback = meta.get(LOOKBACK).map_err(db_err)?.is_some();
+                (answers, follow, lookback)
+            }
+            Err(redb::TableError::TableDoesNotExist(_)) => (0, None, false),
+            Err(err) => return Err(db_err(err)),
+        };
+        Ok(Gauges {
+            feeds,
+            configured,
+            answers,
+            jobs,
+            follow,
+            lookback,
+        })
+    }
+
+    /// Count stored answers once so later commits can add to that total.
+    pub fn remember_answers(&self) -> Result<u64, Error> {
+        let count = {
+            let read = self.db.begin_read().map_err(db_err)?;
+            if let Ok(meta) = read.open_table(META) {
+                if let Some(count) = meta.get(ANSWER_COUNT).map_err(db_err)? {
+                    return Ok(count.value());
+                }
+            }
+            count_rows(&read, ANSWERS)?
+        };
+        let mut write = self.db.begin_write().map_err(db_err)?;
+        write
+            .set_durability(Durability::Immediate)
+            .map_err(db_err)?;
+        {
+            let mut meta = write.open_table(META).map_err(db_err)?;
+            if meta.get(ANSWER_COUNT).map_err(db_err)?.is_none() {
+                meta.insert(ANSWER_COUNT, count).map_err(db_err)?;
+            }
+        }
+        write.commit().map_err(db_err)?;
+        Ok(count)
+    }
+
     /// Next block the answer follow has not scanned. `None` means it has not started.
     pub fn follow_block(&self) -> Result<Option<u64>, Error> {
         let read = self.db.begin_read().map_err(db_err)?;
@@ -521,6 +609,27 @@ impl Feeds {
                         .insert(key.as_slice(), value.as_slice())
                         .map_err(db_err)?;
                     written += 1;
+                }
+            }
+            drop(answers);
+            let added = written as u64;
+            let mut meta = write.open_table(META).map_err(db_err)?;
+            let known = meta
+                .get(ANSWER_COUNT)
+                .map_err(db_err)?
+                .map(|value| value.value());
+            match known {
+                Some(count) => {
+                    meta.insert(ANSWER_COUNT, count.saturating_add(added))
+                        .map_err(db_err)?;
+                }
+                None => {
+                    drop(meta);
+                    let answers = write.open_table(ANSWERS).map_err(db_err)?;
+                    let total = count_open(&answers)?;
+                    drop(answers);
+                    let mut meta = write.open_table(META).map_err(db_err)?;
+                    meta.insert(ANSWER_COUNT, total).map_err(db_err)?;
                 }
             }
             written

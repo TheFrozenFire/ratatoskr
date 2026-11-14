@@ -234,6 +234,7 @@ pub struct StateSummary {
     pub quotes: u64,
     pub tick_pages: u64,
     pub mismatches: u64,
+    pub tokens: u64,
     pub jobs: u64,
     pub jobs_by_stage: BTreeMap<u8, u64>,
     pub errors: BTreeMap<String, u64>,
@@ -609,6 +610,7 @@ impl Catalog {
             quotes: count_bytes(&self.entities, QUOTES)?,
             tick_pages: count_bytes(&self.entities, TICK_PAGES)?,
             mismatches: count_bytes(&self.entities, MISMATCH)?,
+            tokens: self.token_count()?,
             ..StateSummary::default()
         };
         let read = self.work.begin_read()?;
