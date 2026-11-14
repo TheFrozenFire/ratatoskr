@@ -1,11 +1,10 @@
 //! Answers stored from aggregator logs.
 
 use alloy_primitives::{address, Address, B256, I256};
-use oracles::{
-    decode_answer_updated, ChainLog, Feeds, ObservedAnswer, ProxyHead, Read, ANSWER_UPDATED,
-};
+use oracles::{decode_answer_updated, ChainLog, ObservedAnswer, ProxyHead, Read, ANSWER_UPDATED};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
+use store::Feeds;
 
 const ETH: Address = address!("5f4eC3Df9cbd43714FE2740f5E3616155c5b8419");
 const ETH_AGG: Address = address!("E62B71cf983019BFf55bC83B48601ce8419650CC");

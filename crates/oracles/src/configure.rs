@@ -7,11 +7,12 @@ use crate::abi::{
     bound_calls, decode_aggregate3, decode_bound, decode_proxy_head, encode_aggregate3,
     proxy_calls, CallResult, ProxyHead, CALL_GAS, FEEDS_PER_CALL, MULTICALL,
 };
-use crate::store::{Feeds, Read};
+use crate::book::FeedBook;
+use crate::records::Read;
 use alloy_primitives::{Address, I256};
 use venues::Rpc;
 
-pub fn configure(feeds: &Feeds, rpc: &Rpc) -> eyre::Result<()> {
+pub fn configure(feeds: &impl FeedBook, rpc: &Rpc) -> eyre::Result<()> {
     let proxies = feeds.proxies()?;
     tracing::info!(feeds = proxies.len(), "feed configuration");
     for chunk in proxies.chunks(FEEDS_PER_CALL) {

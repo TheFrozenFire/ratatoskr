@@ -332,5 +332,4 @@ fn the_mainnet_sizes_are_a_hundredth_a_tenth_and_one_of_each_numeraire() {
             BigInt::from(10u64.pow(10))
         ]
     );
-    assert!(spots::default_path().ends_with("spots.redb"));
 }

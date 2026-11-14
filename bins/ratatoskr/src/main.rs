@@ -676,8 +676,9 @@ fn spawn_pipelines(
         let stop = stop.clone();
         tasks.spawn_local(async move {
             let (native, wrapped) = venues::custodial_wrap();
+            let book = store::Spots::open(&spots_path)?;
             spots::run(
-                spots_path,
+                book,
                 stop,
                 Some(spots::CustodialWrap { native, wrapped }),
                 move || conduit_edges(&store),
@@ -699,7 +700,10 @@ fn spawn_pipelines(
     }
     if pipelines.oracles {
         let stop = stop.clone();
-        tasks.spawn_local(async move { oracles::run(feeds, rpcs, stop).await });
+        tasks.spawn_local(async move {
+            let book = store::Feeds::open(&feeds)?;
+            oracles::run(book, rpcs, stop).await
+        });
     }
     tasks
 }
@@ -944,8 +948,8 @@ fn default_paths() -> eyre::Result<Paths> {
         venues: venues::Catalog::default_path(),
         peer_socket: peer::socket_path()?,
         db_socket: store::db_socket()?,
-        feeds: oracles::default_path(),
-        spots: spots::default_path(),
+        feeds: store::Feeds::default_path(),
+        spots: store::Spots::default_path(),
     })
 }
 

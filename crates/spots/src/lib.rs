@@ -7,10 +7,6 @@
 //! the tokens bought, and the numeraire returned. Their squared price is
 //! `(size * sold) / bought²`. This crate does not read a feed answer.
 
-mod store;
-
-pub use store::{default_path, Error, Spots};
-
 use alloy_primitives::{address, Address};
 use num_bigint::BigInt;
 use routing::SlopeSegment;
@@ -52,6 +48,17 @@ pub struct Edge {
     pub token_out: Address,
     pub block: Option<u64>,
     pub segments: Vec<SlopeSegment>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("{0}")]
+    Store(String),
+}
+
+/// The file a pass replaces. The store crate opens it.
+pub trait SpotBook {
+    fn replace(&self, spots: &[Spot]) -> Result<(), Error>;
 }
 
 /// The sized round trip that won for one token in one numeraire.
@@ -390,20 +397,21 @@ fn pay(lane: &Lane, input: &BigInt) -> Option<BigInt> {
     }
 }
 
-/// Read conduits, replace `spots.redb`, and wait. One failed pass is logged.
+/// Read conduits, replace the stored spots, and wait. One failed pass is logged.
 ///
 /// `gather` reads the open venue catalog. This task does not open it and does
 /// not open the feed file. `wrap` is the custodial wrap from the seed file.
-pub async fn run<F>(
-    path: std::path::PathBuf,
+/// The caller opens the spot file.
+pub async fn run<B, F>(
+    book: B,
     mut stop: tokio::sync::watch::Receiver<bool>,
     wrap: Option<CustodialWrap>,
     gather: F,
 ) -> eyre::Result<()>
 where
+    B: SpotBook + Send + Sync + 'static,
     F: Fn() -> eyre::Result<Vec<Edge>> + Send + Sync + 'static,
 {
-    let book = Spots::open(&path)?;
     let gather = std::sync::Arc::new(gather);
     loop {
         if *stop.borrow() {

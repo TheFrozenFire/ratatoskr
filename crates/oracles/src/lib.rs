@@ -2,48 +2,48 @@
 
 mod abi;
 mod answer;
+mod book;
 mod configure;
 mod directory;
 mod follow;
-mod store;
+mod records;
 
 pub use abi::{
     decode_aggregate3, decode_bound, decode_proxy_head, encode_aggregate3, CallResult, ProxyHead,
     CALL_GAS, FEEDS_PER_CALL, MULTICALL,
 };
 pub use answer::{decode_answer_updated, ChainLog, ANSWER_UPDATED};
+pub use book::FeedBook;
 pub use configure::proxy_heads;
 pub use directory::{parse_directory, DirectoryError, DirectoryRow, DIRECTORY_URL};
-pub use store::{
-    Answer, Configuration, Error, Feed, Feeds, HistoryJob, Listing, Mismatch, ObservedAnswer,
+pub use records::{
+    Answer, Configuration, Error, Feed, Gauges, HistoryJob, Listing, Mismatch, ObservedAnswer,
     Phase, Read,
 };
 
 use eyre::WrapErr;
-use std::path::{Path, PathBuf};
-
-pub fn default_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/ratatoskr/feeds.redb")
-}
 
 /// Fetch the directory, read proxy configuration, then follow answer logs.
 ///
 /// An empty `rpcs` list uses [`venues::default_call_rpcs`]. The venue catalog
 /// stays closed. History jobs are not claimed. A follow error is logged and
-/// the next pass resumes from the stored cursor.
-pub async fn run(
-    path: PathBuf,
+/// the next pass resumes from the stored cursor. The caller opens the feed file.
+pub async fn run<B>(
+    feeds: B,
     rpcs: Vec<String>,
     stop: tokio::sync::watch::Receiver<bool>,
-) -> eyre::Result<()> {
-    tokio::task::spawn_blocking(move || pass(&path, rpcs, stop))
+) -> eyre::Result<()>
+where
+    B: FeedBook + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || pass(&feeds, rpcs, stop))
         .await
         .wrap_err("feed pass")??;
     Ok(())
 }
 
-fn pass(
-    path: &Path,
+fn pass<B: FeedBook>(
+    feeds: &B,
     rpcs: Vec<String>,
     stop: tokio::sync::watch::Receiver<bool>,
 ) -> eyre::Result<Listing> {
@@ -60,7 +60,6 @@ fn pass(
         .wrap_err("feed directory")?
         .text()
         .wrap_err("feed directory")?;
-    let feeds = Feeds::open(path)?;
     let listing = feeds.apply_directory(&body)?;
     tracing::info!(
         generation = listing.generation,
@@ -73,7 +72,7 @@ fn pass(
         rpcs
     };
     let rpc = venues::Rpc::new(rpcs)?;
-    configure::configure(&feeds, &rpc)?;
+    configure::configure(feeds, &rpc)?;
     let _ = feeds.remember_answers();
     if let Ok(gauges) = feeds.gauges() {
         ipc::note_feeds(
@@ -90,7 +89,7 @@ fn pass(
     }
     loop {
         let stopped = || *stop.borrow();
-        match follow::catch_up(&feeds, &rpc, &stopped) {
+        match follow::catch_up(feeds, &rpc, &stopped) {
             Ok(written) => tracing::info!(written, "answers"),
             Err(err) => tracing::error!(%err, "answer follow"),
         }

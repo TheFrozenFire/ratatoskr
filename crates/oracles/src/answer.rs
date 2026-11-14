@@ -3,7 +3,7 @@
 //! The aggregator emits `AnswerUpdated` from the transmit that stores a round.
 //! The round id in the log is the aggregator's round. A zero value is not an answer.
 
-use crate::store::ObservedAnswer;
+use crate::records::ObservedAnswer;
 use alloy_primitives::{Address, B256, I256, U256};
 
 pub const ANSWER_UPDATED: B256 =

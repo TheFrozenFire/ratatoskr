@@ -120,9 +120,9 @@ The peer service owns `peers.redb`, the peer directory. That is `ratatoskr` with
 
 The venue catalog holds identities, configuration, quoting state, tick books, price curves, pair conduits, quote records, and watch marks. The discovery store holds list cursors, bloom hits, and era1 receipt bytes. The work queue holds leases. Deleting the work queue drops the leases. The pools remain in the venue catalog.
 
-The oracle pipeline owns `feeds.redb`. The database service does not open it. Deleting the history jobs leaves the feeds and the phases. Those writes use immediate durability.
+The store crate opens `feeds.redb` for the oracle pipeline. The venue catalog service does not open it. Deleting the history jobs leaves the feeds and the phases. Those writes use immediate durability.
 
-The spot pipeline owns `spots.redb`. The database service does not open it. The oracle pipeline does not open it. A pass replaces the spots. Those writes use immediate durability.
+The store crate opens `spots.redb` for the spot pipeline. The venue catalog service does not open it. The oracle pipeline does not open it. A pass replaces the spots. Those writes use immediate durability.
 
 The state pipeline opens the data directory it is given. A sample catalog is a copy of identities for a trial. The live catalog is the venue catalog of the full identity set.
 
@@ -132,7 +132,7 @@ A pool identity with no observation stays version 1. An observation appends the 
 
 The writer opens each database in single-writer mode. One process writes a file. Other processes may open that file read-only and follow its commits. A second writer fails with "Database already open." redb commits through two header slots. Header append, peer sightings, venue commits, hit commits, era1 receipt bytes, state writes, corpus writes, cursor writes, and feed writes use immediate durability.
 
-`peers.redb` stays with the dialer. A peer-only process leaves the entity files closed. An oracles-only process leaves the entity files closed and writes `feeds.redb`. A spots-only process opens the venue catalog and writes `spots.redb`. It leaves `feeds.redb` closed.
+`peers.redb` stays with the dialer. A peer-only process leaves the entity files closed. An oracles-only process leaves the entity files closed and the store opens `feeds.redb`. A spots-only process opens the venue catalog and the store opens `spots.redb`. It leaves `feeds.redb` closed.
 
 ### Sockets
 

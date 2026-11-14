@@ -1,12 +1,12 @@
-//! The spot file. One row is one token in one numeraire.
+//! `spots.redb`. One row is one token in one numeraire.
 //!
 //! A pass replaces the table, so a token that lost its route is gone. The
 //! table is not the feed answer table, and this file is not `feeds.redb`.
 
-use crate::Spot;
 use alloy_primitives::Address;
 use num_bigint::BigInt;
 use redb::{Durability, ReadableDatabase, ReadableTable, TableDefinition};
+use spots::{Error, Spot};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -15,12 +15,6 @@ const PAGE_CACHE: usize = 8 * 1024 * 1024;
 
 const SPOTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("spots");
 const VERSION: u8 = 1;
-
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("{0}")]
-    Store(String),
-}
 
 fn db_err(err: impl std::fmt::Display) -> Error {
     Error::Store(err.to_string())
@@ -31,6 +25,10 @@ pub struct Spots {
 }
 
 impl Spots {
+    pub fn default_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/ratatoskr/spots.redb")
+    }
+
     pub fn open(path: &Path) -> Result<Self, Error> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
@@ -104,8 +102,10 @@ impl Spots {
     }
 }
 
-pub fn default_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/ratatoskr/spots.redb")
+impl spots::SpotBook for Spots {
+    fn replace(&self, spots: &[Spot]) -> Result<(), Error> {
+        Spots::replace(self, spots)
+    }
 }
 
 fn key_of(spot: &Spot) -> [u8; 40] {

@@ -1,14 +1,16 @@
-//! Feed identities, configuration, phases, and unclaimed history jobs.
+//! `feeds.redb`. Directory facts, proxy configuration, phases, and answers.
 //!
 //! Directory facts rewrite on each apply. Decimals, description, and version
 //! are written once. A new chain phase appends, and that write inserts one
 //! history job. Deleting the job table leaves the feeds and the phases.
 
-use crate::abi::ProxyHead;
-use crate::directory::{parse_directory, DirectoryError, DirectoryRow};
 use alloy_primitives::{Address, I256, U256};
+use oracles::{
+    parse_directory, Answer, Configuration, DirectoryRow, Error, Feed, Gauges, HistoryJob, Listing,
+    Mismatch, ObservedAnswer, Phase, ProxyHead, Read,
+};
 use redb::{Durability, ReadableDatabase, ReadableTable, TableDefinition};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Feed rows are small. The cache holds the directory and the latest answers.
@@ -28,16 +30,6 @@ const FOLLOW: &str = "follow";
 const LOOKBACK: &str = "lookback";
 const ANSWER_COUNT: &str = "answer_count";
 const IDENTITY_VERSION: u8 = 1;
-
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error(transparent)]
-    Directory(#[from] DirectoryError),
-    #[error("proxy {proxy} is not listed")]
-    Unknown { proxy: Address },
-    #[error("{0}")]
-    Store(String),
-}
 
 fn db_err(err: impl std::fmt::Display) -> Error {
     Error::Store(err.to_string())
@@ -64,110 +56,15 @@ fn count_open(table: &impl ReadableTable<&'static [u8], &'static [u8]>) -> Resul
     Ok(count)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Listing {
-    pub generation: u64,
-    pub named: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Feed {
-    pub row: DirectoryRow,
-    pub listed_generation: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Configuration {
-    pub decimals: u8,
-    pub description: String,
-    pub version: U256,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Phase {
-    pub phase_id: u16,
-    pub aggregator: Address,
-    pub min_answer: Option<I256>,
-    pub max_answer: Option<I256>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HistoryJob {
-    pub proxy: Address,
-    pub phase_id: u16,
-    pub aggregator: Address,
-}
-
-/// Counts the status view reads for the feed file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Gauges {
-    pub feeds: u64,
-    pub configured: u64,
-    pub answers: u64,
-    pub jobs: u64,
-    pub follow: Option<u64>,
-    pub lookback: bool,
-}
-
-/// One answer taken from an aggregator `AnswerUpdated` log.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Answer {
-    pub proxy: Address,
-    pub phase_id: u16,
-    pub round_id: u64,
-    pub value: I256,
-    pub updated_at: u64,
-    pub block: u64,
-    pub log_index: u64,
-}
-
-/// A log the follow pass has already decoded.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ObservedAnswer {
-    pub aggregator: Address,
-    pub round_id: u64,
-    pub value: I256,
-    pub updated_at: u64,
-    pub block: u64,
-    pub log_index: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Mismatch {
-    Configuration {
-        stored_decimals: u8,
-        observed_decimals: u8,
-        stored_description: String,
-        observed_description: String,
-        stored_version: U256,
-        observed_version: U256,
-    },
-    Phase {
-        newest: u16,
-        observed: u16,
-    },
-    Aggregator {
-        phase_id: u16,
-        stored: Address,
-        observed: Address,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Read {
-    Failed(String),
-    Configured {
-        head: ProxyHead,
-        min_answer: Option<I256>,
-        max_answer: Option<I256>,
-    },
-}
-
 pub struct Feeds {
     db: Arc<redb::Database>,
 }
 
 impl Feeds {
+    pub fn default_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/ratatoskr/feeds.redb")
+    }
+
     pub fn open(path: &Path) -> Result<Self, Error> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
@@ -1159,5 +1056,55 @@ impl Cursor<'_> {
         let text =
             std::str::from_utf8(bytes).map_err(|_| Error::Store("field is not utf-8".into()))?;
         Ok(text.to_string())
+    }
+}
+
+impl oracles::FeedBook for Feeds {
+    fn apply_directory(&self, body: &str) -> Result<Listing, Error> {
+        Feeds::apply_directory(self, body)
+    }
+
+    fn remember_answers(&self) -> Result<u64, Error> {
+        Feeds::remember_answers(self)
+    }
+
+    fn gauges(&self) -> Result<Gauges, Error> {
+        Feeds::gauges(self)
+    }
+
+    fn proxies(&self) -> Result<Vec<Address>, Error> {
+        Feeds::proxies(self)
+    }
+
+    fn apply_read(&self, proxy: Address, read: Read) -> Result<(), Error> {
+        Feeds::apply_read(self, proxy, read)
+    }
+
+    fn follow_block(&self) -> Result<Option<u64>, Error> {
+        Feeds::follow_block(self)
+    }
+
+    fn lookback_done(&self) -> Result<bool, Error> {
+        Feeds::lookback_done(self)
+    }
+
+    fn mark_lookback(&self) -> Result<(), Error> {
+        Feeds::mark_lookback(self)
+    }
+
+    fn commit_follow(&self, next_block: u64, observed: &[ObservedAnswer]) -> Result<usize, Error> {
+        Feeds::commit_follow(self, next_block, observed)
+    }
+
+    fn answers(&self, proxy: Address) -> Result<Vec<Answer>, Error> {
+        Feeds::answers(self, proxy)
+    }
+
+    fn phases(&self, proxy: Address) -> Result<Vec<Phase>, Error> {
+        Feeds::phases(self, proxy)
+    }
+
+    fn feed(&self, proxy: Address) -> Result<Option<Feed>, Error> {
+        Feeds::feed(self, proxy)
     }
 }

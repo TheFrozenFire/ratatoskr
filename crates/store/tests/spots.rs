@@ -3,7 +3,8 @@
 use alloy_primitives::Address;
 use num_bigint::BigInt;
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
-use spots::{Spot, Spots};
+use spots::Spot;
+use store::Spots;
 
 fn token(byte: u8) -> Address {
     let mut raw = [0_u8; 20];
@@ -65,6 +66,8 @@ fn a_pass_replaces_the_spots_and_leaves_the_answer_table_absent() {
     let spots: TableDefinition<&[u8], &[u8]> = TableDefinition::new("spots");
     let table = read.open_table(spots).unwrap();
     assert_eq!(table.iter().unwrap().count(), 1);
+    assert!(store::Spots::default_path().ends_with("spots.redb"));
+    assert!(store::Feeds::default_path().ends_with("feeds.redb"));
     drop(table);
     drop(read);
     drop(db);

@@ -1,8 +1,10 @@
-//! Owner of the header chain, the receipt corpus, and the venue catalog.
+//! Owner of the header chain, the receipt corpus, the venue catalog, the feed
+//! file, and the spot file.
 //!
-//! The catalog is `discovery.redb`, `entities.redb`, and `work.redb`. Commits
-//! use immediate durability. Those choices live in `HeaderChain`, `Corpus`,
-//! and `Catalog`.
+//! The catalog is `discovery.redb`, `entities.redb`, and `work.redb`. Feeds
+//! live in `feeds.redb`. Spots live in `spots.redb`. Commits use immediate
+//! durability. Header, corpus, and catalog choices live in `HeaderChain`,
+//! `Corpus`, and `Catalog`.
 
 use alloy_primitives::{Address, B256};
 use chain::HeaderChain;
@@ -13,11 +15,15 @@ use std::path::Path;
 use std::sync::Arc;
 use venues::{Catalog, Put, ReceiptBody, TokenRecord, VenueRow};
 
+mod feeds;
 mod remote;
 mod serve;
+mod spot_file;
 
+pub use feeds::Feeds;
 pub use remote::RemoteStore;
 pub use serve::{db_socket, serve};
+pub use spot_file::Spots;
 pub use venues::EntityStore;
 
 const HEADER_BATCH: u64 = 8192;
