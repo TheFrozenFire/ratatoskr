@@ -69,7 +69,7 @@ impl Catalog {
     pub fn put_mutable(&self, row: &MutableWrite) -> eyre::Result<MutableStored> {
         let mut write = self.entities.begin_write()?;
         write.set_durability(Durability::Immediate)?;
-        let (stored, previous_curve) = {
+        let stored = {
             let mut mutable_table = write.open_table(MUTABLE)?;
             let mut ticks = write.open_table(TICK_PAGES)?;
             let mut curves = write.open_table(CURVES)?;
@@ -111,20 +111,15 @@ impl Catalog {
                 }
                 _ => false,
             };
-            (
-                MutableStored {
-                    generation,
-                    dirty_cleared,
-                    kept_ticks,
-                    bitmap_changed,
-                },
+            MutableStored {
+                generation,
+                dirty_cleared,
+                kept_ticks,
+                bitmap_changed,
                 previous_curve,
-            )
+            }
         };
         write.commit()?;
-        if let Some(previous_curve) = previous_curve {
-            super::super::conduit::retarget(self, row.kind, row.id, Some(&previous_curve), None)?;
-        }
         Ok(stored)
     }
 

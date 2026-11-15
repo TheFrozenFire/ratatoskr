@@ -31,6 +31,7 @@ pub fn drop_empty_pools(catalog: &Catalog) -> eyre::Result<Vec<(u8, B256)>> {
             }
         }
     }
-    catalog.delete_pools(&drop)?;
+    let (_, curves) = catalog.delete_pools(&drop)?;
+    crate::conduit::forget_curves(catalog, &curves)?;
     Ok(drop)
 }

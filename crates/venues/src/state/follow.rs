@@ -121,7 +121,7 @@ pub(super) fn follow_for_detail(input: &FollowInput<'_>) -> FollowPlan {
 }
 
 /// Local curve once the tick words for this generation are stored.
-pub(super) async fn after_book<S: VenueStore>(
+pub(super) async fn after_book<S: VenueStore + crate::ConduitStore>(
     store: &S,
     job: &WorkJob,
 ) -> eyre::Result<Option<WorkJob>> {
@@ -150,7 +150,10 @@ pub(super) async fn after_book<S: VenueStore>(
     let priority = priority_of((job.priority & DIRTY_BAND) != 0, cap.top);
     match curve_for_snapshot(&detail, mutable.generation) {
         Ok(curve) => {
-            if store.put_curve(&curve).await.is_err() {
+            if crate::conduit::commit_curve_store(store, &curve)
+                .await
+                .is_err()
+            {
                 let mut next = curve_job(job.kind, job.id, mutable.generation);
                 next.priority = priority;
                 return Ok(Some(next));

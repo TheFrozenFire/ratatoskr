@@ -58,6 +58,8 @@ pub struct MutableStored {
     pub dirty_cleared: bool,
     pub kept_ticks: bool,
     pub bitmap_changed: bool,
+    /// Curve removed by this snapshot. The caller retargets conduit members.
+    pub previous_curve: Option<CurveRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

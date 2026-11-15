@@ -7,7 +7,7 @@ use super::super::catalog::Catalog;
 use super::*;
 
 impl Catalog {
-    pub fn put_curve(&self, curve: &CurveRecord) -> eyre::Result<()> {
+    pub fn put_curve(&self, curve: &CurveRecord) -> eyre::Result<Option<CurveRecord>> {
         let mut write = self.entities.begin_write()?;
         write.set_durability(Durability::Immediate)?;
         let previous = {
@@ -30,20 +30,13 @@ impl Catalog {
             previous
         };
         write.commit()?;
-        super::super::conduit::retarget(
-            self,
-            curve.kind,
-            curve.id,
-            previous.as_ref(),
-            Some(curve),
-        )?;
-        Ok(())
+        Ok(previous)
     }
 
     /// Store a page of curves in one commit. A generation mismatch stores none of them.
-    pub fn put_curves(&self, curves: &[CurveRecord]) -> eyre::Result<()> {
+    pub fn put_curves(&self, curves: &[CurveRecord]) -> eyre::Result<Vec<Option<CurveRecord>>> {
         if curves.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let mut write = self.entities.begin_write()?;
         write.set_durability(Durability::Immediate)?;
@@ -70,15 +63,6 @@ impl Catalog {
             }
         }
         write.commit()?;
-        for (previous, curve) in replaced.iter().zip(curves) {
-            super::super::conduit::retarget(
-                self,
-                curve.kind,
-                curve.id,
-                previous.as_ref(),
-                Some(curve),
-            )?;
-        }
-        Ok(())
+        Ok(replaced)
     }
 }

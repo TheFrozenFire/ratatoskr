@@ -1,6 +1,381 @@
-//! Pair-conduit jobs. The file service lives in [`store::service`].
+//! Pair conduits. Membership and the slope merge are decided here.
+//! The table writes stay in [`store::service`].
 
 pub use store_model::{ConduitFail, ConduitJob};
+
+use alloy_primitives::{Address, B256};
+use store::service::{ConduitBody, ConduitMember, MemberTarget};
+use store::{ConduitStore, VenueStore};
+use store_model::{CurveRecord, MutableStored, MutableWrite, PoolState, CURVE_VERSION};
+
+use crate::fit::direction_knots;
+use crate::state::{join_detail, unix_now};
+use crate::Catalog;
+
+const FILL_PAGE: usize = 1024;
+const CONDUIT_BATCH: u32 = 32;
+const CONDUIT_LEASE_SECS: u64 = 120;
+const CONDUIT_BACKOFF_SECS: u64 = 60;
+const SCAN_LOG: u64 = 100_000;
+
+/// Ordered pairs this curve prices. An undecodable row prices nothing.
+pub(crate) fn priced_pairs(curve: &CurveRecord) -> Vec<(Address, Address)> {
+    if curve.version != CURVE_VERSION {
+        return Vec::new();
+    }
+    let Ok(fit) = fitter::decode_fit(&curve.payload) else {
+        return Vec::new();
+    };
+    if fit.reason != 0 {
+        return Vec::new();
+    }
+    let mut pairs = Vec::new();
+    for direction in fit.directions {
+        if direction.token_in == direction.token_out {
+            continue;
+        }
+        let pair = (direction.token_in, direction.token_out);
+        if !pairs.contains(&pair) {
+            pairs.push(pair);
+        }
+    }
+    pairs
+}
+
+struct Built {
+    block: u64,
+    generation: u64,
+    segments: Vec<routing::SlopeSegment>,
+}
+
+fn segments_of(
+    state: &PoolState,
+    kind: u8,
+    id: B256,
+    generation: u64,
+    token_in: Address,
+    token_out: Address,
+) -> Option<Built> {
+    let (Some(immutable), Some(mutable), Some(curve)) = (
+        state.immutable.as_ref(),
+        state.mutable.as_ref(),
+        state.curve.as_ref(),
+    ) else {
+        return None;
+    };
+    if curve.version != CURVE_VERSION
+        || curve.generation != mutable.generation
+        || curve.generation != generation
+    {
+        return None;
+    }
+    if !priced_pairs(curve).contains(&(token_in, token_out)) {
+        return None;
+    }
+    let detail = join_detail(immutable, &mutable.body, &state.ticks, kind, id).ok()?;
+    let knots = direction_knots(&detail, curve, token_in, token_out);
+    let segments = routing::segments_from_knots(&knots, routing::Action { kind, pool: id.0 });
+    Some(Built {
+        block: mutable.block,
+        generation: curve.generation,
+        segments,
+    })
+}
+
+fn retarget(
+    catalog: &Catalog,
+    kind: u8,
+    id: B256,
+    previous: Option<&CurveRecord>,
+    next: Option<&CurveRecord>,
+) -> eyre::Result<()> {
+    let old_pairs = previous.map(priced_pairs).unwrap_or_default();
+    let new_pairs = next.map(priced_pairs).unwrap_or_default();
+    let generation = next.map(|curve| curve.generation);
+    catalog.apply_retarget(kind, id, &old_pairs, &new_pairs, generation)
+}
+
+async fn retarget_store<S: ConduitStore>(
+    store: &S,
+    kind: u8,
+    id: B256,
+    previous: Option<&CurveRecord>,
+    next: Option<&CurveRecord>,
+) -> eyre::Result<()> {
+    let old_pairs = previous.map(priced_pairs).unwrap_or_default();
+    let new_pairs = next.map(priced_pairs).unwrap_or_default();
+    let generation = next.map(|curve| curve.generation);
+    store
+        .apply_retarget(kind, id, &old_pairs, &new_pairs, generation)
+        .await
+}
+
+/// Write a snapshot, then drop conduit members of the curve it removed.
+pub fn commit_mutable(catalog: &Catalog, row: &MutableWrite) -> eyre::Result<MutableStored> {
+    let stored = catalog.put_mutable(row)?;
+    retarget(
+        catalog,
+        row.kind,
+        row.id,
+        stored.previous_curve.as_ref(),
+        None,
+    )?;
+    Ok(stored)
+}
+
+/// Write a snapshot, then drop conduit members of the curve it removed.
+pub async fn commit_mutable_store<S: VenueStore + ConduitStore>(
+    store: &S,
+    row: &MutableWrite,
+) -> eyre::Result<MutableStored> {
+    let stored = store.put_mutable(row).await?;
+    retarget_store(
+        store,
+        row.kind,
+        row.id,
+        stored.previous_curve.as_ref(),
+        None,
+    )
+    .await?;
+    Ok(stored)
+}
+
+/// Write a curve, then retarget conduit members from the row it replaced.
+pub fn commit_curve(catalog: &Catalog, curve: &CurveRecord) -> eyre::Result<()> {
+    let previous = catalog.put_curve(curve)?;
+    retarget(
+        catalog,
+        curve.kind,
+        curve.id,
+        previous.as_ref(),
+        Some(curve),
+    )
+}
+
+/// Write a curve, then retarget conduit members from the row it replaced.
+pub async fn commit_curve_store<S: VenueStore + ConduitStore>(
+    store: &S,
+    curve: &CurveRecord,
+) -> eyre::Result<()> {
+    let previous = store.put_curve(curve).await?;
+    retarget_store(store, curve.kind, curve.id, previous.as_ref(), Some(curve)).await
+}
+
+/// Write a page of curves, then retarget each replaced row.
+pub fn commit_curves(catalog: &Catalog, curves: &[CurveRecord]) -> eyre::Result<()> {
+    let replaced = catalog.put_curves(curves)?;
+    for (curve, previous) in curves.iter().zip(replaced) {
+        retarget(
+            catalog,
+            curve.kind,
+            curve.id,
+            previous.as_ref(),
+            Some(curve),
+        )?;
+    }
+    Ok(())
+}
+
+/// Drop conduit members for curves removed with their pools.
+pub fn forget_curves(catalog: &Catalog, curves: &[CurveRecord]) -> eyre::Result<()> {
+    for curve in curves {
+        retarget(catalog, curve.kind, curve.id, Some(curve), None)?;
+    }
+    Ok(())
+}
+
+/// Delete a stride of listed identities and drop the conduit members of removed curves.
+pub fn trim_listed(
+    catalog: &Catalog,
+    target: u64,
+    listed: &[(u8, B256)],
+) -> eyre::Result<(u64, Vec<(u8, B256)>)> {
+    let (removed, left, curves) = catalog.trim_listed(target, listed)?;
+    forget_curves(catalog, &curves)?;
+    Ok((removed, left))
+}
+
+fn absorb(curves: &mut u64, targets: &mut Vec<MemberTarget>, page: &store::service::CurvePage) {
+    for row in &page.rows {
+        *curves += 1;
+        if curves.is_multiple_of(SCAN_LOG) {
+            observability::info!(curves = *curves, "conduit fill scan");
+        }
+        let Some(curve) = &row.curve else {
+            observability::warn!(
+                kind = row.kind,
+                id = %row.id,
+                "conduit fill skipped a curve row"
+            );
+            continue;
+        };
+        for (token_in, token_out) in priced_pairs(curve) {
+            targets.push(MemberTarget {
+                token_in,
+                token_out,
+                kind: curve.kind,
+                id: curve.id,
+                generation: curve.generation,
+            });
+        }
+    }
+}
+
+/// Queue one job per ordered pair whose conduit is missing or behind the stored curves.
+pub fn enqueue_conduit_fill(catalog: &Catalog) -> eyre::Result<u64> {
+    let mut curves = 0_u64;
+    let mut targets = Vec::new();
+    let mut after = None;
+    loop {
+        let page = catalog.page_curves(after, FILL_PAGE)?;
+        absorb(&mut curves, &mut targets, &page);
+        if !page.more {
+            break;
+        }
+        let Some(resume) = page.resume else {
+            break;
+        };
+        after = Some(resume);
+    }
+    observability::info!(curves, members = targets.len(), "conduit fill scanned");
+    catalog.enqueue_members(&targets)
+}
+
+/// Queue one job per ordered pair whose conduit is missing or behind the stored curves.
+pub async fn enqueue_conduit_fill_store<S: ConduitStore>(store: &S) -> eyre::Result<u64> {
+    let mut curves = 0_u64;
+    let mut targets = Vec::new();
+    let mut after = None;
+    loop {
+        let page = store.page_curves(after, FILL_PAGE).await?;
+        absorb(&mut curves, &mut targets, &page);
+        if !page.more {
+            break;
+        }
+        let Some(resume) = page.resume else {
+            break;
+        };
+        after = Some(resume);
+    }
+    observability::info!(curves, members = targets.len(), "conduit fill scanned");
+    store.enqueue_members(&targets).await
+}
+
+fn assemble(
+    token_in: Address,
+    token_out: Address,
+    snapshot: &[ConduitMember],
+    states: &[PoolState],
+) -> ConduitBody {
+    let mut kept = Vec::new();
+    let mut parts = Vec::new();
+    let mut min_block = u64::MAX;
+    let mut max_gen = 0_u64;
+    for (member, state) in snapshot.iter().zip(states) {
+        let Some(built) = segments_of(
+            state,
+            member.kind,
+            member.id,
+            member.generation,
+            token_in,
+            token_out,
+        ) else {
+            continue;
+        };
+        min_block = min_block.min(built.block);
+        max_gen = max_gen.max(built.generation);
+        parts.push(built.segments);
+        kept.push(member.key);
+    }
+    ConduitBody {
+        token_in,
+        token_out,
+        snapshot: snapshot.to_vec(),
+        kept,
+        block: min_block,
+        generation: max_gen,
+        segments: routing::merge(&parts),
+    }
+}
+
+/// Merge the members of one ordered pair and store the slope segments.
+///
+/// The bool asks for another pass. It is set when the member index moved
+/// while this merge was reading.
+pub fn build_conduit(
+    catalog: &Catalog,
+    token_in: Address,
+    token_out: Address,
+) -> eyre::Result<bool> {
+    let snapshot = catalog.conduit_members(token_in, token_out)?;
+    let mut states = Vec::with_capacity(snapshot.len());
+    for member in &snapshot {
+        states.push(catalog.read_state(member.kind, member.id)?);
+    }
+    let body = assemble(token_in, token_out, &snapshot, &states);
+    catalog.store_conduit(&body)
+}
+
+/// Merge the members of one ordered pair and store the slope segments.
+///
+/// The bool asks for another pass. It is set when the member index moved
+/// while this merge was reading.
+pub async fn build_conduit_store<S: VenueStore + ConduitStore>(
+    store: &S,
+    token_in: Address,
+    token_out: Address,
+) -> eyre::Result<bool> {
+    let snapshot = store.conduit_members(token_in, token_out).await?;
+    let mut states = Vec::with_capacity(snapshot.len());
+    for member in &snapshot {
+        states.push(store.read_state(member.kind, member.id).await?);
+    }
+    let body = assemble(token_in, token_out, &snapshot, &states);
+    store.store_conduit(&body).await
+}
+
+/// Build every conduit job that is ready. A job that fails stays for a later pass.
+pub fn drain_conduits(catalog: &Catalog) -> eyre::Result<u64> {
+    let mut built = 0_u64;
+    loop {
+        let now = unix_now();
+        let jobs = catalog.claim_conduits(CONDUIT_BATCH, now, CONDUIT_LEASE_SECS)?;
+        if jobs.is_empty() {
+            return Ok(built);
+        }
+        let mut done = Vec::new();
+        let mut again = Vec::new();
+        let mut failed = Vec::new();
+        for job in &jobs {
+            match build_conduit(catalog, job.token_in, job.token_out) {
+                Ok(true) => {
+                    again.push((job.token_in, job.token_out));
+                    done.push((job.token_in, job.token_out));
+                }
+                Ok(false) => done.push((job.token_in, job.token_out)),
+                Err(err) => failed.push(ConduitFail {
+                    token_in: job.token_in,
+                    token_out: job.token_out,
+                    not_before: now.saturating_add(CONDUIT_BACKOFF_SECS),
+                    error: clip_error(&err.to_string()),
+                }),
+            }
+        }
+        catalog.finish_conduits(&done, &again, &failed)?;
+        built += done.len() as u64;
+        if built.is_multiple_of(256) {
+            observability::info!(built, "conduit drain");
+        }
+    }
+}
+
+fn clip_error(error: &str) -> String {
+    let mut end = error.len().min(180);
+    while !error.is_char_boundary(end) {
+        end -= 1;
+    }
+    error[..end].to_string()
+}
 
 #[cfg(test)]
 mod tests {
@@ -76,10 +451,10 @@ mod tests {
                 body,
             }])
             .unwrap();
-        let stored = catalog.put_mutable(&write).unwrap();
+        let stored = super::commit_mutable(catalog, &write).unwrap();
         let curve = derive_curve(detail, stored.generation).unwrap();
         assert_eq!(curve.version, CURVE_VERSION);
-        catalog.put_curve(&curve).unwrap();
+        super::commit_curve(catalog, &curve).unwrap();
         curve
     }
 
@@ -96,7 +471,7 @@ mod tests {
         let token_out = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
 
         assert_eq!(catalog.state_summary().unwrap().jobs, 2);
-        assert_eq!(catalog.enqueue_conduit_fill().unwrap(), 2);
+        assert_eq!(super::enqueue_conduit_fill(&catalog).unwrap(), 2);
         assert_eq!(catalog.state_summary().unwrap().jobs, 2);
         let first = catalog.claim_conduits(8, 1, 30).unwrap();
         assert_eq!(first.len(), 2);
@@ -104,7 +479,7 @@ mod tests {
 
         let mut again = Vec::new();
         for job in &first {
-            if catalog.build_conduit(job.token_in, job.token_out).unwrap() {
+            if super::build_conduit(&catalog, job.token_in, job.token_out).unwrap() {
                 again.push((job.token_in, job.token_out));
             }
         }
@@ -114,7 +489,7 @@ mod tests {
             .collect();
         catalog.finish_conduits(&done, &again, &[]).unwrap();
         assert!(again.is_empty());
-        assert_eq!(catalog.enqueue_conduit_fill().unwrap(), 0);
+        assert_eq!(super::enqueue_conduit_fill(&catalog).unwrap(), 0);
         assert!(catalog.claim_conduits(8, 1, 30).unwrap().is_empty());
 
         let stored = catalog.read_conduit(token_in, token_out).unwrap().unwrap();
@@ -157,12 +532,12 @@ mod tests {
                 body,
             }])
             .unwrap();
-        catalog.put_mutable(&write).unwrap();
+        super::commit_mutable(&catalog, &write).unwrap();
         let jobs = catalog.claim_conduits(8, 1, 30).unwrap();
         assert!(!jobs.is_empty());
         let mut again = Vec::new();
         for job in &jobs {
-            if catalog.build_conduit(job.token_in, job.token_out).unwrap() {
+            if super::build_conduit(&catalog, job.token_in, job.token_out).unwrap() {
                 again.push((job.token_in, job.token_out));
             }
         }

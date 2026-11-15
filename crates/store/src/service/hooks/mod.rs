@@ -4,10 +4,7 @@
 //! error, so a priority is not silently changed.
 
 mod capacity;
-mod segment;
 
 pub use capacity::{install_capacity, Capacity};
-pub use segment::{install_segments, DirectionRows};
 
 pub(crate) use capacity::capacity;
-pub(crate) use segment::{priced_pairs, segments};

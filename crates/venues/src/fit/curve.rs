@@ -181,7 +181,7 @@ pub fn refit_curves(catalog: &Catalog) -> eyre::Result<u64> {
                 curves.push(curve);
             }
             let n = curves.len() as u64;
-            catalog.put_curves(&curves)?;
+            crate::conduit::commit_curves(catalog, &curves)?;
             wrote += n;
             observability::info!(
                 kind = kind_name(kind),

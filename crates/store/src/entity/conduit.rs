@@ -1,14 +1,34 @@
-//! Pair-conduit jobs.
+//! Pair-conduit persistence.
 
-use alloy_primitives::Address;
+use crate::service::{ConduitBody, ConduitMember, CurvePage, MemberTarget};
+use alloy_primitives::{Address, B256};
 use store_model::{ConduitFail, ConduitJob};
 
 use crate::{blocking, LocalStore};
 
 #[allow(async_fn_in_trait)]
 pub trait ConduitStore: Send + Sync {
-    /// Queue conduit jobs for ordered pairs whose stored merge is missing or stale.
-    async fn enqueue_conduit_fill(&self) -> eyre::Result<u64>;
+    async fn page_curves(&self, after: Option<(u8, B256)>, limit: usize)
+        -> eyre::Result<CurvePage>;
+
+    async fn enqueue_members(&self, targets: &[MemberTarget]) -> eyre::Result<u64>;
+
+    async fn conduit_members(
+        &self,
+        token_in: Address,
+        token_out: Address,
+    ) -> eyre::Result<Vec<ConduitMember>>;
+
+    async fn store_conduit(&self, body: &ConduitBody) -> eyre::Result<bool>;
+
+    async fn apply_retarget(
+        &self,
+        kind: u8,
+        id: B256,
+        old_pairs: &[(Address, Address)],
+        new_pairs: &[(Address, Address)],
+        generation: Option<u64>,
+    ) -> eyre::Result<()>;
 
     async fn claim_conduits(
         &self,
@@ -23,15 +43,51 @@ pub trait ConduitStore: Send + Sync {
         again: &[(Address, Address)],
         failed: &[ConduitFail],
     ) -> eyre::Result<()>;
-
-    /// Merge one ordered pair. The bool asks for another pass.
-    async fn build_conduit(&self, token_in: Address, token_out: Address) -> eyre::Result<bool>;
 }
 
 impl ConduitStore for LocalStore {
-    async fn enqueue_conduit_fill(&self) -> eyre::Result<u64> {
+    async fn page_curves(
+        &self,
+        after: Option<(u8, B256)>,
+        limit: usize,
+    ) -> eyre::Result<CurvePage> {
         let catalog = self.catalog_db()?;
-        blocking(move || catalog.enqueue_conduit_fill()).await
+        blocking(move || catalog.page_curves(after, limit)).await
+    }
+
+    async fn enqueue_members(&self, targets: &[MemberTarget]) -> eyre::Result<u64> {
+        let catalog = self.catalog_db()?;
+        let targets = targets.to_vec();
+        blocking(move || catalog.enqueue_members(&targets)).await
+    }
+
+    async fn conduit_members(
+        &self,
+        token_in: Address,
+        token_out: Address,
+    ) -> eyre::Result<Vec<ConduitMember>> {
+        let catalog = self.catalog_db()?;
+        blocking(move || catalog.conduit_members(token_in, token_out)).await
+    }
+
+    async fn store_conduit(&self, body: &ConduitBody) -> eyre::Result<bool> {
+        let catalog = self.catalog_db()?;
+        let body = body.clone();
+        blocking(move || catalog.store_conduit(&body)).await
+    }
+
+    async fn apply_retarget(
+        &self,
+        kind: u8,
+        id: B256,
+        old_pairs: &[(Address, Address)],
+        new_pairs: &[(Address, Address)],
+        generation: Option<u64>,
+    ) -> eyre::Result<()> {
+        let catalog = self.catalog_db()?;
+        let old_pairs = old_pairs.to_vec();
+        let new_pairs = new_pairs.to_vec();
+        blocking(move || catalog.apply_retarget(kind, id, &old_pairs, &new_pairs, generation)).await
     }
 
     async fn claim_conduits(
@@ -55,10 +111,5 @@ impl ConduitStore for LocalStore {
         let again = again.to_vec();
         let failed = failed.to_vec();
         blocking(move || catalog.finish_conduits(&done, &again, &failed)).await
-    }
-
-    async fn build_conduit(&self, token_in: Address, token_out: Address) -> eyre::Result<bool> {
-        let catalog = self.catalog_db()?;
-        blocking(move || catalog.build_conduit(token_in, token_out)).await
     }
 }

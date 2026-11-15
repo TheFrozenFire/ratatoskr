@@ -119,7 +119,7 @@ async fn refresh(
         let catalog = store::service::Catalog::open_with(&venues_path, &caches)?;
         let rpc = chain::Rpc::new(urls)?;
         let report = venues::refresh_kinds(&catalog, &rpc, &kinds)?;
-        let built = catalog.drain_conduits()?;
+        let built = venues::drain_conduits(&catalog)?;
         Ok::<_, eyre::Report>((report, built))
     })
     .await
@@ -170,7 +170,7 @@ async fn reshape(args: &Args, paths: &Paths, caches: &config::Store) -> eyre::Re
         let caches = caches.clone();
         let (removed, left) = tokio::task::spawn_blocking(move || {
             let catalog = store::service::Catalog::open_with(&venues_path, &caches)?;
-            catalog.trim_listed(target, &listed)
+            venues::trim_listed(&catalog, target, &listed)
         })
         .await
         .wrap_err("trim sample")??;

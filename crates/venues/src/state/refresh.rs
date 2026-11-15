@@ -60,7 +60,7 @@ pub fn refresh_kinds(catalog: &Catalog, rpc: &Rpc, kinds: &[u8]) -> eyre::Result
                         body: immutable,
                     }])?;
                 }
-                let stored = catalog.put_mutable(&mutable)?;
+                let stored = crate::conduit::commit_mutable(catalog, &mutable)?;
                 let mut detail = detail;
                 if stored.kept_ticks {
                     let fresh = catalog.read_state(row.kind, row.id)?;
@@ -76,7 +76,7 @@ pub fn refresh_kinds(catalog: &Catalog, rpc: &Rpc, kinds: &[u8]) -> eyre::Result
                 }
                 let curve = curve_for_snapshot(&detail, stored.generation)
                     .map_err(|err| eyre::eyre!(err))?;
-                catalog.put_curve(&curve)?;
+                crate::conduit::commit_curve(catalog, &curve)?;
                 report.read += 1;
                 report.curves += 1;
             }

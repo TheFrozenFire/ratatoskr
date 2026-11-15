@@ -18,10 +18,10 @@ impl Catalog {
         &self,
         target: u64,
         listed: &[(u8, B256)],
-    ) -> eyre::Result<(u64, Vec<(u8, B256)>)> {
+    ) -> eyre::Result<(u64, Vec<(u8, B256)>, Vec<store_model::CurveRecord>)> {
         let have = self.state_summary()?.identities;
         if have <= target {
-            return Ok((0, listed.to_vec()));
+            return Ok((0, listed.to_vec(), Vec::new()));
         }
         let excess = (have - target) as usize;
         let mut present = Vec::new();
@@ -31,19 +31,25 @@ impl Catalog {
             }
         }
         let remove = stride_pick(&present, excess.min(present.len()));
-        let removed = self.delete_pools(&remove)?;
+        let (removed, curves) = self.delete_pools(&remove)?;
         let gone: std::collections::HashSet<(u8, B256)> = remove.into_iter().collect();
         let left = listed
             .iter()
             .copied()
             .filter(|id| !gone.contains(id))
             .collect();
-        Ok((removed, left))
+        Ok((removed, left, curves))
     }
 
-    /// Remove identities and every state row that hangs off them.
-    pub fn delete_pools(&self, ids: &[(u8, B256)]) -> eyre::Result<u64> {
+    /// Remove identities, their quote rows, and work from the immutable stage through quote.
+    ///
+    /// The returned curves were stored on removed identities. The caller drops those conduit members.
+    pub fn delete_pools(
+        &self,
+        ids: &[(u8, B256)],
+    ) -> eyre::Result<(u64, Vec<store_model::CurveRecord>)> {
         let mut removed = 0_u64;
+        let mut dropped = Vec::new();
         for chunk in ids.chunks(128) {
             let mut write = self.entities.begin_write()?;
             write.set_durability(Durability::Immediate)?;
@@ -77,9 +83,7 @@ impl Catalog {
                 }
             }
             write.commit()?;
-            for curve in &dropped_curves {
-                super::super::conduit::retarget(self, curve.kind, curve.id, Some(curve), None)?;
-            }
+            dropped.extend(dropped_curves);
             let mut work = self.work.begin_write()?;
             work.set_durability(Durability::Immediate)?;
             {
@@ -93,7 +97,7 @@ impl Catalog {
             }
             work.commit()?;
         }
-        Ok(removed)
+        Ok((removed, dropped))
     }
 }
 

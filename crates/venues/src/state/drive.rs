@@ -26,7 +26,7 @@ where
     let inserted = super::plan::reconcile(store, unix_now()).await?;
     report.notes.push(format!("reconcile {inserted}"));
     observability::info!(inserted, "state reconcile");
-    let queued = store.enqueue_conduit_fill().await?;
+    let queued = crate::conduit::enqueue_conduit_fill_store(store).await?;
     report.notes.push(format!("conduit fill {queued}"));
     observability::info!(queued, "conduit fill");
     let urls = if opts.rpcs.is_empty() {
@@ -200,7 +200,7 @@ async fn drive_conduits<S>(
     notes: &mut Vec<String>,
 ) -> eyre::Result<bool>
 where
-    S: ConduitStore,
+    S: VenueStore + ConduitStore,
 {
     let jobs = store
         .claim_conduits(limits().detail_batch, now, limits().lease_secs)
@@ -215,7 +215,7 @@ where
     let mut again = Vec::new();
     let mut failed = Vec::new();
     for job in &jobs {
-        match store.build_conduit(job.token_in, job.token_out).await {
+        match crate::conduit::build_conduit_store(store, job.token_in, job.token_out).await {
             Ok(true) => {
                 again.push((job.token_in, job.token_out));
                 done.push((job.token_in, job.token_out));
@@ -263,7 +263,7 @@ where
     Ok(true)
 }
 
-async fn run_stage<S: VenueStore>(
+async fn run_stage<S: VenueStore + ConduitStore>(
     store: S,
     rpc: Rpc,
     stage: u8,
@@ -291,7 +291,7 @@ async fn run_stage<S: VenueStore>(
     Ok(notes)
 }
 
-async fn drive_details<S: VenueStore>(
+async fn drive_details<S: VenueStore + ConduitStore>(
     store: &S,
     rpc: &Rpc,
     block: u64,
@@ -384,7 +384,7 @@ async fn drive_details<S: VenueStore>(
             let state = store.read_state(row.kind, row.id).await?;
             mutable.class = state.dirty.map(|dirty| dirty.class).unwrap_or(CLASS_HEAD);
         }
-        let stored = store.put_mutable(&mutable).await?;
+        let stored = crate::conduit::commit_mutable_store(store, &mutable).await?;
         let mut detail = detail;
         let mut book_ready = mutable.tick_count == 0 || !concentrated_kind(row.kind);
         if stored.kept_ticks {
@@ -409,7 +409,10 @@ async fn drive_details<S: VenueStore>(
         if plan.derive {
             match curve_for_snapshot(&detail, stored.generation) {
                 Ok(curve) => {
-                    if store.put_curve(&curve).await.is_err() {
+                    if crate::conduit::commit_curve_store(store, &curve)
+                        .await
+                        .is_err()
+                    {
                         let mut job = curve_job(row.kind, row.id, stored.generation);
                         job.priority = plan.priority;
                         follow.push(job);
@@ -432,7 +435,7 @@ async fn drive_details<S: VenueStore>(
     Ok(())
 }
 
-async fn drive_ticks<S: VenueStore>(
+async fn drive_ticks<S: VenueStore + ConduitStore>(
     store: &S,
     rpc: &Rpc,
     jobs: &[WorkJob],
@@ -590,7 +593,7 @@ async fn drive_ticks<S: VenueStore>(
     Ok(())
 }
 
-async fn drive_curves<S: VenueStore>(
+async fn drive_curves<S: VenueStore + ConduitStore>(
     store: &S,
     jobs: &[WorkJob],
     give_up_after: u32,
@@ -631,7 +634,7 @@ async fn drive_curves<S: VenueStore>(
                 continue;
             }
         };
-        if let Err(err) = store.put_curve(&curve).await {
+        if let Err(err) = crate::conduit::commit_curve_store(store, &curve).await {
             keep_or_drop(
                 job,
                 err.to_string(),

@@ -308,7 +308,7 @@ mod tests {
                 body,
             }])
             .unwrap();
-        catalog.put_mutable(&write).unwrap();
+        crate::conduit::commit_mutable(&catalog, &write).unwrap();
     }
 
     #[test]
@@ -404,7 +404,7 @@ mod tests {
             next_scan: None,
             body: b"m".to_vec(),
         };
-        catalog.put_mutable(&write).unwrap();
+        crate::conduit::commit_mutable(&catalog, &write).unwrap();
         catalog
             .apply_watch(
                 20,
@@ -436,7 +436,7 @@ mod tests {
         let mut older = write.clone();
         older.block = 13;
         older.class = CLASS_HEAD;
-        let stored = catalog.put_mutable(&older).unwrap();
+        let stored = crate::conduit::commit_mutable(&catalog, &older).unwrap();
         assert!(!stored.dirty_cleared);
         assert_eq!(
             catalog.read_state(UNI_V2, id).unwrap().dirty.unwrap().class,
@@ -445,7 +445,7 @@ mod tests {
         let mut caught = write;
         caught.block = 14;
         caught.class = CLASS_TICKS;
-        let stored = catalog.put_mutable(&caught).unwrap();
+        let stored = crate::conduit::commit_mutable(&catalog, &caught).unwrap();
         assert!(stored.dirty_cleared);
         assert!(catalog.read_state(UNI_V2, id).unwrap().dirty.is_none());
     }
@@ -466,7 +466,7 @@ mod tests {
             next_scan: None,
             body: b"bitmap".to_vec(),
         };
-        let first = catalog.put_mutable(&write).unwrap();
+        let first = crate::conduit::commit_mutable(&catalog, &write).unwrap();
         catalog
             .put_tick_pages(&[TickPage {
                 kind: UNI_V3,
@@ -482,7 +482,7 @@ mod tests {
             .unwrap();
         write.block = 4;
         write.class = CLASS_HEAD;
-        let head = catalog.put_mutable(&write).unwrap();
+        let head = crate::conduit::commit_mutable(&catalog, &write).unwrap();
         assert!(head.kept_ticks);
         assert!(!head.bitmap_changed);
         let state = catalog.read_state(UNI_V3, id).unwrap();
@@ -490,7 +490,7 @@ mod tests {
         assert_eq!(state.mutable.unwrap().generation, head.generation);
         write.class = CLASS_TICKS;
         write.block = 5;
-        let minted = catalog.put_mutable(&write).unwrap();
+        let minted = crate::conduit::commit_mutable(&catalog, &write).unwrap();
         assert!(!minted.kept_ticks);
         assert!(catalog.read_state(UNI_V3, id).unwrap().ticks.is_empty());
         write.bitmap = B256::repeat_byte(2);
@@ -509,7 +509,7 @@ mod tests {
                 }],
             }])
             .unwrap();
-        let changed = catalog.put_mutable(&write).unwrap();
+        let changed = crate::conduit::commit_mutable(&catalog, &write).unwrap();
         assert!(changed.bitmap_changed);
         assert!(catalog.read_state(UNI_V3, id).unwrap().ticks.is_empty());
     }
@@ -530,13 +530,13 @@ mod tests {
                 body: immutable,
             }])
             .unwrap();
-        let stored = catalog.put_mutable(&mutable).unwrap();
+        let stored = crate::conduit::commit_mutable(&catalog, &mutable).unwrap();
         let detail = product();
         let mut curve = derive_curve(&detail, stored.generation).unwrap();
         curve.generation = stored.generation + 1;
-        assert!(catalog.put_curve(&curve).is_err());
+        assert!(crate::conduit::commit_curve(&catalog, &curve).is_err());
         curve.generation = stored.generation;
-        catalog.put_curve(&curve).unwrap();
+        crate::conduit::commit_curve(&catalog, &curve).unwrap();
         let quote = crate::estimate(
             &curve,
             stored.generation,
@@ -556,7 +556,7 @@ mod tests {
         assert_eq!(reconcile(&catalog, 1).unwrap(), 0);
         mutable.block = 9;
         mutable.class = CLASS_HEAD;
-        catalog.put_mutable(&mutable).unwrap();
+        crate::conduit::commit_mutable(&catalog, &mutable).unwrap();
         let kept = catalog.read_state(sample.kind, sample.id).unwrap();
         assert!(kept.curve.is_none());
         assert!(reconcile(&catalog, 1).unwrap() >= 1);
@@ -589,7 +589,7 @@ mod tests {
             next_scan: None,
             body: b"m".to_vec(),
         };
-        let stored = catalog.put_mutable(&write).unwrap();
+        let stored = crate::conduit::commit_mutable(&catalog, &write).unwrap();
         assert_eq!(reconcile(&catalog, 1).unwrap(), 1);
         assert_eq!(catalog.claim_work(STAGE_TICKS, 4, 1, 10).unwrap().len(), 1);
         catalog
@@ -641,7 +641,7 @@ mod tests {
         mutable.kind = store_model::PANCAKE_V2;
         mutable.id = sample.id;
         mutable.block = 8;
-        let stored = catalog.put_mutable(&mutable).unwrap();
+        let stored = crate::conduit::commit_mutable(&catalog, &mutable).unwrap();
         let joined = join_detail(&immutable, &mutable.body, &[], mutable.kind, mutable.id).unwrap();
         let PoolDetail::ConstantProduct(read) = &joined else {
             panic!("joined");
@@ -651,7 +651,7 @@ mod tests {
         let curve = derive_curve(&joined, stored.generation).unwrap();
         assert_eq!(curve.kind, store_model::PANCAKE_V2);
         assert_eq!(curve.id, sample.id);
-        catalog.put_curve(&curve).unwrap();
+        crate::conduit::commit_curve(&catalog, &curve).unwrap();
         let amount = U256::from(10_000_000u64);
         let token_in = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         let token_out = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");

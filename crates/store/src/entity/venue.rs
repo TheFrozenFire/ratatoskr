@@ -41,7 +41,7 @@ pub trait VenueStore: Send + Sync {
     async fn put_immutable(&self, rows: &[ImmutableRow]) -> eyre::Result<Vec<ImmutablePut>>;
     async fn put_mutable(&self, row: &MutableWrite) -> eyre::Result<MutableStored>;
     async fn put_tick_pages(&self, pages: &[TickPage]) -> eyre::Result<()>;
-    async fn put_curve(&self, curve: &CurveRecord) -> eyre::Result<()>;
+    async fn put_curve(&self, curve: &CurveRecord) -> eyre::Result<Option<CurveRecord>>;
     async fn read_state(&self, kind: u8, id: B256) -> eyre::Result<PoolState>;
     async fn apply_watch(&self, through: u64, hits: &[WatchHit]) -> eyre::Result<()>;
     async fn watch_through(&self) -> eyre::Result<Option<u64>>;
@@ -133,7 +133,7 @@ impl VenueStore for LocalStore {
         blocking(move || catalog.put_tick_pages(&pages)).await
     }
 
-    async fn put_curve(&self, curve: &CurveRecord) -> eyre::Result<()> {
+    async fn put_curve(&self, curve: &CurveRecord) -> eyre::Result<Option<CurveRecord>> {
         let catalog = self.catalog_db()?;
         let curve = curve.clone();
         blocking(move || catalog.put_curve(&curve)).await

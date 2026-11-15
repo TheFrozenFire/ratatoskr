@@ -26,7 +26,7 @@ pub use catalog::{
 };
 pub use chain::detail::{load_details, DetailQuery, PoolDetail, Quote};
 pub use chain::{custodial_wrap, default_call_rpcs, root_address, Rpc, RpcLog};
-pub use conduit::{ConduitFail, ConduitJob};
+pub use conduit::{drain_conduits, trim_listed, ConduitFail, ConduitJob};
 pub use fit::{estimate, refit_curves};
 pub use history::BloomScan;
 pub use hooks::install_catalog_hooks;

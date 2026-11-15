@@ -1,84 +1,144 @@
-//! Member index and the slope merge.
+//! Member index and the stored slope merge.
 
 use alloy_primitives::{Address, B256};
 use redb::{Durability, ReadableDatabase, ReadableTable};
-use routing::SlopeSegment;
 use std::collections::{BTreeSet, HashMap};
-use store_model::{decode_curve_record, CurveRecord, CURVE_VERSION};
+use std::ops::Bound;
+use store_model::{decode_curve_record, entity_key};
 
 use super::super::catalog::Catalog;
-use super::super::hooks;
 use super::codec::{decode_conduit, encode_conduit};
 use super::job::sync_jobs;
 use super::*;
+use super::{ConduitBody, ConduitMember, CurvePage, CurveRow, MemberTarget};
 
-/// Curve generations changed for this pool. Members move with the priced
-/// directions, and each touched pair is queued. A pair with no members left
-/// loses its conduit row.
-pub(crate) fn retarget(
-    catalog: &Catalog,
-    kind: u8,
-    id: B256,
-    previous: Option<&CurveRecord>,
-    next: Option<&CurveRecord>,
-) -> eyre::Result<()> {
-    let old_pairs = match previous {
-        Some(curve) => hooks::priced_pairs(curve)?,
-        None => Vec::new(),
-    };
-    let new_pairs = match next {
-        Some(curve) => hooks::priced_pairs(curve)?,
-        None => Vec::new(),
-    };
-    let generation = next.map(|curve| curve.generation);
-    let mut pairs = BTreeSet::new();
-    pairs.extend(old_pairs.iter().copied());
-    pairs.extend(new_pairs.iter().copied());
-    if pairs.is_empty() {
-        return Ok(());
-    }
-    let now = super::super::state::unix_now();
-    let mut alive = Vec::new();
-    let mut gone = Vec::new();
-    {
-        let mut write = catalog.entities.begin_write()?;
-        write.set_durability(Durability::Immediate)?;
-        {
-            let mut members = write.open_table(MEMBERS)?;
-            let mut conduits = write.open_table(CONDUITS)?;
-            for pair in &pairs {
-                let key = member_key(&pair_key(pair.0, pair.1), kind, &id);
-                if new_pairs.contains(pair) {
-                    let Some(generation) = generation else {
-                        continue;
-                    };
-                    let bytes = generation.to_le_bytes();
-                    members.insert(key.as_slice(), bytes.as_slice())?;
-                } else {
-                    members.remove(key.as_slice())?;
-                }
-            }
-            for pair in &pairs {
-                let stored = pair_key(pair.0, pair.1);
-                if write_members(&members, &stored)?.is_empty() {
-                    conduits.remove(stored.as_slice())?;
-                    gone.push(*pair);
-                } else {
-                    alive.push(*pair);
-                }
-            }
+impl Catalog {
+    /// Move one pool's member rows to `new_pairs` and queue every pair that changed.
+    pub fn apply_retarget(
+        &self,
+        kind: u8,
+        id: B256,
+        old_pairs: &[(Address, Address)],
+        new_pairs: &[(Address, Address)],
+        generation: Option<u64>,
+    ) -> eyre::Result<()> {
+        let mut pairs = BTreeSet::new();
+        pairs.extend(old_pairs.iter().copied());
+        pairs.extend(new_pairs.iter().copied());
+        if pairs.is_empty() {
+            return Ok(());
         }
-        write.commit()?;
+        let now = super::super::state::unix_now();
+        let mut alive = Vec::new();
+        let mut gone = Vec::new();
+        {
+            let mut write = self.entities.begin_write()?;
+            write.set_durability(Durability::Immediate)?;
+            {
+                let mut members = write.open_table(MEMBERS)?;
+                let mut conduits = write.open_table(CONDUITS)?;
+                for pair in &pairs {
+                    let key = member_key(&pair_key(pair.0, pair.1), kind, &id);
+                    if new_pairs.contains(pair) {
+                        let Some(generation) = generation else {
+                            continue;
+                        };
+                        let bytes = generation.to_le_bytes();
+                        members.insert(key.as_slice(), bytes.as_slice())?;
+                    } else {
+                        members.remove(key.as_slice())?;
+                    }
+                }
+                for pair in &pairs {
+                    let stored = pair_key(pair.0, pair.1);
+                    if write_members(&members, &stored)?.is_empty() {
+                        conduits.remove(stored.as_slice())?;
+                        gone.push(*pair);
+                    } else {
+                        alive.push(*pair);
+                    }
+                }
+            }
+            write.commit()?;
+        }
+        sync_jobs(self, &alive, &gone, now)
     }
-    sync_jobs(catalog, &alive, &gone, now)
 }
 
 impl Catalog {
-    /// Queue one job per ordered pair whose conduit is missing or behind the
-    /// curves already stored. A pair whose member stamps and conduit row
-    /// already match is left alone.
-    pub fn enqueue_conduit_fill(&self) -> eyre::Result<u64> {
-        let desired = desired_members(&self.entities)?;
+    /// Visit at most `limit` curve keys after `after`, in key order.
+    ///
+    /// A key that does not decode is still a visited row. The cursor is that key.
+    pub fn page_curves(&self, after: Option<(u8, B256)>, limit: usize) -> eyre::Result<CurvePage> {
+        if limit == 0 {
+            return Ok(CurvePage {
+                rows: Vec::new(),
+                resume: after,
+                more: false,
+            });
+        }
+        let read = self.entities.begin_read()?;
+        let table = match read.open_table(CURVES) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => {
+                return Ok(CurvePage {
+                    rows: Vec::new(),
+                    resume: None,
+                    more: false,
+                });
+            }
+            Err(err) => return Err(err.into()),
+        };
+        let start_key = after.map(|(kind, id)| entity_key(kind, &id));
+        let mut rows = Vec::new();
+        let mut resume = None;
+        let mut more = false;
+        let mut visit = |key: &[u8], value: &[u8]| -> bool {
+            if key.len() != 33 {
+                return false;
+            }
+            if rows.len() == limit {
+                more = true;
+                return true;
+            }
+            let kind = key[0];
+            let id = B256::from_slice(&key[1..]);
+            resume = Some((kind, id));
+            let curve = decode_curve_record(kind, id, value).ok();
+            rows.push(CurveRow { kind, id, curve });
+            false
+        };
+        if let Some(start_key) = &start_key {
+            for item in
+                table.range::<&[u8]>((Bound::Excluded(start_key.as_slice()), Bound::Unbounded))?
+            {
+                let (key, value) = item?;
+                if visit(key.value(), value.value()) {
+                    break;
+                }
+            }
+        } else {
+            for item in table.iter()? {
+                let (key, value) = item?;
+                if visit(key.value(), value.value()) {
+                    break;
+                }
+            }
+        }
+        Ok(CurvePage { rows, resume, more })
+    }
+
+    /// Make the member index match `targets` and queue pairs whose conduit is behind.
+    pub fn enqueue_members(&self, targets: &[MemberTarget]) -> eyre::Result<u64> {
+        let mut desired = HashMap::new();
+        for target in targets {
+            let key = member_key(
+                &pair_key(target.token_in, target.token_out),
+                target.kind,
+                &target.id,
+            );
+            desired.insert(key, target.generation);
+        }
         let now = super::super::state::unix_now();
         let mut dirty = BTreeSet::new();
         {
@@ -182,50 +242,48 @@ impl Catalog {
         Ok(queued)
     }
 
-    /// Merge the members of one ordered pair and store the slope segments.
+    /// Members of one ordered pair, in key order.
+    pub fn conduit_members(
+        &self,
+        token_in: Address,
+        token_out: Address,
+    ) -> eyre::Result<Vec<ConduitMember>> {
+        let pair = pair_key(token_in, token_out);
+        let read = self.entities.begin_read()?;
+        let members = open_members(&read)?;
+        read_members(&members, &pair)
+    }
+
+    /// Store `body` when the member index still matches the snapshot it was built from.
     ///
     /// The bool asks for another pass. It is set when the member index moved
     /// while this merge was reading.
-    pub fn build_conduit(&self, token_in: Address, token_out: Address) -> eyre::Result<bool> {
-        let pair = pair_key(token_in, token_out);
-        let snapshot = {
-            let read = self.entities.begin_read()?;
-            let members = open_members(&read)?;
-            read_members(&members, &pair)?
-        };
-        let mut kept = Vec::new();
-        let mut parts = Vec::new();
-        let mut min_block = u64::MAX;
-        let mut max_gen = 0_u64;
-        for member in &snapshot {
-            let Some(built) = self.member_segments(token_in, token_out, member)? else {
-                continue;
-            };
-            min_block = min_block.min(built.block);
-            max_gen = max_gen.max(built.generation);
-            parts.push(built.segments);
-            kept.push(member.key);
-        }
-        let merged = routing::merge(&parts);
+    pub fn store_conduit(&self, body: &ConduitBody) -> eyre::Result<bool> {
+        let pair = pair_key(body.token_in, body.token_out);
         let mut write = self.entities.begin_write()?;
         write.set_durability(Durability::Immediate)?;
         let again = {
             let mut members = write.open_table(MEMBERS)?;
             let live = write_members(&members, &pair)?;
-            if !same_members(&snapshot, &live) {
+            if !same_members(&body.snapshot, &live) {
                 true
             } else {
-                for member in &snapshot {
-                    if !kept.contains(&member.key) {
+                for member in &body.snapshot {
+                    if !body.kept.contains(&member.key) {
                         members.remove(member.key.as_slice())?;
                     }
                 }
                 let mut conduits = write.open_table(CONDUITS)?;
-                if kept.is_empty() {
+                if body.kept.is_empty() {
                     conduits.remove(pair.as_slice())?;
                 } else {
-                    let body = encode_conduit(min_block, max_gen, kept.len() as u32, &merged)?;
-                    conduits.insert(pair.as_slice(), body.as_slice())?;
+                    let encoded = encode_conduit(
+                        body.block,
+                        body.generation,
+                        body.kept.len() as u32,
+                        &body.segments,
+                    )?;
+                    conduits.insert(pair.as_slice(), encoded.as_slice())?;
                 }
                 false
             }
@@ -233,90 +291,9 @@ impl Catalog {
         write.commit()?;
         Ok(again)
     }
-
-    fn member_segments(
-        &self,
-        token_in: Address,
-        token_out: Address,
-        member: &Member,
-    ) -> eyre::Result<Option<Built>> {
-        let state = self.read_state(member.kind, member.id)?;
-        let (Some(immutable), Some(mutable), Some(curve)) =
-            (state.immutable, state.mutable, state.curve)
-        else {
-            return Ok(None);
-        };
-        if curve.version != CURVE_VERSION
-            || curve.generation != mutable.generation
-            || curve.generation != member.generation
-        {
-            return Ok(None);
-        }
-        if !hooks::priced_pairs(&curve)?.contains(&(token_in, token_out)) {
-            return Ok(None);
-        }
-        let Some(segments) = hooks::segments(&hooks::DirectionRows {
-            immutable: &immutable,
-            mutable_body: &mutable.body,
-            ticks: &state.ticks,
-            kind: member.kind,
-            id: member.id,
-            curve: &curve,
-            token_in,
-            token_out,
-        })?
-        else {
-            return Ok(None);
-        };
-        Ok(Some(Built {
-            block: mutable.block,
-            generation: curve.generation,
-            segments,
-        }))
-    }
 }
 
-struct Built {
-    block: u64,
-    generation: u64,
-    segments: Vec<SlopeSegment>,
-}
-
-fn desired_members(db: &redb::Database) -> eyre::Result<HashMap<[u8; 73], u64>> {
-    let mut desired = HashMap::new();
-    let mut curves = 0_u64;
-    let read = db.begin_read()?;
-    let table = match read.open_table(CURVES) {
-        Ok(table) => table,
-        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(desired),
-        Err(err) => return Err(err.into()),
-    };
-    for item in table.iter()? {
-        let (key, value) = item?;
-        let key = key.value();
-        if key.len() != 33 {
-            continue;
-        }
-        let kind = key[0];
-        let id = B256::from_slice(&key[1..]);
-        curves += 1;
-        if curves.is_multiple_of(100_000) {
-            observability::info!(curves, "conduit fill scan");
-        }
-        let Ok(curve) = decode_curve_record(kind, id, value.value()) else {
-            observability::warn!(kind, %id, "conduit fill skipped a curve row");
-            continue;
-        };
-        for (token_in, token_out) in hooks::priced_pairs(&curve)? {
-            let member = member_key(&pair_key(token_in, token_out), kind, &id);
-            desired.insert(member, curve.generation);
-        }
-    }
-    observability::info!(curves, members = desired.len(), "conduit fill scanned");
-    Ok(desired)
-}
-
-fn same_members(left: &[Member], right: &[Member]) -> bool {
+fn same_members(left: &[ConduitMember], right: &[ConduitMember]) -> bool {
     if left.len() != right.len() {
         return false;
     }
@@ -344,7 +321,7 @@ macro_rules! collect_members {
         let mut found = Vec::new();
         let start: &[u8] = $pair.as_slice();
         let end = prefix_end($pair);
-        let push = |found: &mut Vec<Member>, key: &[u8], value: &[u8]| {
+        let push = |found: &mut Vec<ConduitMember>, key: &[u8], value: &[u8]| {
             let Some((pair, kind, id)) = split_member(key) else {
                 return;
             };
@@ -353,7 +330,7 @@ macro_rules! collect_members {
             }
             let mut word = [0_u8; 8];
             word.copy_from_slice(value);
-            found.push(Member {
+            found.push(ConduitMember {
                 key: member_key(&pair, kind, &id),
                 kind,
                 id,
@@ -378,13 +355,13 @@ macro_rules! collect_members {
 fn read_members(
     table: &redb::ReadOnlyTable<&'static [u8], &'static [u8]>,
     pair: &[u8; 40],
-) -> eyre::Result<Vec<Member>> {
+) -> eyre::Result<Vec<ConduitMember>> {
     Ok(collect_members!(table, pair))
 }
 
 fn write_members(
     table: &redb::Table<'_, &[u8], &[u8]>,
     pair: &[u8; 40],
-) -> eyre::Result<Vec<Member>> {
+) -> eyre::Result<Vec<ConduitMember>> {
     Ok(collect_members!(table, pair))
 }

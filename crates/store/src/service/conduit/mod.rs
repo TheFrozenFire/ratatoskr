@@ -13,11 +13,11 @@ mod member;
 mod read;
 
 pub(crate) use job::account_jobs;
-pub(crate) use member::retarget;
 
 use alloy_primitives::{Address, B256};
 use redb::{ReadableDatabase, ReadableTableMetadata, TableDefinition};
 use routing::SlopeSegment;
+use store_model::CurveRecord;
 
 /// The stored slope merge for one ordered pair.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,11 +28,51 @@ pub struct StoredConduit {
     pub segments: Vec<SlopeSegment>,
 }
 
-struct Member {
-    key: [u8; 73],
-    kind: u8,
-    id: B256,
-    generation: u64,
+/// One priced direction the member index should hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberTarget {
+    pub token_in: Address,
+    pub token_out: Address,
+    pub kind: u8,
+    pub id: B256,
+    pub generation: u64,
+}
+
+/// One row of the member index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConduitMember {
+    pub key: [u8; 73],
+    pub kind: u8,
+    pub id: B256,
+    pub generation: u64,
+}
+
+/// One curve key visited while paging. `curve` is absent when the row does not decode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurveRow {
+    pub kind: u8,
+    pub id: B256,
+    pub curve: Option<CurveRecord>,
+}
+
+/// A page of the curves table. `resume` is the last key visited.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurvePage {
+    pub rows: Vec<CurveRow>,
+    pub resume: Option<(u8, B256)>,
+    pub more: bool,
+}
+
+/// Slope merge to store when the member index still matches `snapshot`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConduitBody {
+    pub token_in: Address,
+    pub token_out: Address,
+    pub snapshot: Vec<ConduitMember>,
+    pub kept: Vec<[u8; 73]>,
+    pub block: u64,
+    pub generation: u64,
+    pub segments: Vec<SlopeSegment>,
 }
 
 const CONDUITS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("conduits");
