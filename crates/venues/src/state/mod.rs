@@ -39,6 +39,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 mod codec;
 mod drive;
 mod follow;
+mod plan;
 mod refresh;
 mod watch;
 
@@ -202,6 +203,10 @@ mod tests {
         }
     }
 
+    fn reconcile(catalog: &Catalog, now: u64) -> eyre::Result<u64> {
+        super::plan::reconcile_catalog(catalog, now)
+    }
+
     fn open() -> (TempDir, Catalog) {
         let dir = TempDir::new();
         crate::install_catalog_hooks();
@@ -309,7 +314,7 @@ mod tests {
         catalog
             .commit_chunk("list", 1, &[row(1)], Put::Merge)
             .unwrap();
-        assert_eq!(catalog.reconcile(1).unwrap(), 1);
+        assert_eq!(reconcile(&catalog, 1).unwrap(), 1);
         let claimed = catalog.claim_work(STAGE_IMMUTABLE, 16, 1, 10).unwrap();
         assert_eq!(claimed.len(), 1);
         assert!(catalog
@@ -323,7 +328,7 @@ mod tests {
             .claim_work(STAGE_IMMUTABLE, 16, 1, 10)
             .unwrap()
             .is_empty());
-        assert_eq!(catalog.reconcile(2).unwrap(), 1);
+        assert_eq!(reconcile(&catalog, 2).unwrap(), 1);
         assert_eq!(
             catalog
                 .claim_work(STAGE_IMMUTABLE, 16, 2, 10)
@@ -545,13 +550,13 @@ mod tests {
             )
             .unwrap();
         assert_eq!(quote, direct);
-        assert_eq!(catalog.reconcile(1).unwrap(), 0);
+        assert_eq!(reconcile(&catalog, 1).unwrap(), 0);
         mutable.block = 9;
         mutable.class = CLASS_HEAD;
         catalog.put_mutable(&mutable).unwrap();
         let kept = catalog.read_state(sample.kind, sample.id).unwrap();
         assert!(kept.curve.is_none());
-        assert!(catalog.reconcile(1).unwrap() >= 1);
+        assert!(reconcile(&catalog, 1).unwrap() >= 1);
         assert_eq!(catalog.claim_work(STAGE_CURVE, 4, 1, 10).unwrap().len(), 1);
     }
 
@@ -582,7 +587,7 @@ mod tests {
             body: b"m".to_vec(),
         };
         let stored = catalog.put_mutable(&write).unwrap();
-        assert_eq!(catalog.reconcile(1).unwrap(), 1);
+        assert_eq!(reconcile(&catalog, 1).unwrap(), 1);
         assert_eq!(catalog.claim_work(STAGE_TICKS, 4, 1, 10).unwrap().len(), 1);
         catalog
             .put_tick_pages(&[TickPage {
@@ -600,7 +605,7 @@ mod tests {
         catalog
             .finish_work(&[(STAGE_TICKS, UNI_V3, sample.id)], &[])
             .unwrap();
-        assert_eq!(catalog.reconcile(2).unwrap(), 1);
+        assert_eq!(reconcile(&catalog, 2).unwrap(), 1);
         assert!(catalog
             .claim_work(STAGE_TICKS, 4, 2, 10)
             .unwrap()
@@ -783,7 +788,7 @@ mod tests {
         catalog
             .enqueue_work(std::slice::from_ref(&seeded), 1)
             .unwrap();
-        catalog.reconcile(1).unwrap();
+        reconcile(&catalog, 1).unwrap();
         assert!(catalog
             .claim_work(STAGE_TICKS, 4, 1, 10)
             .unwrap()
@@ -800,7 +805,7 @@ mod tests {
         let (_dir, catalog) = open();
         let (venue, detail) = with_reserves(2, 1);
         store_detail(&catalog, &venue, &detail);
-        catalog.reconcile(1).unwrap();
+        reconcile(&catalog, 1).unwrap();
         let curves = catalog.claim_work(STAGE_CURVE, 4, 1, 10).unwrap();
         assert_eq!(curves.len(), 1);
         assert!(curves[0].priority > 0);
@@ -829,7 +834,7 @@ mod tests {
         let (big, big_detail) = with_reserves(9, 2_000_000);
         store_detail(&catalog, &small, &small_detail);
         store_detail(&catalog, &big, &big_detail);
-        catalog.reconcile(1).unwrap();
+        reconcile(&catalog, 1).unwrap();
         let first = catalog.claim_work(STAGE_CURVE, 1, 1, 10).unwrap();
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].id, big.id);
@@ -927,7 +932,7 @@ mod tests {
             flags: 0,
         });
         store_detail(&catalog, &venue, &detail);
-        catalog.reconcile(1).unwrap();
+        reconcile(&catalog, 1).unwrap();
         assert_eq!(catalog.claim_work(STAGE_TICKS, 4, 1, 10).unwrap().len(), 1);
     }
 

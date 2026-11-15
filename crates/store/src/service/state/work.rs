@@ -4,38 +4,30 @@ use alloy_primitives::{B256, U256};
 use redb::{Durability, ReadableDatabase, ReadableTable};
 use std::time::{SystemTime, UNIX_EPOCH};
 use store_model::{
-    decode_job, encode_job, priority_of, tick_page_generation, CurveRecord, MutableView, PoolState,
-    VenueRow, WorkFail, WorkJob, AERO, CLASS_NONE, CURVE_VERSION, METRIC, PANCAKE_V3, STAGE_CURVE,
-    STAGE_IMMUTABLE, STAGE_MUTABLE, STAGE_QUOTE, STAGE_TICKS, SUSHI_V3, TICK_PAGE, UNI_V3, UNI_V4,
-    V3_FORK,
+    decode_job, encode_job, priority_of, tick_page_generation, WorkFail, WorkJob,
+    CLASS_NONE, STAGE_IMMUTABLE, STAGE_MUTABLE, STAGE_QUOTE, TICK_PAGE,
 };
 
 use super::super::catalog::Catalog;
 use super::*;
 
 impl Catalog {
-    /// Insert jobs for identities whose stored state is behind.
-    ///
-    /// An existing lease is left alone. This is the resume path after
-    /// `work.redb` is deleted, not the steady-state loop.
-    pub fn reconcile(&self, now: u64) -> eyre::Result<u64> {
-        let mut inserted = 0_u64;
-        for kind in 1..=METRIC {
-            let mut after = None;
-            loop {
-                let page = self.page_venues(kind, after, 256)?;
-                if page.is_empty() {
-                    break;
+    /// Write `jobs` and clear every other stage from immutable through quote
+    /// for each identity in `rows`. A leased job is left alone.
+    pub fn reconcile(&self, rows: &[(u8, B256)], jobs: &[WorkJob], now: u64) -> eyre::Result<u64> {
+        let mut drop = Vec::new();
+        for (kind, id) in rows {
+            for stage in STAGE_IMMUTABLE..=STAGE_QUOTE {
+                if jobs
+                    .iter()
+                    .any(|job| job.stage == stage && job.kind == *kind && job.id == *id)
+                {
+                    continue;
                 }
-                after = Some(page.last().expect("page").id);
-                inserted += self.reconcile_rows(&page, now)?;
-                if page.len() < 256 {
-                    break;
-                }
+                drop.push((stage, *kind, *id));
             }
         }
-        self.index_ranks()?;
-        Ok(inserted)
+        self.sync_jobs(&drop, jobs, now)
     }
 
     pub fn claim_work(
@@ -147,25 +139,6 @@ impl Catalog {
         Ok(())
     }
 
-    fn reconcile_rows(&self, rows: &[VenueRow], now: u64) -> eyre::Result<u64> {
-        let mut jobs = Vec::new();
-        let mut drop = Vec::new();
-        for row in rows {
-            let state = self.read_state(row.kind, row.id)?;
-            let desired = self.desired_job(row, &state)?;
-            for stage in STAGE_IMMUTABLE..=STAGE_QUOTE {
-                if desired.as_ref().is_some_and(|job| job.stage == stage) {
-                    continue;
-                }
-                drop.push((stage, row.kind, row.id));
-            }
-            if let Some(job) = desired {
-                jobs.push(job);
-            }
-        }
-        self.sync_jobs(&drop, &jobs, now)
-    }
-
     /// One mutable job per pool the watch just marked, at the dirty priority.
     ///
     /// The entity commit has already landed. A leased job is left alone.
@@ -190,83 +163,33 @@ impl Catalog {
         self.enqueue_work(&jobs, unix_now())
     }
 
-    fn desired_job(&self, row: &VenueRow, state: &PoolState) -> eyre::Result<Option<WorkJob>> {
-        if state.immutable.is_none() {
-            return Ok(Some(blank_job(STAGE_IMMUTABLE, row.kind, row.id)));
-        }
-        let Some(mutable) = &state.mutable else {
-            return Ok(Some(blank_job(STAGE_MUTABLE, row.kind, row.id)));
-        };
-        if state.dirty.is_some() || mutable.truncated {
-            let top = super::super::hooks::capacity(row.kind, row.id, state)?
-                .map(|cap| cap.top)
-                .unwrap_or(U256::ZERO);
-            let mut job = blank_job(STAGE_MUTABLE, row.kind, row.id);
-            job.generation = mutable.generation;
-            job.class = state
-                .dirty
-                .as_ref()
-                .map(|dirty| dirty.class)
-                .unwrap_or(CLASS_NONE);
-            job.priority = priority_of(state.dirty.is_some(), top);
-            return Ok(Some(job));
-        }
-        let top = match super::super::hooks::capacity(row.kind, row.id, state)? {
-            Some(cap) => {
-                if needs_ticks(row.kind, mutable) {
-                    let cursor = first_missing_page(&self.entities, row.kind, row.id, mutable)?;
-                    let pages = mutable.tick_count.div_ceil(TICK_PAGE);
-                    if cursor < pages {
-                        let mut job = blank_job(STAGE_TICKS, row.kind, row.id);
-                        job.generation = mutable.generation;
-                        job.tick_cursor = i32::try_from(cursor).unwrap_or(i32::MAX);
-                        job.priority = priority_of(false, cap.top);
-                        return Ok(Some(job));
-                    }
-                }
-                if !cap.any_positive {
-                    return Ok(None);
-                }
-                if !cap.fills_sample {
-                    if curve_is_current(state.curve.as_ref(), mutable.generation) {
-                        return Ok(None);
-                    }
-                    let mut job = curve_job(row.kind, row.id, mutable.generation);
-                    job.priority = priority_of(false, cap.top);
-                    return Ok(Some(job));
-                }
-                cap.top
-            }
-            None => return self.structural_job(row, mutable, state, 0),
-        };
-        self.structural_job(row, mutable, state, priority_of(false, top))
-    }
-
-    /// Tick, then a local curve. Chain samples are not requested.
-    fn structural_job(
+    pub fn first_missing_tick_page(
         &self,
-        row: &VenueRow,
-        mutable: &MutableView,
-        state: &PoolState,
-        priority: u64,
-    ) -> eyre::Result<Option<WorkJob>> {
-        if needs_ticks(row.kind, mutable) {
-            let cursor = first_missing_page(&self.entities, row.kind, row.id, mutable)?;
-            let pages = mutable.tick_count.div_ceil(TICK_PAGE);
-            if cursor < pages {
-                let mut job = blank_job(STAGE_TICKS, row.kind, row.id);
-                job.generation = mutable.generation;
-                job.tick_cursor = i32::try_from(cursor).unwrap_or(i32::MAX);
-                job.priority = priority;
-                return Ok(Some(job));
+        kind: u8,
+        id: B256,
+        generation: u64,
+        tick_count: u32,
+    ) -> eyre::Result<u32> {
+        let pages = tick_count.div_ceil(TICK_PAGE);
+        let read = self.entities.begin_read()?;
+        let table = match read.open_table(TICK_PAGES) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(0),
+            Err(err) => return Err(err.into()),
+        };
+        for page in 0..pages {
+            let key = tick_key(kind, id, page);
+            match table.get(key.as_slice())? {
+                None => return Ok(page),
+                Some(value) => {
+                    let stored = tick_page_generation(value.value())?;
+                    if stored != generation {
+                        return Ok(page);
+                    }
+                }
             }
         }
-        if !curve_is_current(state.curve.as_ref(), mutable.generation) {
-            let mut job = curve_job(row.kind, row.id, mutable.generation);
-            job.priority = priority;
-            return Ok(Some(job));
-        }
-        Ok(None)
+        Ok(pages)
     }
 
     fn sync_jobs(&self, drop: &[(u8, u8, B256)], jobs: &[WorkJob], now: u64) -> eyre::Result<u64> {
@@ -307,7 +230,7 @@ impl Catalog {
 
     /// Give every stored job a rank key. Startup finds leased rows the venue
     /// walk did not rewrite.
-    fn index_ranks(&self) -> eyre::Result<()> {
+    pub fn index_ranks(&self) -> eyre::Result<()> {
         let read = self.work.begin_read()?;
         let jobs = match read.open_table(JOBS) {
             Ok(table) => table,
@@ -351,45 +274,6 @@ impl Catalog {
     }
 }
 
-fn concentrated_kind(kind: u8) -> bool {
-    matches!(
-        kind,
-        UNI_V3 | PANCAKE_V3 | SUSHI_V3 | V3_FORK | AERO | UNI_V4
-    )
-}
-
-fn needs_ticks(kind: u8, mutable: &MutableView) -> bool {
-    concentrated_kind(kind) && mutable.tick_count > 0 && !mutable.truncated
-}
-
-fn first_missing_page(
-    db: &redb::Database,
-    kind: u8,
-    id: B256,
-    mutable: &MutableView,
-) -> eyre::Result<u32> {
-    let pages = mutable.tick_count.div_ceil(TICK_PAGE);
-    let read = db.begin_read()?;
-    let table = match read.open_table(TICK_PAGES) {
-        Ok(table) => table,
-        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(0),
-        Err(err) => return Err(err.into()),
-    };
-    for page in 0..pages {
-        let key = tick_key(kind, id, page);
-        match table.get(key.as_slice())? {
-            None => return Ok(page),
-            Some(value) => {
-                let generation = tick_page_generation(value.value())?;
-                if generation != mutable.generation {
-                    return Ok(page);
-                }
-            }
-        }
-    }
-    Ok(pages)
-}
-
 fn blank_job(stage: u8, kind: u8, id: B256) -> WorkJob {
     WorkJob {
         stage,
@@ -404,12 +288,6 @@ fn blank_job(stage: u8, kind: u8, id: B256) -> WorkJob {
         priority: 0,
         error: String::new(),
     }
-}
-
-pub(crate) fn curve_job(kind: u8, id: B256, generation: u64) -> WorkJob {
-    let mut job = blank_job(STAGE_CURVE, kind, id);
-    job.generation = generation;
-    job
 }
 
 pub(crate) fn unix_now() -> u64 {
@@ -514,13 +392,6 @@ pub(super) fn clear_job(
         remove_rank(ranks, &job)?;
     }
     Ok(())
-}
-
-fn curve_is_current(curve: Option<&CurveRecord>, generation: u64) -> bool {
-    match curve {
-        Some(curve) => curve.generation == generation && curve.version == CURVE_VERSION,
-        None => false,
-    }
 }
 
 fn clip_error(error: &str) -> String {

@@ -11,7 +11,24 @@ use crate::{blocking, LocalStore};
 #[allow(async_fn_in_trait)]
 pub trait VenueStore: Send + Sync {
     async fn read_venue(&self, kind: u8, id: B256) -> eyre::Result<Option<VenueRow>>;
-    async fn reconcile(&self, now: u64) -> eyre::Result<u64>;
+    async fn page_venues(
+        &self,
+        kind: u8,
+        after: Option<B256>,
+        limit: usize,
+    ) -> eyre::Result<Vec<VenueRow>>;
+    async fn first_missing_tick_page(
+        &self,
+        kind: u8,
+        id: B256,
+        generation: u64,
+        tick_count: u32,
+    ) -> eyre::Result<u32>;
+    /// Write `jobs` and clear every other stage from immutable through quote
+    /// for each identity in `rows`.
+    async fn reconcile(&self, rows: &[(u8, B256)], jobs: &[WorkJob], now: u64)
+        -> eyre::Result<u64>;
+    async fn index_ranks(&self) -> eyre::Result<()>;
     async fn claim_work(
         &self,
         stage: u8,
@@ -36,9 +53,42 @@ impl VenueStore for LocalStore {
         blocking(move || catalog.read_venue(kind, id)).await
     }
 
-    async fn reconcile(&self, now: u64) -> eyre::Result<u64> {
+    async fn page_venues(
+        &self,
+        kind: u8,
+        after: Option<B256>,
+        limit: usize,
+    ) -> eyre::Result<Vec<VenueRow>> {
         let catalog = self.catalog_db()?;
-        blocking(move || catalog.reconcile(now)).await
+        blocking(move || catalog.page_venues(kind, after, limit)).await
+    }
+
+    async fn first_missing_tick_page(
+        &self,
+        kind: u8,
+        id: B256,
+        generation: u64,
+        tick_count: u32,
+    ) -> eyre::Result<u32> {
+        let catalog = self.catalog_db()?;
+        blocking(move || catalog.first_missing_tick_page(kind, id, generation, tick_count)).await
+    }
+
+    async fn reconcile(
+        &self,
+        rows: &[(u8, B256)],
+        jobs: &[WorkJob],
+        now: u64,
+    ) -> eyre::Result<u64> {
+        let catalog = self.catalog_db()?;
+        let rows = rows.to_vec();
+        let jobs = jobs.to_vec();
+        blocking(move || catalog.reconcile(&rows, &jobs, now)).await
+    }
+
+    async fn index_ranks(&self) -> eyre::Result<()> {
+        let catalog = self.catalog_db()?;
+        blocking(move || catalog.index_ranks()).await
     }
 
     async fn claim_work(

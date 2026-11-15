@@ -23,7 +23,7 @@ where
     if *stop.borrow() {
         return Ok(report);
     }
-    let inserted = store.reconcile(unix_now()).await?;
+    let inserted = super::plan::reconcile(store, unix_now()).await?;
     report.notes.push(format!("reconcile {inserted}"));
     observability::info!(inserted, "state reconcile");
     let queued = store.enqueue_conduit_fill().await?;
