@@ -215,16 +215,16 @@ fn directory_rows_keep_the_proxy_as_the_identity() {
 fn a_later_directory_rewrites_category_and_keeps_the_proxy_configuration() {
     let (_dir, feeds) = open();
     feeds.apply_directory(&rows(&directory())).unwrap();
-    feeds
-        .apply_read(
-            ETH,
-            configured(
-                head(8, 7, ETH_AGG),
-                Some(I256::MINUS_ONE),
-                Some(I256::try_from(1).unwrap()),
-            ),
-        )
-        .unwrap();
+    oracles::record_read(
+        &feeds,
+        ETH,
+        configured(
+            head(8, 7, ETH_AGG),
+            Some(I256::MINUS_ONE),
+            Some(I256::try_from(1).unwrap()),
+        ),
+    )
+    .unwrap();
     let rewritten =
         directory().replacen(r#""feedCategory": "low""#, r#""feedCategory": "medium""#, 1);
     let listing = feeds.apply_directory(&rows(&rewritten)).unwrap();
@@ -324,9 +324,7 @@ fn a_proxy_read_stores_the_chain_phase_and_one_history_job() {
     let max_answer = decode_bound(&decoded[6]);
     assert_eq!(min_answer, Some(I256::try_from(1).unwrap()));
     assert_eq!(max_answer, None);
-    feeds
-        .apply_read(ETH, configured(head, min_answer, max_answer))
-        .unwrap();
+    oracles::record_read(&feeds, ETH, configured(head, min_answer, max_answer)).unwrap();
     let phases = feeds.phases(ETH).unwrap();
     assert_eq!(phases.len(), 1);
     assert_eq!(phases[0].phase_id, 7);
@@ -345,12 +343,8 @@ fn the_same_phase_does_not_add_a_job() {
     let (_dir, feeds) = open();
     feeds.apply_directory(&rows(&directory())).unwrap();
     let bounds = Some(I256::try_from(5).unwrap());
-    feeds
-        .apply_read(ETH, configured(head(8, 7, ETH_AGG), bounds, bounds))
-        .unwrap();
-    feeds
-        .apply_read(ETH, configured(head(8, 7, ETH_AGG), None, None))
-        .unwrap();
+    oracles::record_read(&feeds, ETH, configured(head(8, 7, ETH_AGG), bounds, bounds)).unwrap();
+    oracles::record_read(&feeds, ETH, configured(head(8, 7, ETH_AGG), None, None)).unwrap();
     assert_eq!(feeds.history_jobs().unwrap().len(), 1);
     let phase = &feeds.phases(ETH).unwrap()[0];
     assert_eq!(phase.min_answer, bounds);
@@ -362,13 +356,9 @@ fn the_same_phase_does_not_add_a_job() {
 fn a_greater_phase_appends_one_phase_and_one_job() {
     let (_dir, feeds) = open();
     feeds.apply_directory(&rows(&directory())).unwrap();
-    feeds
-        .apply_read(ETH, configured(head(8, 7, ETH_AGG), None, None))
-        .unwrap();
+    oracles::record_read(&feeds, ETH, configured(head(8, 7, ETH_AGG), None, None)).unwrap();
     let next = address!("4444444444444444444444444444444444444444");
-    feeds
-        .apply_read(ETH, configured(head(8, 9, next), None, None))
-        .unwrap();
+    oracles::record_read(&feeds, ETH, configured(head(8, 9, next), None, None)).unwrap();
     let phases = feeds.phases(ETH).unwrap();
     assert_eq!(phases.len(), 2);
     assert_eq!(phases[0].phase_id, 7);
@@ -381,12 +371,8 @@ fn a_greater_phase_appends_one_phase_and_one_job() {
 fn a_smaller_phase_is_a_mismatch() {
     let (_dir, feeds) = open();
     feeds.apply_directory(&rows(&directory())).unwrap();
-    feeds
-        .apply_read(ETH, configured(head(8, 7, ETH_AGG), None, None))
-        .unwrap();
-    feeds
-        .apply_read(ETH, configured(head(8, 4, ETH_AGG), None, None))
-        .unwrap();
+    oracles::record_read(&feeds, ETH, configured(head(8, 7, ETH_AGG), None, None)).unwrap();
+    oracles::record_read(&feeds, ETH, configured(head(8, 4, ETH_AGG), None, None)).unwrap();
     assert_eq!(feeds.phases(ETH).unwrap().len(), 1);
     assert_eq!(feeds.history_jobs().unwrap().len(), 1);
     assert_eq!(
@@ -402,13 +388,9 @@ fn a_smaller_phase_is_a_mismatch() {
 fn a_changed_aggregator_on_the_same_phase_is_a_mismatch() {
     let (_dir, feeds) = open();
     feeds.apply_directory(&rows(&directory())).unwrap();
-    feeds
-        .apply_read(ETH, configured(head(8, 7, ETH_AGG), None, None))
-        .unwrap();
+    oracles::record_read(&feeds, ETH, configured(head(8, 7, ETH_AGG), None, None)).unwrap();
     let other = address!("5555555555555555555555555555555555555555");
-    feeds
-        .apply_read(ETH, configured(head(8, 7, other), None, None))
-        .unwrap();
+    oracles::record_read(&feeds, ETH, configured(head(8, 7, other), None, None)).unwrap();
     let phases = feeds.phases(ETH).unwrap();
     assert_eq!(phases.len(), 1);
     assert_eq!(phases[0].aggregator, ETH_AGG);
@@ -428,15 +410,11 @@ fn a_changed_aggregator_on_the_same_phase_is_a_mismatch() {
 fn disagreeing_decimals_stay_at_the_first_read() {
     let (_dir, feeds) = open();
     feeds.apply_directory(&rows(&directory())).unwrap();
-    feeds
-        .apply_read(ETH, configured(head(8, 7, ETH_AGG), None, None))
-        .unwrap();
+    oracles::record_read(&feeds, ETH, configured(head(8, 7, ETH_AGG), None, None)).unwrap();
     let mut later = head(18, 8, ETH_AGG);
     later.description = "ETH / USD later".into();
     later.version = U256::from(7u8);
-    feeds
-        .apply_read(ETH, configured(later, None, None))
-        .unwrap();
+    oracles::record_read(&feeds, ETH, configured(later, None, None)).unwrap();
     assert_eq!(feeds.configuration(ETH).unwrap().unwrap().decimals, 8);
     assert_eq!(
         feeds.configuration(ETH).unwrap().unwrap().description,
@@ -478,14 +456,12 @@ fn a_reverted_proxy_stores_a_failure_and_no_job() {
     let decoded = decode_aggregate3(&body).unwrap();
     let err = decode_proxy_head(&decoded).unwrap_err();
     assert!(err.contains("decimals"), "{err}");
-    feeds.apply_read(ETH, Read::Failed(err.clone())).unwrap();
+    oracles::record_read(&feeds, ETH, Read::Failed(err.clone())).unwrap();
     assert_eq!(feeds.failure(ETH).unwrap().as_deref(), Some(err.as_str()));
     assert!(feeds.phases(ETH).unwrap().is_empty());
     assert!(feeds.history_jobs().unwrap().is_empty());
     assert!(feeds.configuration(ETH).unwrap().is_none());
-    feeds
-        .apply_read(ETH, configured(head(8, 7, ETH_AGG), None, None))
-        .unwrap();
+    oracles::record_read(&feeds, ETH, configured(head(8, 7, ETH_AGG), None, None)).unwrap();
     assert!(feeds.failure(ETH).unwrap().is_none());
     assert_eq!(feeds.phases(ETH).unwrap().len(), 1);
     assert_eq!(feeds.history_jobs().unwrap().len(), 1);
@@ -495,12 +471,8 @@ fn a_reverted_proxy_stores_a_failure_and_no_job() {
 fn a_later_revert_keeps_phases_and_jobs() {
     let (_dir, feeds) = open();
     feeds.apply_directory(&rows(&directory())).unwrap();
-    feeds
-        .apply_read(ETH, configured(head(8, 7, ETH_AGG), None, None))
-        .unwrap();
-    feeds
-        .apply_read(ETH, Read::Failed("decimals reverted".into()))
-        .unwrap();
+    oracles::record_read(&feeds, ETH, configured(head(8, 7, ETH_AGG), None, None)).unwrap();
+    oracles::record_read(&feeds, ETH, Read::Failed("decimals reverted".into())).unwrap();
     assert_eq!(
         feeds.failure(ETH).unwrap().as_deref(),
         Some("decimals reverted")
@@ -514,9 +486,7 @@ fn a_later_revert_keeps_phases_and_jobs() {
 fn clearing_history_jobs_leaves_the_feed_and_the_phase() {
     let (_dir, feeds) = open();
     feeds.apply_directory(&rows(&directory())).unwrap();
-    feeds
-        .apply_read(ETH, configured(head(8, 7, ETH_AGG), None, None))
-        .unwrap();
+    oracles::record_read(&feeds, ETH, configured(head(8, 7, ETH_AGG), None, None)).unwrap();
     feeds.clear_history_jobs().unwrap();
     assert!(feeds.history_jobs().unwrap().is_empty());
     assert_eq!(feeds.feed(ETH).unwrap().unwrap().row.proxy, ETH);
@@ -528,9 +498,7 @@ fn clearing_history_jobs_leaves_the_feed_and_the_phase() {
 fn phase_zero_is_stored_when_the_aggregator_is_present() {
     let (_dir, feeds) = open();
     feeds.apply_directory(&rows(&directory())).unwrap();
-    feeds
-        .apply_read(ETH, configured(head(8, 0, ETH_AGG), None, None))
-        .unwrap();
+    oracles::record_read(&feeds, ETH, configured(head(8, 0, ETH_AGG), None, None)).unwrap();
     assert_eq!(feeds.phases(ETH).unwrap()[0].phase_id, 0);
     assert_eq!(feeds.history_jobs().unwrap()[0].phase_id, 0);
 }
@@ -553,11 +521,11 @@ fn an_empty_aggregator_is_a_proxy_failure() {
 fn an_unknown_proxy_read_is_an_error() {
     let (_dir, feeds) = open();
     feeds.apply_directory(&rows(&directory())).unwrap();
-    let err = feeds
-        .apply_read(
-            address!("6666666666666666666666666666666666666666"),
-            configured(head(8, 1, ETH_AGG), None, None),
-        )
-        .unwrap_err();
+    let err = oracles::record_read(
+        &feeds,
+        address!("6666666666666666666666666666666666666666"),
+        configured(head(8, 1, ETH_AGG), None, None),
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("not listed"), "{err}");
 }

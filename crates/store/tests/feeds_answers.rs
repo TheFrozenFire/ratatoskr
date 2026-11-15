@@ -102,8 +102,8 @@ fn observed(aggregator: Address, round_id: u64, value: i64) -> ObservedAnswer {
 fn an_answer_updated_log_stores_the_aggregator_round() {
     let (_dir, feeds) = open();
     feeds.apply_directory(&rows(&directory())).unwrap();
-    feeds.apply_read(ETH, read(ETH_AGG, 7)).unwrap();
-    feeds.apply_read(ETH, read(NEXT_AGG, 9)).unwrap();
+    oracles::record_read(&feeds, ETH, read(ETH_AGG, 7)).unwrap();
+    oracles::record_read(&feeds, ETH, read(NEXT_AGG, 9)).unwrap();
     let log = ChainLog {
         address: NEXT_AGG,
         block: 100,
@@ -114,7 +114,10 @@ fn an_answer_updated_log_stores_the_aggregator_round() {
     let decoded = decode_answer_updated(&log).unwrap();
     assert_eq!(decoded.round_id, 42);
     assert_eq!(decoded.value, I256::try_from(1_500).unwrap());
-    assert_eq!(feeds.commit_follow(101, &[decoded]).unwrap(), 1);
+    assert_eq!(
+        oracles::commit_observed(&feeds, 101, &[decoded]).unwrap(),
+        1
+    );
     let answers = feeds.answers(ETH).unwrap();
     assert_eq!(answers.len(), 1);
     assert_eq!(answers[0].phase_id, 9);
@@ -124,9 +127,7 @@ fn an_answer_updated_log_stores_the_aggregator_round() {
     assert_eq!(feeds.follow_block().unwrap(), Some(101));
     assert_eq!(feeds.gauges().unwrap().answers, 1);
     assert_eq!(
-        feeds
-            .commit_follow(101, &[observed(NEXT_AGG, 42, 1_500)])
-            .unwrap(),
+        oracles::commit_observed(&feeds, 101, &[observed(NEXT_AGG, 42, 1_500)]).unwrap(),
         0
     );
     assert_eq!(feeds.answers(ETH).unwrap().len(), 1);
@@ -136,7 +137,7 @@ fn an_answer_updated_log_stores_the_aggregator_round() {
 fn a_zero_log_and_an_unknown_aggregator_store_nothing() {
     let (_dir, feeds) = open();
     feeds.apply_directory(&rows(&directory())).unwrap();
-    feeds.apply_read(ETH, read(ETH_AGG, 7)).unwrap();
+    oracles::record_read(&feeds, ETH, read(ETH_AGG, 7)).unwrap();
     let zero = ChainLog {
         address: ETH_AGG,
         block: 3,
@@ -145,16 +146,16 @@ fn a_zero_log_and_an_unknown_aggregator_store_nothing() {
         data: word(10).to_vec(),
     };
     assert!(decode_answer_updated(&zero).is_none());
-    let written = feeds
-        .commit_follow(
-            4,
-            &[observed(
-                address!("5555555555555555555555555555555555555555"),
-                1,
-                9,
-            )],
-        )
-        .unwrap();
+    let written = oracles::commit_observed(
+        &feeds,
+        4,
+        &[observed(
+            address!("5555555555555555555555555555555555555555"),
+            1,
+            9,
+        )],
+    )
+    .unwrap();
     assert_eq!(written, 0);
     assert!(feeds.answers(ETH).unwrap().is_empty());
 }
@@ -163,11 +164,9 @@ fn a_zero_log_and_an_unknown_aggregator_store_nothing() {
 fn an_older_phase_keeps_the_log_from_its_own_aggregator() {
     let (_dir, feeds) = open();
     feeds.apply_directory(&rows(&directory())).unwrap();
-    feeds.apply_read(ETH, read(ETH_AGG, 7)).unwrap();
-    feeds.apply_read(ETH, read(NEXT_AGG, 9)).unwrap();
-    feeds
-        .commit_follow(50, &[observed(ETH_AGG, 8, 11)])
-        .unwrap();
+    oracles::record_read(&feeds, ETH, read(ETH_AGG, 7)).unwrap();
+    oracles::record_read(&feeds, ETH, read(NEXT_AGG, 9)).unwrap();
+    oracles::commit_observed(&feeds, 50, &[observed(ETH_AGG, 8, 11)]).unwrap();
     let answers = feeds.answers(ETH).unwrap();
     assert_eq!(answers.len(), 1);
     assert_eq!(answers[0].phase_id, 7);
@@ -186,8 +185,8 @@ fn the_heartbeat_lookback_is_remembered_once() {
 fn the_follow_cursor_does_not_move_backward() {
     let (_dir, feeds) = open();
     feeds.apply_directory(&rows(&directory())).unwrap();
-    feeds.commit_follow(20, &[]).unwrap();
-    let err = feeds.commit_follow(19, &[]).unwrap_err();
+    oracles::commit_observed(&feeds, 20, &[]).unwrap();
+    let err = oracles::commit_observed(&feeds, 19, &[]).unwrap_err();
     assert!(err.to_string().contains("follow cursor"), "{err}");
     assert_eq!(feeds.follow_block().unwrap(), Some(20));
 }

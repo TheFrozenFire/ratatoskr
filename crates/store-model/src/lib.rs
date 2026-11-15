@@ -15,8 +15,8 @@ pub mod tick;
 pub mod venue;
 
 pub use feed::{
-    Answer, Configuration, DirectoryRow, Feed, Gauges, HistoryJob, Listing, Mismatch,
-    ObservedAnswer, Phase, ProxyHead, Read,
+    Answer, AnswerPut, Configuration, DirectoryRow, Feed, Gauges, HistoryJob, Listing, Mismatch,
+    ObservedAnswer, Phase, PhasePlan, ProxyHead, Read,
 };
 pub use spot::Spot;
 

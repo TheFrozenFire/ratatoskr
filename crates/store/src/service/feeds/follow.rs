@@ -1,11 +1,9 @@
 //! Answer follow cursor.
 
-use alloy_primitives::{Address, I256};
-use redb::{Durability, ReadableDatabase, ReadableTable};
-use store_model::ObservedAnswer;
+use redb::{Durability, ReadableDatabase};
+use store_model::AnswerPut;
 
 use super::answer::{answer_key, encode_answer};
-use super::phase::{decode_phase, split_phase_key};
 use super::*;
 
 impl Feeds {
@@ -46,15 +44,10 @@ impl Feeds {
         Ok(())
     }
 
-    /// Store answers for phases whose aggregator emitted them, and advance the follow cursor.
+    /// Advance the follow cursor and insert `rows`.
     ///
-    /// A zero value is not an answer. A repeated round stays as the first row.
     /// The cursor does not move backward.
-    pub fn commit_follow(
-        &self,
-        next_block: u64,
-        observed: &[ObservedAnswer],
-    ) -> Result<usize, Error> {
+    pub fn commit_follow(&self, next_block: u64, rows: &[AnswerPut]) -> Result<usize, Error> {
         let mut write = self.db.begin_write().map_err(db_err)?;
         write
             .set_durability(Durability::Immediate)
@@ -70,30 +63,15 @@ impl Feeds {
             }
             meta.insert(FOLLOW, next_block).map_err(db_err)?;
             drop(meta);
-            let phases = write.open_table(PHASES).map_err(db_err)?;
-            let owners = phase_owners(&phases)?;
-            drop(phases);
             let mut answers = write.open_table(ANSWERS).map_err(db_err)?;
-            let mut written = 0usize;
-            for observed in observed {
-                if observed.value == I256::ZERO {
-                    continue;
-                }
-                let Some(pairs) = owners.get(&observed.aggregator) else {
-                    continue;
-                };
-                for (proxy, phase_id) in pairs {
-                    let key = answer_key(*proxy, *phase_id, observed.round_id);
-                    if answers.get(key.as_slice()).map_err(db_err)?.is_some() {
-                        continue;
-                    }
-                    let value = encode_answer(observed);
-                    answers
-                        .insert(key.as_slice(), value.as_slice())
-                        .map_err(db_err)?;
-                    written += 1;
-                }
+            for row in rows {
+                let key = answer_key(row.proxy, row.phase_id, row.observed.round_id);
+                let value = encode_answer(&row.observed);
+                answers
+                    .insert(key.as_slice(), value.as_slice())
+                    .map_err(db_err)?;
             }
+            let written = rows.len();
             drop(answers);
             let added = written as u64;
             let mut meta = write.open_table(META).map_err(db_err)?;
@@ -141,20 +119,4 @@ impl Feeds {
         write.commit().map_err(db_err)?;
         Ok(())
     }
-}
-
-fn phase_owners(
-    table: &impl ReadableTable<&'static [u8], &'static [u8]>,
-) -> Result<std::collections::HashMap<Address, Vec<(Address, u16)>>, Error> {
-    let mut owners = std::collections::HashMap::<Address, Vec<(Address, u16)>>::new();
-    for item in table.iter().map_err(db_err)? {
-        let (key, value) = item.map_err(db_err)?;
-        let (proxy, phase_id) = split_phase_key(key.value())?;
-        let (aggregator, _, _) = decode_phase(value.value())?;
-        owners
-            .entry(aggregator)
-            .or_default()
-            .push((proxy, phase_id));
-    }
-    Ok(owners)
 }

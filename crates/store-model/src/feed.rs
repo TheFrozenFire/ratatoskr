@@ -144,3 +144,25 @@ pub enum Read {
         max_answer: Option<I256>,
     },
 }
+
+/// Rows one proxy read writes.
+///
+/// `Configured` clears a stored failure. `Failure` writes the text and leaves
+/// phases, configuration, and jobs in place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PhasePlan {
+    Failure(String),
+    Configured {
+        configuration: Option<Configuration>,
+        mismatches: Vec<Mismatch>,
+        phase: Option<Phase>,
+    },
+}
+
+/// One answer row to insert for a phase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnswerPut {
+    pub proxy: Address,
+    pub phase_id: u16,
+    pub observed: ObservedAnswer,
+}

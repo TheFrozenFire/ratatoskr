@@ -1,8 +1,7 @@
-//! `feeds.redb`. Directory facts, proxy configuration, phases, and answers.
+//! `feeds.redb`. Directory rows, configuration, phases, history jobs,
+//! mismatches, failures, and answers.
 //!
-//! Directory facts rewrite on each apply. Decimals, description, and version
-//! are written once. A new chain phase appends, and that write inserts one
-//! history job. Deleting the job table leaves the feeds and the phases.
+//! Deleting the job table leaves the feeds and the phases.
 
 mod answer;
 mod directory;

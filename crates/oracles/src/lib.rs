@@ -11,11 +11,12 @@ pub use abi::{
     FEEDS_PER_CALL, MULTICALL,
 };
 pub use answer::{decode_answer_updated, ChainLog, ANSWER_UPDATED};
-pub use configure::proxy_heads;
+pub use configure::{phase_plan, proxy_heads, record_read};
 pub use directory::{parse_directory, DirectoryError};
+pub use follow::commit_observed;
 pub use store_model::{
-    Answer, Configuration, DirectoryRow, Feed, Gauges, HistoryJob, Listing, Mismatch,
-    ObservedAnswer, Phase, ProxyHead, Read,
+    Answer, AnswerPut, Configuration, DirectoryRow, Feed, Gauges, HistoryJob, Listing, Mismatch,
+    ObservedAnswer, Phase, PhasePlan, ProxyHead, Read,
 };
 
 use eyre::WrapErr;

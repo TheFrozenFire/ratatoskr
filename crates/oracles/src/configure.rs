@@ -9,7 +9,7 @@ use crate::abi::{
 };
 use alloy_primitives::{Address, I256};
 use chain::Rpc;
-use store_model::Read;
+use store_model::{Configuration, Mismatch, Phase, PhasePlan, Read};
 
 pub fn configure(feeds: &store::service::Feeds, rpc: &Rpc) -> eyre::Result<()> {
     let proxies = feeds.proxies()?;
@@ -45,7 +45,8 @@ pub fn configure(feeds: &store::service::Feeds, rpc: &Rpc) -> eyre::Result<()> {
                     let (min_answer, max_answer) =
                         bounds.get(ready_at).copied().unwrap_or((None, None));
                     ready_at += 1;
-                    feeds.apply_read(
+                    record_read(
+                        feeds,
                         proxy,
                         Read::Configured {
                             head,
@@ -56,12 +57,99 @@ pub fn configure(feeds: &store::service::Feeds, rpc: &Rpc) -> eyre::Result<()> {
                 }
                 None => {
                     let message = proxy_failure(chunk, &results, proxy);
-                    feeds.apply_read(proxy, Read::Failed(message))?;
+                    record_read(feeds, proxy, Read::Failed(message))?;
                 }
             }
         }
     }
     Ok(())
+}
+
+/// Compare one proxy read with the stored configuration and phases, then write that plan.
+pub fn record_read(
+    feeds: &store::service::Feeds,
+    proxy: Address,
+    read: Read,
+) -> Result<(), store::FeedError> {
+    let stored = feeds.configuration(proxy)?;
+    let phases = feeds.phases(proxy)?;
+    let plan = phase_plan(stored.as_ref(), &phases, read);
+    feeds.apply_phase_plan(proxy, &plan)
+}
+
+/// The stored configuration stays. A greater phase id appends one phase and one history job.
+/// A smaller phase id, or the same phase id with another aggregator, leaves the stored phases.
+pub fn phase_plan(stored: Option<&Configuration>, phases: &[Phase], read: Read) -> PhasePlan {
+    let (head, min_answer, max_answer) = match read {
+        Read::Failed(text) => return PhasePlan::Failure(text),
+        Read::Configured {
+            head,
+            min_answer,
+            max_answer,
+        } => (head, min_answer, max_answer),
+    };
+    let mut mismatches = Vec::new();
+    let configuration = match stored {
+        None => Some(Configuration {
+            decimals: head.decimals,
+            description: head.description.clone(),
+            version: head.version,
+        }),
+        Some(stored)
+            if stored.decimals != head.decimals
+                || stored.description != head.description
+                || stored.version != head.version =>
+        {
+            mismatches.push(Mismatch::Configuration {
+                stored_decimals: stored.decimals,
+                observed_decimals: head.decimals,
+                stored_description: stored.description.clone(),
+                observed_description: head.description.clone(),
+                stored_version: stored.version,
+                observed_version: head.version,
+            });
+            None
+        }
+        Some(_) => None,
+    };
+    let newest = phases.iter().max_by_key(|phase| phase.phase_id);
+    let phase = match newest {
+        Some(phase) if phase.phase_id == head.phase_id && phase.aggregator == head.aggregator => {
+            None
+        }
+        Some(phase) if phase.phase_id == head.phase_id => {
+            mismatches.push(Mismatch::Aggregator {
+                phase_id: head.phase_id,
+                stored: phase.aggregator,
+                observed: head.aggregator,
+            });
+            None
+        }
+        Some(phase) if head.phase_id > phase.phase_id => Some(Phase {
+            phase_id: head.phase_id,
+            aggregator: head.aggregator,
+            min_answer,
+            max_answer,
+        }),
+        Some(phase) => {
+            mismatches.push(Mismatch::Phase {
+                newest: phase.phase_id,
+                observed: head.phase_id,
+            });
+            None
+        }
+        None => Some(Phase {
+            phase_id: head.phase_id,
+            aggregator: head.aggregator,
+            min_answer,
+            max_answer,
+        }),
+    };
+    PhasePlan::Configured {
+        configuration,
+        mismatches,
+        phase,
+    }
 }
 
 /// One head per proxy, in proxy order. `None` is a subcall failure.

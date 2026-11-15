@@ -10,9 +10,10 @@ use crate::answer::{
     AGGREGATOR_CONFIRMED, ANSWER_UPDATED,
 };
 use crate::configure;
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, B256, I256};
 use chain::Rpc;
-use store_model::ObservedAnswer;
+use std::collections::{HashMap, HashSet};
+use store_model::{AnswerPut, ObservedAnswer};
 
 const SPAN: u64 = 2_000;
 const RECENT_BLOCKS: u64 = 8_000;
@@ -72,7 +73,7 @@ fn scan(
             .iter()
             .filter_map(decode_answer_updated)
             .collect::<Vec<_>>();
-        written += feeds.commit_follow(end.saturating_add(1), &answers)?;
+        written += commit_observed(feeds, end.saturating_add(1), &answers)?;
         publish(feeds);
         observability::info!(start, end, written, "answer follow");
     }
@@ -145,9 +146,75 @@ fn publish(feeds: &store::service::Feeds) {
     );
 }
 
+/// Store non-zero answers for phases whose aggregator emitted them.
+///
+/// A round already stored on that phase stays the first row. `next_block` is the
+/// follow cursor. The store rejects a cursor that moves backward.
+pub fn commit_observed(
+    feeds: &store::service::Feeds,
+    next_block: u64,
+    observed: &[ObservedAnswer],
+) -> Result<usize, store::FeedError> {
+    let puts = answer_puts(feeds, observed)?;
+    feeds.commit_follow(next_block, &puts)
+}
+
+fn answer_puts(
+    feeds: &store::service::Feeds,
+    observed: &[ObservedAnswer],
+) -> Result<Vec<AnswerPut>, store::FeedError> {
+    if observed.is_empty() || observed.iter().all(|item| item.value == I256::ZERO) {
+        return Ok(Vec::new());
+    }
+    let mut owners = HashMap::<Address, Vec<(Address, u16)>>::new();
+    for proxy in feeds.proxies()? {
+        for phase in feeds.phases(proxy)? {
+            owners
+                .entry(phase.aggregator)
+                .or_default()
+                .push((proxy, phase.phase_id));
+        }
+    }
+    let mut stored = HashMap::<Address, HashSet<(u16, u64)>>::new();
+    let mut seen = HashSet::<(Address, u16, u64)>::new();
+    let mut puts = Vec::new();
+    for observed in observed {
+        if observed.value == I256::ZERO {
+            continue;
+        }
+        let Some(pairs) = owners.get(&observed.aggregator) else {
+            continue;
+        };
+        for (proxy, phase_id) in pairs {
+            if !seen.insert((*proxy, *phase_id, observed.round_id)) {
+                continue;
+            }
+            if !stored.contains_key(proxy) {
+                let mut rounds = HashSet::new();
+                for answer in feeds.answers(*proxy)? {
+                    rounds.insert((answer.phase_id, answer.round_id));
+                }
+                stored.insert(*proxy, rounds);
+            }
+            if stored
+                .get(proxy)
+                .is_some_and(|rounds| rounds.contains(&(*phase_id, observed.round_id)))
+            {
+                continue;
+            }
+            puts.push(AnswerPut {
+                proxy: *proxy,
+                phase_id: *phase_id,
+                observed: observed.clone(),
+            });
+        }
+    }
+    Ok(puts)
+}
+
 fn commit_older(feeds: &store::service::Feeds, answers: &[ObservedAnswer]) -> eyre::Result<usize> {
     let next = feeds.follow_block()?.unwrap_or(0);
-    Ok(feeds.commit_follow(next, answers)?)
+    Ok(commit_observed(feeds, next, answers)?)
 }
 
 fn current_aggregators(feeds: &store::service::Feeds) -> eyre::Result<Vec<Address>> {

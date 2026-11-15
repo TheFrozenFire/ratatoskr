@@ -2,9 +2,9 @@
 
 use alloy_primitives::{Address, I256};
 use redb::{Durability, ReadableDatabase, ReadableTable};
-use store_model::{Configuration, HistoryJob, Mismatch, Phase, ProxyHead, Read};
+use store_model::{HistoryJob, Mismatch, Phase, PhasePlan};
 
-use super::directory::{decode_configuration, encode_configuration};
+use super::directory::encode_configuration;
 use super::*;
 
 impl Feeds {
@@ -75,7 +75,8 @@ impl Feeds {
         Ok(Some(text.to_string()))
     }
 
-    pub fn apply_read(&self, proxy: Address, read: Read) -> Result<(), Error> {
+    /// Write a phase plan. An unlisted proxy is left untouched.
+    pub fn apply_phase_plan(&self, proxy: Address, plan: &PhasePlan) -> Result<(), Error> {
         let mut write = self.db.begin_write().map_err(db_err)?;
         write
             .set_durability(Durability::Immediate)
@@ -85,98 +86,37 @@ impl Feeds {
             if identity.get(proxy.as_slice()).map_err(db_err)?.is_none() {
                 return Err(Error::Unknown { proxy });
             }
-            let mut failures = write.open_table(FAILURES).map_err(db_err)?;
-            match read {
-                Read::Failed(text) => {
+            match plan {
+                PhasePlan::Failure(text) => {
+                    let mut failures = write.open_table(FAILURES).map_err(db_err)?;
                     failures
                         .insert(proxy.as_slice(), text.as_bytes())
                         .map_err(db_err)?;
                 }
-                Read::Configured {
-                    head,
-                    min_answer,
-                    max_answer,
+                PhasePlan::Configured {
+                    configuration,
+                    mismatches,
+                    phase,
                 } => {
+                    let mut failures = write.open_table(FAILURES).map_err(db_err)?;
                     failures.remove(proxy.as_slice()).map_err(db_err)?;
                     drop(failures);
                     drop(identity);
-                    let mut config = write.open_table(CONFIG).map_err(db_err)?;
-                    let mut mismatches = write.open_table(MISMATCHES).map_err(db_err)?;
-                    let existing = match config.get(proxy.as_slice()).map_err(db_err)? {
-                        None => None,
-                        Some(stored) => Some(decode_configuration(stored.value())?),
-                    };
-                    match existing {
-                        None => {
-                            let value = encode_configuration(&Configuration {
-                                decimals: head.decimals,
-                                description: head.description.clone(),
-                                version: head.version,
-                            })?;
-                            config
-                                .insert(proxy.as_slice(), value.as_slice())
-                                .map_err(db_err)?;
-                        }
-                        Some(stored)
-                            if stored.decimals != head.decimals
-                                || stored.description != head.description
-                                || stored.version != head.version =>
-                        {
-                            let mismatch = Mismatch::Configuration {
-                                stored_decimals: stored.decimals,
-                                observed_decimals: head.decimals,
-                                stored_description: stored.description,
-                                observed_description: head.description.clone(),
-                                stored_version: stored.version,
-                                observed_version: head.version,
-                            };
-                            insert_mismatch(&mut mismatches, proxy, &mismatch)?;
-                        }
-                        Some(_) => {}
+                    if let Some(configuration) = configuration {
+                        let mut config = write.open_table(CONFIG).map_err(db_err)?;
+                        let value = encode_configuration(configuration)?;
+                        config
+                            .insert(proxy.as_slice(), value.as_slice())
+                            .map_err(db_err)?;
                     }
-                    drop(config);
-                    let mut phases = write.open_table(PHASES).map_err(db_err)?;
-                    let mut jobs = write.open_table(JOBS).map_err(db_err)?;
-                    let stored = read_phases(phase_rows(&phases, proxy)?)?;
-                    match stored.last() {
-                        Some(phase)
-                            if phase.phase_id == head.phase_id
-                                && phase.aggregator == head.aggregator => {}
-                        Some(phase) if phase.phase_id == head.phase_id => {
-                            let mismatch = Mismatch::Aggregator {
-                                phase_id: head.phase_id,
-                                stored: phase.aggregator,
-                                observed: head.aggregator,
-                            };
-                            insert_mismatch(&mut mismatches, proxy, &mismatch)?;
-                        }
-                        Some(phase) if head.phase_id > phase.phase_id => {
-                            insert_phase(
-                                &mut phases,
-                                &mut jobs,
-                                proxy,
-                                &head,
-                                min_answer,
-                                max_answer,
-                            )?;
-                        }
-                        Some(phase) => {
-                            let mismatch = Mismatch::Phase {
-                                newest: phase.phase_id,
-                                observed: head.phase_id,
-                            };
-                            insert_mismatch(&mut mismatches, proxy, &mismatch)?;
-                        }
-                        None => {
-                            insert_phase(
-                                &mut phases,
-                                &mut jobs,
-                                proxy,
-                                &head,
-                                min_answer,
-                                max_answer,
-                            )?;
-                        }
+                    let mut stored_mismatches = write.open_table(MISMATCHES).map_err(db_err)?;
+                    for mismatch in mismatches {
+                        insert_mismatch(&mut stored_mismatches, proxy, mismatch)?;
+                    }
+                    if let Some(phase) = phase {
+                        let mut phases = write.open_table(PHASES).map_err(db_err)?;
+                        let mut jobs = write.open_table(JOBS).map_err(db_err)?;
+                        insert_phase(&mut phases, &mut jobs, proxy, phase)?;
                     }
                 }
             }
@@ -190,16 +130,14 @@ fn insert_phase(
     phases: &mut redb::Table<&[u8], &[u8]>,
     jobs: &mut redb::Table<&[u8], &[u8]>,
     proxy: Address,
-    head: &ProxyHead,
-    min_answer: Option<I256>,
-    max_answer: Option<I256>,
+    phase: &Phase,
 ) -> Result<(), Error> {
-    let key = phase_key(proxy, head.phase_id);
-    let value = encode_phase(head.aggregator, min_answer, max_answer);
+    let key = phase_key(proxy, phase.phase_id);
+    let value = encode_phase(phase.aggregator, phase.min_answer, phase.max_answer);
     phases
         .insert(key.as_slice(), value.as_slice())
         .map_err(db_err)?;
-    jobs.insert(key.as_slice(), head.aggregator.as_slice())
+    jobs.insert(key.as_slice(), phase.aggregator.as_slice())
         .map_err(db_err)?;
     Ok(())
 }
