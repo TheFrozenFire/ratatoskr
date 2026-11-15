@@ -2,7 +2,7 @@
 
 use alloy_primitives::B256;
 use redb::Durability;
-use store_model::{decode_curve_record, entity_key, METRIC, STAGE_IMMUTABLE, STAGE_QUOTE};
+use store_model::{decode_curve_record, entity_key, STAGE_IMMUTABLE, STAGE_QUOTE};
 
 use super::super::catalog::Catalog;
 use super::super::catalog::VENUES;
@@ -10,35 +10,6 @@ use super::work::clear_job;
 use super::*;
 
 impl Catalog {
-    /// Delete identities whose stored snapshot cannot price any positive input.
-    ///
-    /// Pools with no snapshot yet stay, so a fill can be ingested afterwards.
-    /// A one-wei reserve stays. Zero reserves and an empty book do not.
-    pub fn drop_empty_pools(&self) -> eyre::Result<Vec<(u8, B256)>> {
-        let mut drop = Vec::new();
-        for kind in 1..=METRIC {
-            let mut after = None;
-            loop {
-                let page = self.page_venues(kind, after, 64)?;
-                if page.is_empty() {
-                    break;
-                }
-                after = Some(page.last().expect("page").id);
-                for row in &page {
-                    let state = self.read_state(row.kind, row.id)?;
-                    if !super::super::hooks::has_trade_size(row.kind, row.id, state)? {
-                        drop.push((row.kind, row.id));
-                    }
-                }
-                if page.len() < 64 {
-                    break;
-                }
-            }
-        }
-        self.delete_pools(&drop)?;
-        Ok(drop)
-    }
-
     /// Delete a stride of `listed` identities until `target` rows remain.
     ///
     /// Identities that are not in `listed` stay. The returned list is `listed`

@@ -142,7 +142,7 @@ async fn reshape(args: &Args, paths: &Paths, caches: &config::Store) -> eyre::Re
         let caches = caches.clone();
         let dropped = tokio::task::spawn_blocking(move || {
             let catalog = store::service::Catalog::open_with(&venues_path, &caches)?;
-            catalog.drop_empty_pools()
+            venues::drop_empty_pools(&catalog)
         })
         .await
         .wrap_err("drop empty")??;

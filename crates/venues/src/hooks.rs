@@ -6,7 +6,7 @@ use store_model::{CurveRecord, PoolState};
 
 /// Install curve and capacity hooks. Call this before [`crate::Catalog::open`].
 pub fn install_catalog_hooks() {
-    store::service::install_capacity(capacity_hook, trade_size_hook);
+    store::service::install_capacity(capacity_hook);
     store::service::install_segments(priced_pairs, segments_hook);
 }
 
@@ -21,10 +21,6 @@ fn capacity_hook(kind: u8, id: B256, state: &PoolState) -> Option<Capacity> {
         fills_sample: cap.fills_sample,
         top: cap.top,
     })
-}
-
-fn trade_size_hook(kind: u8, id: B256, state: PoolState) -> bool {
-    crate::fit::has_trade_size(kind, id, state)
 }
 
 fn priced_pairs(curve: &CurveRecord) -> Vec<(Address, Address)> {

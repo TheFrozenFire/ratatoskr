@@ -32,8 +32,8 @@ pub use history::BloomScan;
 pub use hooks::install_catalog_hooks;
 pub use logs::Walk;
 pub use state::{
-    refresh_kinds, CurveRecord, ImmutablePut, ImmutableRow, MutableStored, MutableWrite, PoolState,
-    RefreshReport, StateSummary, TickPage, WatchHit, WorkFail, WorkJob,
+    drop_empty_pools, refresh_kinds, CurveRecord, ImmutablePut, ImmutableRow, MutableStored,
+    MutableWrite, PoolState, RefreshReport, StateSummary, TickPage, WatchHit, WorkFail, WorkJob,
 };
 pub use store::{ChainStore, ConduitStore, CorpusStore, DiscoveryStore, TokenStore, VenueStore};
 
