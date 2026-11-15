@@ -13,5 +13,5 @@ pub mod seeds;
 pub mod tick;
 pub mod token;
 
-pub use rpc::{default_call_rpcs, Rpc, RpcLog};
+pub use rpc::{default_call_rpcs, resolve_rpcs, Rpc, RpcLog};
 pub use seeds::{custodial_wrap, root_address};

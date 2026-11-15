@@ -14,6 +14,47 @@ pub fn default_call_rpcs() -> Vec<String> {
     config::Network::default().call_rpcs
 }
 
+/// URLs for `eth_call`. An explicit list wins. The state pipeline otherwise
+/// uses the Alchemy key from the environment or `.env`. Every other pipeline
+/// uses `network.call_rpcs`.
+pub fn resolve_rpcs(
+    given: &[String],
+    state: bool,
+    network: &config::Network,
+) -> eyre::Result<Vec<String>> {
+    if !given.is_empty() {
+        return Ok(given.to_vec());
+    }
+    if state {
+        let Some(key) = alchemy_key() else {
+            return Err(eyre!("state needs --rpc or ALCHEMY_API_KEY"));
+        };
+        observability::info!("state rpc is the alchemy endpoint");
+        return Ok(vec![format!("https://eth-mainnet.g.alchemy.com/v2/{key}")]);
+    }
+    Ok(network.call_rpcs.clone())
+}
+
+fn alchemy_key() -> Option<String> {
+    if let Ok(key) = std::env::var("ALCHEMY_API_KEY") {
+        let key = key.trim().trim_matches('"').to_string();
+        if !key.is_empty() {
+            return Some(key);
+        }
+    }
+    let text = std::fs::read_to_string(".env").ok()?;
+    for line in text.lines() {
+        let Some(rest) = line.strip_prefix("ALCHEMY_API_KEY=") else {
+            continue;
+        };
+        let key = rest.trim().trim_matches('"').to_string();
+        if !key.is_empty() {
+            return Some(key);
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone)]
 pub struct RpcResponse {
     pub http_status: u16,

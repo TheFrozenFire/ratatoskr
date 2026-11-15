@@ -192,37 +192,7 @@ pub(crate) fn resolve_rpcs(
     state: bool,
     network: &config::Network,
 ) -> eyre::Result<Vec<String>> {
-    if !given.is_empty() {
-        return Ok(given.to_vec());
-    }
-    if state {
-        let Some(key) = alchemy_key() else {
-            return Err(eyre::eyre!("state needs --rpc or ALCHEMY_API_KEY"));
-        };
-        observability::info!("state rpc is the alchemy endpoint");
-        return Ok(vec![format!("https://eth-mainnet.g.alchemy.com/v2/{key}")]);
-    }
-    Ok(network.call_rpcs.clone())
-}
-
-fn alchemy_key() -> Option<String> {
-    if let Ok(key) = std::env::var("ALCHEMY_API_KEY") {
-        let key = key.trim().trim_matches('"').to_string();
-        if !key.is_empty() {
-            return Some(key);
-        }
-    }
-    let text = std::fs::read_to_string(".env").ok()?;
-    for line in text.lines() {
-        let Some(rest) = line.strip_prefix("ALCHEMY_API_KEY=") else {
-            continue;
-        };
-        let key = rest.trim().trim_matches('"').to_string();
-        if !key.is_empty() {
-            return Some(key);
-        }
-    }
-    None
+    chain::rpc::resolve_rpcs(given, state, network)
 }
 
 #[cfg(test)]
