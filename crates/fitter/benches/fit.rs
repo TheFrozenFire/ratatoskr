@@ -14,7 +14,7 @@ fn logistic(c: &mut Criterion) {
     let amounts: Vec<BigInt> = (1..=32).map(|step| bi(step * 25)).collect();
     c.bench_function("logistic_32", |b| {
         b.iter(|| {
-            venues::logistic_outs(
+            fitter::logistic_outs(
                 black_box(&slope),
                 black_box(&rate),
                 black_box(&knee),
@@ -42,7 +42,7 @@ fn product(c: &mut Criterion) {
         ],
     });
     c.bench_function("choose_product", |b| {
-        b.iter(|| venues::select_fit(black_box(&state), black_box(&direction)).unwrap())
+        b.iter(|| fitter::select_fit(black_box(&state), black_box(&direction)).unwrap())
     });
 }
 
@@ -72,7 +72,7 @@ fn softening(c: &mut Criterion) {
     let mut group = c.benchmark_group("choose");
     group.sample_size(10);
     group.bench_function("softening_series", |b| {
-        b.iter(|| venues::select_fit(black_box(&state), black_box(&direction)).unwrap())
+        b.iter(|| fitter::select_fit(black_box(&state), black_box(&direction)).unwrap())
     });
     group.finish();
 }

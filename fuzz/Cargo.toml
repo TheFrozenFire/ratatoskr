@@ -10,7 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 num-bigint = "0.4"
-venues = { path = "../crates/venues" }
+fitter = { path = "../crates/fitter" }
 
 [workspace]
 

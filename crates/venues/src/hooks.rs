@@ -31,7 +31,7 @@ fn priced_pairs(curve: &CurveRecord) -> Vec<(Address, Address)> {
     if curve.version != store_model::CURVE_VERSION {
         return Vec::new();
     }
-    let Ok(fit) = crate::fit_formula::decode_fit(&curve.payload) else {
+    let Ok(fit) = fitter::decode_fit(&curve.payload) else {
         return Vec::new();
     };
     if fit.reason != 0 {

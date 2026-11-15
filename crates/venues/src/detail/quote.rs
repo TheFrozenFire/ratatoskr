@@ -1,7 +1,7 @@
 //! Local quote of one ingested pool snapshot.
 
 use super::*;
-use crate::fit_math::{crypto2_out, crypto3_out};
+use fitter::{crypto2_out, crypto3_out};
 use num_bigint::{BigInt, Sign};
 
 pub(super) fn quote_product(

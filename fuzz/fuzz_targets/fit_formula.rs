@@ -9,5 +9,5 @@ fuzz_target!(|data: &[u8]| {
     }
     let split = data.len() / 2;
     let amount = BigInt::from_signed_bytes_be(&data[..split.min(32)]);
-    venues::poke_formula(data, &amount);
+    fitter::poke_formula(data, &amount);
 });

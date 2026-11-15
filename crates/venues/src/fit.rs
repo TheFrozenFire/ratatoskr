@@ -27,8 +27,6 @@ use crate::catalog::{
     V3_FORK,
 };
 use crate::detail::{product_fee_pips, PoolDetail, Quote};
-use crate::fit_formula::{decode_fit, encode_fit, Formula, StoredFit};
-use crate::fit_select::{choose, labels_of};
 use crate::state::{
     curve_is_current, curve_job, is_canonical, join_detail, keep_or_drop, quote_is_current,
     unix_now, CurveRecord, PoolState, QuoteRecord, WorkJob, CURVE_VERSION, QUOTE_VERSION,
@@ -37,6 +35,7 @@ use crate::Catalog;
 use crate::Rpc;
 use crate::VenueStore;
 use alloy_primitives::{Address, B256, U256};
+use fitter::{choose, decode_fit, encode_fit, labels_of, Formula, StoredFit};
 use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
 use serde_json::{json, Value};
@@ -3211,7 +3210,7 @@ mod tests {
             flags: 0,
         });
         let curve = crate::state::curve_for_snapshot(&detail, 4).unwrap();
-        let fit = crate::fit_formula::decode_fit(&curve.payload).unwrap();
+        let fit = fitter::decode_fit(&curve.payload).unwrap();
         assert_eq!(fit.reason, 0);
         assert!(fit
             .directions

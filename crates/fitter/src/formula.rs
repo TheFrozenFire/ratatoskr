@@ -10,7 +10,7 @@ use num_rational::BigRational;
 use num_traits::Zero;
 
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) enum Formula {
+pub enum Formula {
     Hyperbola {
         x1: BigInt,
         y1: BigInt,
@@ -201,7 +201,7 @@ pub(crate) enum Formula {
     },
 }
 
-pub(crate) struct StoredFit {
+pub struct StoredFit {
     pub token_in: Address,
     pub token_out: Address,
     pub score: i64,
@@ -209,7 +209,7 @@ pub(crate) struct StoredFit {
     pub formula: Formula,
 }
 
-pub(crate) struct FitPayload {
+pub struct FitPayload {
     /// Zero when `directions` is the fit. Any other value is a skip reason and
     /// the direction list is empty.
     pub reason: u8,
@@ -913,7 +913,7 @@ impl Formula {
     }
 }
 
-pub(crate) fn encode_fit(reason: u8, directions: &[StoredFit]) -> Vec<u8> {
+pub fn encode_fit(reason: u8, directions: &[StoredFit]) -> Vec<u8> {
     let mut out = vec![FIT_TAG, reason];
     let count = if reason == 0 {
         u32::try_from(directions.len()).unwrap_or(u32::MAX)
@@ -937,7 +937,7 @@ pub(crate) fn encode_fit(reason: u8, directions: &[StoredFit]) -> Vec<u8> {
     out
 }
 
-pub(crate) fn decode_fit(payload: &[u8]) -> Result<FitPayload, String> {
+pub fn decode_fit(payload: &[u8]) -> Result<FitPayload, String> {
     if payload.first() != Some(&FIT_TAG) {
         return Err("fit".to_string());
     }

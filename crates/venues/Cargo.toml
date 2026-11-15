@@ -9,9 +9,8 @@ publish.workspace = true
 config.workspace = true
 observability.workspace = true
 alloy-primitives.workspace = true
-bigdecimal = "0.4"
+fitter.workspace = true
 num-bigint = "0.4"
-num-integer = "0.1"
 num-rational = "0.4"
 num-traits = "0.2"
 discover.workspace = true
@@ -28,12 +27,5 @@ serde_json.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-criterion = { version = "0.5", default-features = false }
-num-bigint = "0.4"
-num-rational = "0.4"
 tokio.workspace = true
 zstd = "0.13"
-
-[[bench]]
-name = "fit"
-harness = false

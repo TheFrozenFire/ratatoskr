@@ -307,7 +307,7 @@ fn estimate_payload(
     token_out: Address,
     amount_in: U256,
 ) -> Result<Quote, String> {
-    let fit = crate::fit_formula::decode_fit(payload)?;
+    let fit = fitter::decode_fit(payload)?;
     if fit.reason != 0 {
         return Err("not canonical".into());
     }
@@ -327,8 +327,8 @@ fn estimate_payload(
         });
     }
     let input = bigint_from_u256(amount_in);
-    let output = crate::fit_select::eval_formula(&direction.formula, &input)
-        .ok_or_else(|| "no quote".to_string())?;
+    let output =
+        fitter::eval_formula(&direction.formula, &input).ok_or_else(|| "no quote".to_string())?;
     Ok(Quote {
         amount_in,
         amount_out: u256_from_bigint(&output)?,
@@ -338,11 +338,9 @@ fn estimate_payload(
 }
 
 /// The fee a product quote withholds from the input.
-fn fee_paid_of(formula: &crate::fit_formula::Formula, amount: &BigInt) -> BigInt {
+fn fee_paid_of(formula: &fitter::Formula, amount: &BigInt) -> BigInt {
     match formula {
-        crate::fit_formula::Formula::Product { fee, denom, .. }
-            if !denom.is_zero() && fee <= denom =>
-        {
+        fitter::Formula::Product { fee, denom, .. } if !denom.is_zero() && fee <= denom => {
             amount - (amount * (denom - fee)) / denom
         }
         _ => BigInt::from(0),

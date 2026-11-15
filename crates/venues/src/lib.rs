@@ -15,9 +15,6 @@ mod conduit;
 mod decode;
 mod detail;
 mod fit;
-mod fit_formula;
-mod fit_math;
-mod fit_select;
 mod history;
 mod hooks;
 mod import;
@@ -40,7 +37,6 @@ pub use catalog::{
 pub use conduit::{ConduitFail, ConduitJob};
 pub use detail::{load_details, DetailQuery, PoolDetail, Quote};
 pub use fit::{drop_partial_quotes, export_curve_fit, import_curve_fit, refit_curves, FitReport};
-pub use fit_select::{logistic_outs, poke_choose, poke_formula, select_fit};
 pub use history::BloomScan;
 pub use hooks::install_catalog_hooks;
 pub use logs::Walk;
