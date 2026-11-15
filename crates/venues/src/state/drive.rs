@@ -25,10 +25,10 @@ where
     }
     let inserted = store.reconcile(unix_now()).await?;
     report.notes.push(format!("reconcile {inserted}"));
-    tracing::info!(inserted, "state reconcile");
+    observability::info!(inserted, "state reconcile");
     let queued = store.enqueue_conduit_fill().await?;
     report.notes.push(format!("conduit fill {queued}"));
-    tracing::info!(queued, "conduit fill");
+    observability::info!(queued, "conduit fill");
     let urls = if opts.rpcs.is_empty() {
         crate::rpc::default_call_rpcs()
     } else {
@@ -40,8 +40,8 @@ where
         .await
         .wrap_err("rpc client task")??;
     let mut block = current_block(store, &rpc, opts.pin_block).await?;
-    crate::metrics::set_block(block);
-    tracing::info!(block, "state block");
+    observability::set_block(block);
+    observability::info!(block, "state block");
     let give_up_after = if opts.until_idle { 4 } else { 0 };
     let mut quiet = 0_u32;
     let mut batches = 0_u64;
@@ -53,12 +53,12 @@ where
             match watch_once(store, peer).await {
                 Ok(note) => {
                     if let Some(note) = note {
-                        tracing::info!(%note, "watch");
+                        observability::info!(%note, "watch");
                     }
                 }
                 Err(err) => {
                     let note = format!("watch: {err:#}");
-                    tracing::error!(%note);
+                    observability::error!(%note);
                     report.notes.push(note);
                 }
             }
@@ -69,8 +69,8 @@ where
         let next = current_block(store, &rpc, opts.pin_block).await?;
         if next != block {
             block = next;
-            crate::metrics::set_block(block);
-            tracing::info!(block, "state block");
+            observability::set_block(block);
+            observability::info!(block, "state block");
         }
         let mut notes = Vec::new();
         let worked = drive_one(store, &rpc, block, unix_now(), give_up_after, &mut notes).await?;
@@ -79,7 +79,7 @@ where
             quiet = 0;
             batches += 1;
             if batches.is_multiple_of(25) {
-                tracing::info!(batches, "state progress");
+                observability::info!(batches, "state progress");
             }
             continue;
         }
@@ -87,7 +87,7 @@ where
             quiet += 1;
             if quiet >= 2 {
                 report.notes.push("state idle".into());
-                tracing::info!(batches, "state idle");
+                observability::info!(batches, "state idle");
                 return Ok(report);
             }
             tokio::select! {
@@ -207,7 +207,7 @@ where
         return Ok(false);
     }
     let count = jobs.len() as u64;
-    crate::metrics::begin_batch(STAGE_CONDUIT, count);
+    observability::begin_batch(STAGE_CONDUIT, count);
     let started = std::time::Instant::now();
     let mut done = Vec::new();
     let mut again = Vec::new();
@@ -222,7 +222,7 @@ where
             Err(err) => {
                 let error = crate::rpc::redact_secret(&err.to_string());
                 if give_up_after > 0 && job.attempt >= give_up_after {
-                    tracing::error!(
+                    observability::error!(
                         stage = STAGE_CONDUIT,
                         token_in = %job.token_in,
                         token_out = %job.token_out,
@@ -236,7 +236,7 @@ where
                     ));
                     done.push((job.token_in, job.token_out));
                 } else {
-                    tracing::warn!(
+                    observability::warn!(
                         stage = STAGE_CONDUIT,
                         token_in = %job.token_in,
                         token_out = %job.token_out,
@@ -256,8 +256,8 @@ where
     }
     store.finish_conduits(&done, &again, &failed).await?;
     let ms = started.elapsed().as_millis() as u64;
-    crate::metrics::record_batch(STAGE_CONDUIT, count, ms);
-    tracing::info!(stage = STAGE_CONDUIT, jobs = count, ms, "state batch");
+    observability::record_batch(STAGE_CONDUIT, count, ms);
+    observability::info!(stage = STAGE_CONDUIT, jobs = count, ms, "state batch");
     Ok(true)
 }
 
@@ -271,7 +271,7 @@ async fn run_stage<S: VenueStore>(
     give_up_after: u32,
 ) -> eyre::Result<Vec<String>> {
     let count = jobs.len() as u64;
-    crate::metrics::begin_batch(stage, count);
+    observability::begin_batch(stage, count);
     let started = std::time::Instant::now();
     let mut notes = Vec::new();
     let result = match stage {
@@ -283,8 +283,8 @@ async fn run_stage<S: VenueStore>(
         _ => Ok(()),
     };
     let ms = started.elapsed().as_millis() as u64;
-    crate::metrics::record_batch(stage, count, ms);
-    tracing::info!(stage, jobs = count, ms, "state batch");
+    observability::record_batch(stage, count, ms);
+    observability::info!(stage, jobs = count, ms, "state batch");
     result?;
     Ok(notes)
 }
@@ -672,7 +672,7 @@ async fn watch_once<S: ChainStore + VenueStore, P: HistoryPeer>(
     }
     let mut hits = Vec::new();
     for block in &blocks {
-        let logs = corpus::logs_in_block(block)?;
+        let logs = model::logs_in_block(block)?;
         for log in logs {
             if let Some(hit) = watch_hit(store, &log).await? {
                 hits.push(hit);

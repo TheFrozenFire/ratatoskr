@@ -3,9 +3,10 @@
 use crate::session::OutboundSession;
 use alloy_consensus::{constants::EMPTY_ROOT_HASH, proofs::calculate_receipt_root, TxReceipt};
 use alloy_primitives::B256;
-use corpus::{encode_receipt_bundle, flatten_logs};
 use eyre::eyre;
-use model::{encode_block_record, BlockLogs, BlockRecord, HeaderRecord};
+use model::{
+    encode_block_record, encode_receipt_bundle, flatten_logs, BlockLogs, BlockRecord, HeaderRecord,
+};
 use reth_eth_wire::EthMessage;
 use reth_eth_wire_types::{
     message::RequestPair, BlockHashOrNumber, EthVersion, GetBlockHeaders, GetReceipts,

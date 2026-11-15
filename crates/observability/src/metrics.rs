@@ -3,12 +3,12 @@
 //! Counters and gauges use Prometheus names. [`prometheus_text`] renders the
 //! exposition format. [`status_json`] is the document the status TUI polls.
 
-use crate::state::StateSummary;
 use serde_json::{json, Value};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
+use store_model::StateSummary;
 
 const SAMPLE_LEN: usize = 48;
 
@@ -59,6 +59,7 @@ struct Metrics {
     mismatches: AtomicU64,
     jobs: AtomicU64,
     job_errors: AtomicU64,
+    paused: AtomicBool,
     stages: [StageMeters; 7],
     errors: Mutex<Vec<(String, u64)>>,
 }
@@ -78,6 +79,7 @@ impl Metrics {
             mismatches: AtomicU64::new(0),
             jobs: AtomicU64::new(0),
             job_errors: AtomicU64::new(0),
+            paused: AtomicBool::new(false),
             stages: [
                 StageMeters::new(),
                 StageMeters::new(),
@@ -103,6 +105,10 @@ fn stage_meters(stage: u8) -> Option<&'static StageMeters> {
 
 pub fn set_block(block: u64) {
     metrics().block.store(block, Ordering::Relaxed);
+}
+
+pub fn note_paused(paused: bool) {
+    metrics().paused.store(paused, Ordering::Relaxed);
 }
 
 pub fn begin_batch(stage: u8, jobs: u64) {
@@ -148,7 +154,7 @@ pub fn publish_summary(summary: &StateSummary) {
         .mismatches
         .store(summary.mismatches, Ordering::Relaxed);
     metrics.jobs.store(summary.jobs, Ordering::Relaxed);
-    ipc::note_token_records(summary.tokens);
+    crate::note_token_records(summary.tokens);
     for meters in &metrics.stages {
         meters.queued.store(0, Ordering::Relaxed);
     }
@@ -324,7 +330,7 @@ pub fn prometheus_text() -> String {
 }
 
 fn append_databases(out: &mut String) {
-    let rows = ipc::db::readings();
+    let rows = crate::cache::readings();
     if !rows.is_empty() {
         gauge(
             out,
@@ -414,7 +420,7 @@ fn append_databases(out: &mut String) {
             );
         }
     }
-    let probes = ipc::db::probes();
+    let probes = crate::cache::probes();
     if probes.is_empty() {
         return;
     }
@@ -491,10 +497,10 @@ fn snapshot() -> Value {
         "mismatches": metrics.mismatches.load(Ordering::Relaxed),
         "jobs": metrics.jobs.load(Ordering::Relaxed),
         "job_errors": metrics.job_errors.load(Ordering::Relaxed),
-        "paused": crate::work_paused(),
+        "paused": metrics.paused.load(Ordering::Relaxed),
         "stages": stages,
         "errors": errors,
-        "board": ipc::board_snapshot(),
+        "board": crate::board_snapshot(),
     })
 }
 
@@ -563,7 +569,7 @@ mod tests {
 
     #[test]
     fn database_cache_is_in_the_exposition_and_not_the_status() {
-        ipc::db::publish(vec![ipc::db::CacheReading {
+        crate::cache::publish(vec![crate::cache::CacheReading {
             name: "status-split.redb".to_string(),
             limit: 4096,
             used: 128,
@@ -573,7 +579,7 @@ mod tests {
             write_hits: 5,
             write_misses: 6,
         }]);
-        ipc::db::record_probe("status-split", 7);
+        crate::cache::record_probe("status-split", 7);
         let text = prometheus_text();
         assert!(text.contains("ratatoskr_db_cache_limit_bytes{db=\"status-split.redb\"} 4096"));
         assert!(text.contains("ratatoskr_db_cache_used_bytes{db=\"status-split.redb\"} 128"));

@@ -506,7 +506,7 @@ pub fn refresh_kinds(catalog: &Catalog, rpc: &Rpc, kinds: &[u8]) -> eyre::Result
                 report.read += 1;
                 report.curves += 1;
             }
-            tracing::info!(
+            observability::info!(
                 kind = crate::kind_name(kind),
                 read = report.read,
                 failed = report.failed,
@@ -579,7 +579,7 @@ pub(crate) fn keep_or_drop(
     let error = crate::rpc::redact_secret(&error);
     let kind = crate::catalog::kind_name(job.kind);
     if give_up_after > 0 && job.attempt >= give_up_after {
-        tracing::error!(
+        observability::error!(
             stage = job.stage,
             kind,
             id = %job.id,
@@ -591,7 +591,7 @@ pub(crate) fn keep_or_drop(
         done.push((job.stage, job.kind, job.id));
         return;
     }
-    tracing::warn!(
+    observability::warn!(
         stage = job.stage,
         kind,
         id = %job.id,

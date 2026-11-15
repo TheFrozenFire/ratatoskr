@@ -74,7 +74,7 @@ fn scan(
             .collect::<Vec<_>>();
         written += feeds.commit_follow(end.saturating_add(1), &answers)?;
         publish(feeds);
-        tracing::info!(start, end, written, "answer follow");
+        observability::info!(start, end, written, "answer follow");
     }
     Ok(written)
 }
@@ -107,7 +107,7 @@ fn fill_quiet(
             continue;
         }
         let end = cursor.saturating_sub(1);
-        tracing::info!(%proxy, start, end, "answer lookback");
+        observability::info!(%proxy, start, end, "answer lookback");
         for (span_start, span_end) in block_spans(start, end, SPAN) {
             if stop() {
                 return Ok(written);
@@ -135,7 +135,7 @@ fn publish(feeds: &store::service::Feeds) {
     let Ok(gauges) = feeds.gauges() else {
         return;
     };
-    ipc::note_feeds(
+    observability::note_feeds(
         gauges.feeds,
         gauges.configured,
         gauges.answers,

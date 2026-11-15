@@ -118,7 +118,7 @@ pub async fn receipts_for_blocks(
                 .ok_or_else(|| eyre!("block {block} is outside {}", file.name))?;
             jobs.push((block, at));
         }
-        tracing::info!(epoch, blocks = jobs.len(), "era receipts for bloom hits");
+        observability::info!(epoch, blocks = jobs.len(), "era receipts for bloom hits");
         found.extend(fetch_block_logs(http, &url, file_len, &jobs, filter, inflight).await?);
     }
     found.sort_by_key(|block| block.header.number);
@@ -206,7 +206,7 @@ pub async fn enumerate_logs(
             .iter()
             .filter(|header| filter.bloom_maybe(&header.row.logs_bloom))
             .count();
-        tracing::info!(
+        observability::info!(
             epoch,
             blocks = headers.len(),
             hits,
@@ -305,7 +305,7 @@ async fn read_file(
             .await?;
             let lens: Vec<u64> = sampled.iter().map(|header| header.entry_len).collect();
             let fitted = era1::fitted_window(&lens);
-            tracing::info!(
+            observability::info!(
                 epoch,
                 file = %file.name,
                 blocks = jobs.len(),
@@ -326,7 +326,7 @@ async fn read_file(
         .filter(|(block, _)| !have.contains(block))
         .collect();
     if !pending.is_empty() {
-        tracing::info!(epoch, blocks = pending.len(), window, "reading headers");
+        observability::info!(epoch, blocks = pending.len(), window, "reading headers");
         let rest = fetch_headers(http, &url, file_len, &pending, window, inflight).await?;
         headers.extend(rest.into_iter().map(|header| header.located));
     }

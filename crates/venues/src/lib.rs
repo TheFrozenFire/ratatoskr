@@ -25,7 +25,6 @@ mod ingest;
 mod lens;
 mod lists;
 mod logs;
-mod metrics;
 mod rpc;
 mod seeds;
 mod state;
@@ -45,7 +44,6 @@ pub use fit_select::{logistic_outs, poke_choose, poke_formula, select_fit};
 pub use history::BloomScan;
 pub use hooks::install_catalog_hooks;
 pub use logs::Walk;
-pub use metrics::{prometheus_text, publish_summary, status_json};
 pub use rpc::{default_call_rpcs, Rpc, RpcLog};
 pub use seeds::{custodial_wrap, root_address};
 pub use state::{
@@ -75,13 +73,15 @@ fn work_pause() -> &'static WorkPause {
 /// Stop claiming work on every stage. Peer sessions stay connected.
 pub fn pause_work() {
     let _ = work_pause().tx.send(true);
-    tracing::info!("work paused");
+    observability::note_paused(true);
+    observability::info!("work paused");
 }
 
 /// Let every stage claim again. Peer sessions were not dropped.
 pub fn resume_work() {
     let _ = work_pause().tx.send(false);
-    tracing::info!("work resumed");
+    observability::note_paused(false);
+    observability::info!("work resumed");
 }
 
 pub fn work_paused() -> bool {
@@ -199,7 +199,7 @@ where
             Ok(calls) => Some(calls),
             Err(err) => {
                 let message = format!("seeds: {err:#}");
-                tracing::error!(%message);
+                observability::error!(%message);
                 report.list_errors.push(message);
                 None
             }
@@ -212,7 +212,7 @@ where
             Ok(plan) => Some(plan),
             Err(err) => {
                 let message = format!("seeds: {err:#}");
-                tracing::error!(%message);
+                observability::error!(%message);
                 report.list_errors.push(message);
                 None
             }
@@ -230,10 +230,10 @@ where
                     continue;
                 }
                 match lists::walk(calls, store, job, &stop).await {
-                    Ok(wrote) => tracing::info!(job = %job.name, wrote, "list finished"),
+                    Ok(wrote) => observability::info!(job = %job.name, wrote, "list finished"),
                     Err(err) => {
                         let message = format!("{}: {err}", job.name);
-                        tracing::error!(%message, "list failed");
+                        observability::error!(%message, "list failed");
                         report.list_errors.push(message);
                     }
                 }
@@ -247,12 +247,12 @@ where
         match import::import_corpus(store).await {
             Ok(wrote) => {
                 let note = format!("corpus wrote {wrote}");
-                tracing::info!(%note);
+                observability::info!(%note);
                 report.notes.push(note);
             }
             Err(err) => {
                 let message = format!("corpus: {err}");
-                tracing::error!(%message);
+                observability::error!(%message);
                 report.list_errors.push(message);
             }
         }
@@ -276,7 +276,7 @@ where
                 Ok(notes) => report.notes.extend(notes),
                 Err(err) => {
                     let note = format!("history: {err:#}");
-                    tracing::error!(%note);
+                    observability::error!(%note);
                     report.notes.push(note);
                 }
             }
@@ -292,7 +292,7 @@ where
                 Ok(rpc) => Some(rpc),
                 Err(err) => {
                     let message = format!("tokens: {err:#}");
-                    tracing::error!(%message);
+                    observability::error!(%message);
                     report.list_errors.push(message);
                     None
                 }
@@ -302,12 +302,12 @@ where
             match tokens::walk(&rpc, store, &stop).await {
                 Ok(wrote) => {
                     let note = format!("tokens wrote {wrote}");
-                    tracing::info!(%note);
+                    observability::info!(%note);
                     report.notes.push(note);
                 }
                 Err(err) => {
                     let message = format!("tokens: {err:#}");
-                    tracing::error!(%message);
+                    observability::error!(%message);
                     report.list_errors.push(message);
                 }
             }

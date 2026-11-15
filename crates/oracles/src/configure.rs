@@ -13,7 +13,7 @@ use venues::Rpc;
 
 pub fn configure(feeds: &store::service::Feeds, rpc: &Rpc) -> eyre::Result<()> {
     let proxies = feeds.proxies()?;
-    tracing::info!(feeds = proxies.len(), "feed configuration");
+    observability::info!(feeds = proxies.len(), "feed configuration");
     for chunk in proxies.chunks(FEEDS_PER_CALL) {
         let owned: Vec<(Address, [u8; 4])> = chunk.iter().copied().flat_map(proxy_calls).collect();
         let calls: Vec<(Address, &[u8])> = owned
@@ -34,7 +34,7 @@ pub fn configure(feeds: &store::service::Feeds, rpc: &Rpc) -> eyre::Result<()> {
         let bounds = match bound_answers(rpc, &ready) {
             Ok(bounds) => bounds,
             Err(err) => {
-                tracing::warn!(%err, "bounds batch");
+                observability::warn!(%err, "bounds batch");
                 vec![(None, None); ready.len()]
             }
         };

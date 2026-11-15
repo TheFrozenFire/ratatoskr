@@ -10,10 +10,9 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use alloy_primitives::Bloom;
-use corpus::logs_in_block;
 use eyre::{eyre, WrapErr};
 use ipc::{socket_path, HistoryPeer};
-use model::BlockRecord;
+use model::{logs_in_block, BlockRecord};
 
 use crate::catalog::{Put, ReceiptBody};
 use crate::decode::rows_from_log;
@@ -100,7 +99,7 @@ async fn load_and_scan<S: ChainStore + DiscoveryStore>(
         let scan = store.hit_scan(&job.name).await?.unwrap_or(at).max(at);
         let hits = store.hits_from(&job.name, at, scan).await?;
         let after = store.cursor(&format!("{}:after", job.name)).await?;
-        tracing::info!(
+        observability::info!(
             job = %job.name,
             at,
             scan,
@@ -129,7 +128,7 @@ async fn load_and_scan<S: ChainStore + DiscoveryStore>(
         .min()
         .unwrap_or(end)
         .min(end);
-    tracing::info!(start, end, "scanning stored header blooms");
+    observability::info!(start, end, "scanning stored header blooms");
     let started = Instant::now();
     let mut scanned = 0_u64;
     let mut seen = 0_u64;
@@ -163,13 +162,13 @@ async fn load_and_scan<S: ChainStore + DiscoveryStore>(
         seen += window;
         flush_hits(store, &mut pending, to).await?;
         if to - at == SCAN_FLUSH {
-            tracing::info!(block = to.saturating_sub(1), scanned, "bloom scan");
+            observability::info!(block = to.saturating_sub(1), scanned, "bloom scan");
         }
         at = to;
     }
     flush_hits(store, &mut pending, end).await?;
     let secs = started.elapsed().as_secs_f32().max(0.001);
-    tracing::info!(
+    observability::info!(
         scanned = seen,
         secs,
         rate = (seen as f32 / secs) as u64,
@@ -177,7 +176,7 @@ async fn load_and_scan<S: ChainStore + DiscoveryStore>(
     );
     for job in &mut pending {
         job.hits.retain(|block| *block < end);
-        tracing::info!(
+        observability::info!(
             job = %job.job.name,
             at = job.at,
             scan = job.scan,
@@ -233,19 +232,19 @@ where
             break;
         }
         if job.at >= end {
-            tracing::info!(job = %job.job.name, at = job.at, end, "history caught up");
+            observability::info!(job = %job.job.name, at = job.at, end, "history caught up");
             continue;
         }
         match fetch_job(store, peer, &mut era, &job, end, stop).await {
-            Ok(Walk::Done) => tracing::info!(job = %job.job.name, "history finished"),
+            Ok(Walk::Done) => observability::info!(job = %job.job.name, "history finished"),
             Ok(Walk::Stopped { at, reason }) => {
                 let note = format!("{} stopped at {at}: {reason}", job.job.name);
-                tracing::warn!(%note);
+                observability::warn!(%note);
                 notes.push(note);
             }
             Err(err) => {
                 let note = format!("{}: {err:#}", job.job.name);
-                tracing::error!(%note);
+                observability::error!(%note);
                 notes.push(note);
             }
         }
@@ -274,7 +273,7 @@ async fn flush_hits<S: DiscoveryStore>(
         job.fresh = kept;
         store.commit_hits(&job.job.name, to, &write).await?;
         job.scan = to;
-        tracing::info!(
+        observability::info!(
             job = %job.job.name,
             scanned_to = to,
             hits = write.len(),
@@ -369,7 +368,7 @@ where
                     logs.extend(found);
                 }
                 Err(err) => {
-                    tracing::warn!(block, error = %err, "cached era body rejected");
+                    observability::warn!(block, error = %err, "cached era body rejected");
                     missing.push(block);
                 }
             }
@@ -403,7 +402,7 @@ where
             .commit_chunk(&job.job.name, next, &rows, Put::Merge)
             .await?;
         let secs = started.elapsed().as_secs_f32().max(0.001);
-        tracing::info!(
+        observability::info!(
             job = %job.job.name,
             from = done_through,
             to = next - 1,
@@ -517,7 +516,7 @@ where
             rows.clear();
             since_commit = 0;
             let secs = started.elapsed().as_secs_f32().max(0.001);
-            tracing::info!(
+            observability::info!(
                 job = %job.job.name,
                 at = cursor,
                 fetched,
@@ -539,7 +538,7 @@ where
         }
     }
     commit_rows(store, &job.job.name, end, &rows).await?;
-    tracing::info!(job = %job.job.name, at = end, fetched, cached = from_cache, "history caught up");
+    observability::info!(job = %job.job.name, at = end, fetched, cached = from_cache, "history caught up");
     Ok(Walk::Done)
 }
 
@@ -818,7 +817,7 @@ mod tests {
     }
 
     fn zstd_block(number: u64) -> BlockRecord {
-        let raw = corpus::encode_receipt_bundle(&[]);
+        let raw = model::encode_receipt_bundle(&[]);
         let receipts_zstd = zstd::stream::encode_all(raw.as_slice(), 0).unwrap();
         BlockRecord {
             number,

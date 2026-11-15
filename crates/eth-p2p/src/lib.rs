@@ -7,7 +7,6 @@ mod discover;
 mod fetch;
 mod session;
 
-pub use corpus::logs_in_block;
 pub use discover::{
     census_mainnet_dns, dns_candidates, find_mainnet_peers, DnsPeer, DNS_ALL, DNS_SNAP,
 };

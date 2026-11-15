@@ -4,7 +4,6 @@
 //! [`store_model`] records. Ranking a summary does not open the file.
 
 use reth_network_peers::{NodeRecord, PeerId};
-use std::path::PathBuf;
 pub use store::service::Peers as Catalog;
 pub use store_model::{
     PublishedPeer, Sighting, Summary, DIAL_FAILED, DROPPED, EMPTY, SAW_STATUS, SERVED, TOO_MANY,
@@ -38,10 +37,6 @@ pub fn dial_rank(summary: Option<&Summary>, wanted: u64) -> u8 {
         return 2;
     }
     4
-}
-
-pub fn default_path() -> PathBuf {
-    Catalog::default_path()
 }
 
 pub fn node_from_summary(id: PeerId, summary: &Summary) -> NodeRecord {

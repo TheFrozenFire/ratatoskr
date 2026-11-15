@@ -3,11 +3,11 @@
 //! The zstd payload is a little-endian receipt count, then for each receipt a
 //! little-endian length and the EIP-2718 encoding, bloom included.
 
+use crate::{BlockRecord, NormalizedLog};
 use alloy_consensus::{ReceiptWithBloom, TxReceipt};
 use alloy_eips::eip2718::{Decodable2718, Encodable2718};
 use alloy_primitives::{Bytes, B256};
 use eyre::eyre;
-use model::{BlockRecord, NormalizedLog};
 use reth_ethereum_primitives::Receipt;
 
 pub fn encode_receipt_bundle(receipts: &[Receipt]) -> Vec<u8> {

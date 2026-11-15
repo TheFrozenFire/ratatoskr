@@ -68,9 +68,9 @@ pub(crate) async fn walk<S: TokenStore>(
     store: &S,
     stop: &tokio::sync::watch::Receiver<bool>,
 ) -> eyre::Result<u64> {
-    ipc::note_token_reading(true);
+    observability::note_token_reading(true);
     let result = read_missing(rpc, store, stop).await;
-    ipc::note_token_reading(false);
+    observability::note_token_reading(false);
     result
 }
 
@@ -86,7 +86,7 @@ async fn read_missing<S: TokenStore>(
             return Ok(wrote);
         }
         let missing = store.missing_tokens(SCAN).await?;
-        ipc::note_token_lens(missing.len() as u64, missing.len() == SCAN);
+        observability::note_token_lens(missing.len() as u64, missing.len() == SCAN);
         if missing.is_empty() {
             break;
         }
@@ -135,18 +135,18 @@ async fn fill<S: TokenStore>(
                     let n = rows.len() as u64;
                     store.put_tokens(&rows).await?;
                     wrote += n;
-                    tracing::info!(at, count, rows = n, "token lens");
+                    observability::info!(at, count, rows = n, "token lens");
                     at += count;
                     break;
                 }
                 Err(Fetch::Shrink(reason)) if count > 1 => {
                     let smaller = (count / 2).max(1);
-                    tracing::warn!(at, count, smaller, %reason, "token lens shrink");
+                    observability::warn!(at, count, smaller, %reason, "token lens shrink");
                     count = smaller;
                 }
                 Err(Fetch::Shrink(reason)) => {
                     let token = tokens[at];
-                    tracing::warn!(%token, %reason, "token lens direct");
+                    observability::warn!(%token, %reason, "token lens direct");
                     let rpc_one = rpc.clone();
                     let row = tokio::task::spawn_blocking(move || read_one(&rpc_one, token))
                         .await

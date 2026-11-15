@@ -59,7 +59,7 @@ impl Peers {
         let append = record::history_changes(previous.as_ref(), &sighting);
         self.summaries.insert(sighting.id, summary.clone());
         if let Err(err) = self.persist(&sighting, &summary, append) {
-            tracing::warn!(%err, "peer sighting was not stored");
+            observability::warn!(%err, "peer sighting was not stored");
         }
     }
 

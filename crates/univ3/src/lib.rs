@@ -5,9 +5,8 @@
 //! is [`store::service::Pools`].
 
 use alloy_primitives::{address, Address};
-use corpus::logs_in_block;
 use discover::univ3_pool;
-use model::decode_block_record;
+use model::{decode_block_record, logs_in_block};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use store::service::{Corpus, Pools};
@@ -69,7 +68,7 @@ impl PoolScan {
                 });
             }
             if blocks.is_multiple_of(10_000) {
-                tracing::info!(blocks, pools = found.len(), "scanning");
+                observability::info!(blocks, pools = found.len(), "scanning");
             }
             Ok(())
         })?;

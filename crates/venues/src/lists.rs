@@ -132,7 +132,7 @@ pub async fn walk<S: DiscoveryStore>(
             .map_err(|err| eyre!("list length: {err}"))??;
         if at >= end {
             store.commit_chunk(&job.name, at, &[], job.put).await?;
-            tracing::info!(job = %job.name, at, end, "list done");
+            observability::info!(job = %job.name, at, end, "list done");
             return Ok(wrote);
         }
         let mut count = (end - at).min(job.batch).max(1);
@@ -152,13 +152,13 @@ pub async fn walk<S: DiscoveryStore>(
                     let next = at + count;
                     let n = store.commit_chunk(&job.name, next, &rows, job.put).await?;
                     wrote += n;
-                    tracing::info!(job = %job.name, at, next, end, rows = rows.len(), "lens");
+                    observability::info!(job = %job.name, at, next, end, rows = rows.len(), "lens");
                     at = next;
                     break;
                 }
                 Err(Fetch::Shrink(reason)) if count > 1 => {
                     let smaller = (count / 2).max(1);
-                    tracing::warn!(job = %job.name, at, count, smaller, %reason, "lens shrink");
+                    observability::warn!(job = %job.name, at, count, smaller, %reason, "lens shrink");
                     count = smaller;
                 }
                 Err(Fetch::Shrink(reason)) => {

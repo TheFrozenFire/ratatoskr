@@ -110,7 +110,7 @@ fn one<S: Source>(
     };
     let search_ms = search_started.elapsed().as_millis();
     stats.search_ms += search_ms;
-    let build = tracing::info_span!("build", scenario = %scenario.name);
+    let build = observability::info_span!("build", scenario = %scenario.name);
     let _build = build.enter();
     let build_started = Instant::now();
     let gas_started = Instant::now();
@@ -140,7 +140,7 @@ fn one<S: Source>(
     let problem_started = Instant::now();
     let mut name_cost = NameCost::default();
     let problem = {
-        let _span = tracing::info_span!("problem").entered();
+        let _span = observability::info_span!("problem").entered();
         match trade::problem(
             &scenario.trade,
             &scenario.hubs,
@@ -170,7 +170,7 @@ fn one<S: Source>(
     let gas_scan_us = gas_us.saturating_sub(gas_cost.us);
     let problem_other_us = problem_us.saturating_sub(name_cost.us);
     drop(_build);
-    tracing::info!(
+    observability::info!(
         target: "survey::measure",
         gas_us,
         gas_scan_us,
@@ -745,7 +745,7 @@ fn book_gas<S: Source>(
     cost: &mut NameCost,
     meta: &mut GasMeta,
 ) -> Result<BTreeMap<Action, BigInt>, trade::TradeError> {
-    let _span = tracing::info_span!("book_gas").entered();
+    let _span = observability::info_span!("book_gas").entered();
     let mut gas = BTreeMap::new();
     let mut kinds = BTreeMap::<u8, u64>::new();
     for edge in &set.edges {
@@ -794,7 +794,7 @@ fn trace_shape<S: Source>(
     scenario: &crate::scenario::Scenario,
     set: &RouteSet,
 ) {
-    let _span = tracing::info_span!("shape").entered();
+    let _span = observability::info_span!("shape").entered();
     let mut by_len = BTreeMap::<usize, usize>::new();
     let mut wrap_edges = 0_usize;
     let mut direct_unwrap = false;
@@ -916,7 +916,7 @@ fn trace_shape<S: Source>(
         }
     }
     let (stored_segments, stored_first) = stored_direct(reader, scenario);
-    tracing::info!(
+    observability::info!(
         target: "survey::measure",
         hubs = scenario.hubs.len(),
         routes = set.routes.len(),

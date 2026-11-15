@@ -6,15 +6,14 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+observability.workspace = true
 alloy-primitives.workspace = true
 eyre.workspace = true
-ipc.workspace = true
 store.workspace = true
 store-model.workspace = true
 num-bigint = "0.4"
 routing.workspace = true
 tokio = { workspace = true, features = ["sync"] }
-tracing.workspace = true
 
 [dev-dependencies]
 alloy-primitives.workspace = true

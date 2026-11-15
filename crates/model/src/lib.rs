@@ -3,6 +3,9 @@
 use alloy_primitives::{Address, Bytes, B256};
 use serde::Serialize;
 
+mod receipts;
+
+pub use receipts::{decode_receipt_bundle, encode_receipt_bundle, flatten_logs, logs_in_block};
 pub use store_model::{
     decode_block_record, decode_block_records, decode_header_record, decode_header_records,
     encode_block_record, encode_header_record, encode_header_records, BlockRecord, HeaderRecord,

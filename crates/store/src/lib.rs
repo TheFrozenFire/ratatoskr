@@ -108,7 +108,7 @@ impl LocalStore {
     }
 
     /// Page caches for the files this store has open.
-    pub fn cache_readings(&self) -> Vec<ipc::db::CacheReading> {
+    pub fn cache_readings(&self) -> Vec<observability::cache::CacheReading> {
         let mut out = Vec::new();
         if let Some(chain) = &self.chain {
             out.push(chain.cache_reading());

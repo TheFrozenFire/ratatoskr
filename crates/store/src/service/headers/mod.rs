@@ -29,7 +29,7 @@ impl HeaderChain {
     }
 
     /// Page cache configured for this file, and the counters redb has accumulated.
-    pub fn cache_reading(&self) -> ipc::db::CacheReading {
+    pub fn cache_reading(&self) -> observability::cache::CacheReading {
         self.db.reading()
     }
 

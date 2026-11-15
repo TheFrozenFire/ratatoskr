@@ -291,7 +291,7 @@ pub fn export_curve_fit(catalog: &Catalog, out: &Path) -> eyre::Result<FitReport
             }
             file.flush()?;
             file.sync_all()?;
-            tracing::info!(
+            observability::info!(
                 kind = kind_name(kind),
                 wrote = page.len(),
                 ms = started.elapsed().as_millis() as u64,
@@ -2682,7 +2682,7 @@ pub fn refit_curves(catalog: &Catalog) -> eyre::Result<u64> {
             let n = curves.len() as u64;
             catalog.put_curves(&curves)?;
             wrote += n;
-            tracing::info!(
+            observability::info!(
                 kind = kind_name(kind),
                 wrote = n,
                 ms = started.elapsed().as_millis() as u64,

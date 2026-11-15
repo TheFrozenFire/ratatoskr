@@ -6,16 +6,15 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+observability.workspace = true
 alloy-primitives.workspace = true
 eyre.workspace = true
-ipc.workspace = true
 store.workspace = true
 store-model.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "native-tls"] }
 serde_json.workspace = true
 thiserror = "2"
 tokio.workspace = true
-tracing.workspace = true
 venues.workspace = true
 
 [dev-dependencies]

@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+observability.workspace = true
 alloy-consensus.workspace = true
 alloy-primitives.workspace = true
 alloy-rlp = "0.3"
@@ -19,4 +20,3 @@ serde.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["native-tls", "native-tls-alpn", "http2"] }
 snap = "1"
 tokio.workspace = true
-tracing.workspace = true

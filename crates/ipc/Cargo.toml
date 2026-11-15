@@ -8,6 +8,5 @@ publish.workspace = true
 [dependencies]
 eyre.workspace = true
 model.workspace = true
-redb.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

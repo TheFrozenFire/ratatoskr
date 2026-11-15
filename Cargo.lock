@@ -1333,19 +1333,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f8f80099a98041a3d1622845c271458a2d73e688351bf3cb999266764b81d48"
 
 [[package]]
-name = "corpus"
-version = "0.1.0"
-dependencies = [
- "alloy-consensus",
- "alloy-eips",
- "alloy-primitives",
- "eyre",
- "model",
- "reth-ethereum-primitives",
- "zstd",
-]
-
-[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1757,15 +1744,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "directory"
-version = "0.1.0"
-dependencies = [
- "reth-network-peers",
- "store",
- "store-model",
-]
-
-[[package]]
 name = "discover"
 version = "0.1.0"
 dependencies = [
@@ -1964,11 +1942,11 @@ dependencies = [
  "filter",
  "futures",
  "model",
+ "observability",
  "reqwest 0.12.28",
  "serde",
  "snap",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -1987,10 +1965,10 @@ version = "0.1.0"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
- "corpus",
  "eyre",
  "futures",
  "model",
+ "observability",
  "rand 0.8.8",
  "reth-chainspec",
  "reth-discv4",
@@ -2004,7 +1982,6 @@ dependencies = [
  "reth-network-peers",
  "secp256k1 0.30.0",
  "tokio",
- "tracing",
  "zstd",
 ]
 
@@ -2884,7 +2861,6 @@ version = "0.1.0"
 dependencies = [
  "eyre",
  "model",
- "redb",
  "serde_json",
  "tokio",
 ]
@@ -3290,9 +3266,14 @@ dependencies = [
 name = "model"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
  "alloy-primitives",
+ "eyre",
+ "reth-ethereum-primitives",
  "serde",
  "store-model",
+ "zstd",
 ]
 
 [[package]]
@@ -3478,6 +3459,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "observability"
+version = "0.1.0"
+dependencies = [
+ "redb",
+ "serde_json",
+ "store-model",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3565,14 +3557,13 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "eyre",
- "ipc",
+ "observability",
  "reqwest 0.12.28",
  "serde_json",
  "store",
  "store-model",
  "thiserror",
  "tokio",
- "tracing",
  "venues",
 ]
 
@@ -3638,19 +3629,20 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 name = "peer"
 version = "0.1.0"
 dependencies = [
- "directory",
  "discover",
  "eth-p2p",
  "eyre",
  "ipc",
  "model",
+ "observability",
  "rand 0.8.8",
  "reth-network-peers",
  "secp256k1 0.30.0",
  "serde",
  "serde_json",
+ "store",
+ "store-model",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -3757,9 +3749,9 @@ dependencies = [
  "eyre",
  "ipc",
  "model",
+ "observability",
  "store",
  "tokio",
- "tracing",
  "venues",
 ]
 
@@ -4130,12 +4122,11 @@ version = "0.1.0"
 dependencies = [
  "chain",
  "clap",
- "corpus",
  "crossterm",
- "directory",
  "eth-p2p",
  "eyre",
  "ipc",
+ "observability",
  "oracles",
  "peer",
  "pipeline",
@@ -4144,8 +4135,6 @@ dependencies = [
  "spots",
  "store",
  "tokio",
- "tracing",
- "tracing-subscriber",
  "venues",
 ]
 
@@ -5289,9 +5278,8 @@ name = "simulate-bin"
 version = "0.1.0"
 dependencies = [
  "eyre",
+ "observability",
  "survey",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -5347,13 +5335,12 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "eyre",
- "ipc",
  "num-bigint",
+ "observability",
  "routing",
  "store",
  "store-model",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -5387,9 +5374,9 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "eyre",
- "ipc",
  "model",
  "num-bigint",
+ "observability",
  "oracles",
  "redb",
  "reth-network-peers",
@@ -5397,7 +5384,6 @@ dependencies = [
  "store-model",
  "thiserror",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -5453,12 +5439,12 @@ dependencies = [
  "eyre",
  "num-bigint",
  "num-traits",
+ "observability",
  "optimizer",
  "routing",
  "searcher",
  "simulate",
  "store",
- "tracing",
  "trade",
  "venues",
 ]
@@ -5991,13 +5977,12 @@ name = "univ3"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
- "corpus",
  "discover",
  "eyre",
  "model",
+ "observability",
  "store",
  "store-model",
- "tracing",
 ]
 
 [[package]]
@@ -6078,7 +6063,6 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "bigdecimal",
- "corpus",
  "criterion",
  "discover",
  "era",
@@ -6090,13 +6074,13 @@ dependencies = [
  "num-integer",
  "num-rational",
  "num-traits",
+ "observability",
  "reqwest 0.12.28",
  "routing",
  "serde_json",
  "store",
  "store-model",
  "tokio",
- "tracing",
  "zstd",
 ]
 

@@ -131,7 +131,7 @@ impl Catalog {
             self.finish_conduits(&done, &again, &failed)?;
             built += done.len() as u64;
             if built.is_multiple_of(256) {
-                tracing::info!(built, "conduit drain");
+                observability::info!(built, "conduit drain");
             }
         }
     }

@@ -6,9 +6,9 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+observability.workspace = true
 alloy-primitives.workspace = true
 eyre.workspace = true
-ipc.workspace = true
 model.workspace = true
 num-bigint = "0.4"
 redb.workspace = true
@@ -17,7 +17,6 @@ routing.workspace = true
 store-model.workspace = true
 thiserror = "2"
 tokio.workspace = true
-tracing.workspace = true
 
 [dev-dependencies]
 oracles.workspace = true

@@ -7,11 +7,10 @@ members = [
     "crates/eth-p2p",
     "crates/era",
     "crates/chain",
-    "crates/corpus",
     "crates/store-model",
     "crates/store",
     "crates/pipeline",
-    "crates/directory",
+    "crates/observability",
     "crates/ipc",
     "crates/univ3",
     "crates/venues",
@@ -46,12 +45,11 @@ redb = { version = "4.6.0", features = ["cache_metrics"] }
 futures = "0.3"
 rand = "0.8"
 chain = { path = "crates/chain" }
-corpus = { path = "crates/corpus" }
 store-model = { path = "crates/store-model" }
 store = { path = "crates/store" }
 pipeline = { path = "crates/pipeline" }
-directory = { path = "crates/directory" }
 discover = { path = "crates/discover" }
+observability = { path = "crates/observability" }
 era = { path = "crates/era" }
 eth-p2p = { path = "crates/eth-p2p" }
 filter = { path = "crates/filter" }

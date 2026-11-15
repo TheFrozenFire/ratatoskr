@@ -10,11 +10,10 @@ name = "ratatoskr"
 path = "src/main.rs"
 
 [dependencies]
+observability.workspace = true
 chain.workspace = true
 clap.workspace = true
 crossterm = "0.28"
-corpus.workspace = true
-directory.workspace = true
 eth-p2p.workspace = true
 eyre.workspace = true
 ipc.workspace = true
@@ -24,8 +23,6 @@ ratatui = "0.29"
 serde_json.workspace = true
 store.workspace = true
 tokio = { workspace = true, features = ["signal"] }
-tracing.workspace = true
-tracing-subscriber.workspace = true
 venues.workspace = true
 oracles.workspace = true
 spots.workspace = true

@@ -56,7 +56,7 @@ pub fn sample_identities(src: &Path, dest: &Path, target: u64) -> eyre::Result<S
         }
         let count = counts.get(&kind).copied().unwrap_or(0);
         let step = (count / want).max(1);
-        tracing::info!(kind = kind_name(kind), count, want, step, "sampling kind");
+        observability::info!(kind = kind_name(kind), count, want, step, "sampling kind");
         let start_key = entity_key(kind, &B256::ZERO);
         let mut end_key = [0u8; 33];
         let end = if kind == u8::MAX {
@@ -169,7 +169,7 @@ pub fn fill_identities(src: &Path, dest: &Path, add: u64) -> eyre::Result<FillRe
         }
         let count = remaining.get(&kind).copied().unwrap_or(0);
         let step = (count / want).max(1);
-        tracing::info!(kind = kind_name(kind), count, want, step, "filling kind");
+        observability::info!(kind = kind_name(kind), count, want, step, "filling kind");
         let start_key = entity_key(kind, &B256::ZERO);
         let mut end_key = [0u8; 33];
         let end = if kind == u8::MAX {

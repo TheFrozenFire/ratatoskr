@@ -4,6 +4,7 @@ use crate::discover::find_mainnet_peers;
 use alloy_primitives::{B256, U256};
 use eyre::{eyre, WrapErr};
 use futures::{SinkExt, StreamExt};
+use observability::{info, warn};
 use reth_chainspec::MAINNET;
 use reth_ecies::stream::ECIESStream;
 use reth_eth_wire::{
@@ -30,7 +31,6 @@ use tokio::{
     sync::{mpsc, oneshot},
     time::timeout,
 };
-use tracing::{info, warn};
 
 /// Source addresses for outbound RLPx. The matching family is bound before connect.
 ///

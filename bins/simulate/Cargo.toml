@@ -10,7 +10,6 @@ name = "simulate"
 path = "src/main.rs"
 
 [dependencies]
+observability.workspace = true
 eyre.workspace = true
 survey.workspace = true
-tracing.workspace = true
-tracing-subscriber.workspace = true

@@ -108,7 +108,7 @@ impl Sink for Fanout {
             }
             for tx in &self.tees {
                 if let Err(err) = tx.try_send(batch.clone()) {
-                    tracing::warn!(%err, "tee dropped");
+                    observability::warn!(%err, "tee dropped");
                 }
             }
             Ok(SinkReply::Applied)

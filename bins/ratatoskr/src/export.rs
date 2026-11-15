@@ -15,7 +15,7 @@ pub fn serve(addr: &str) -> eyre::Result<()> {
         .name("metrics".into())
         .spawn(move || listen(listener))
         .map_err(|err| eyre::eyre!("metrics thread: {err}"))?;
-    tracing::info!(%addr, "metrics exporter");
+    observability::info!(%addr, "metrics exporter");
     Ok(())
 }
 
@@ -82,14 +82,17 @@ fn respond(method: &str, path: &str) -> (&'static str, String) {
     match (method, path) {
         ("POST", "/pause") => {
             venues::pause_work();
-            ("application/json", venues::status_json())
+            ("application/json", observability::status_json())
         }
         ("POST", "/resume") => {
             venues::resume_work();
-            ("application/json", venues::status_json())
+            ("application/json", observability::status_json())
         }
-        (_, "/metrics") => ("text/plain; version=0.0.4", venues::prometheus_text()),
-        _ => ("application/json", venues::status_json()),
+        (_, "/metrics") => (
+            "text/plain; version=0.0.4",
+            observability::prometheus_text(),
+        ),
+        _ => ("application/json", observability::status_json()),
     }
 }
 

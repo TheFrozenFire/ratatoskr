@@ -2,6 +2,7 @@
 
 use eyre::WrapErr;
 use ipc::{max_head, serving, HistoryPeer};
+use observability::{info, warn};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -9,7 +10,6 @@ use store::ChainStore;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio::time::sleep;
-use tracing::{info, warn};
 
 use crate::{RecordBatch, Sink, SinkReply, Source};
 
@@ -89,7 +89,7 @@ where
                     }
                 }
             }
-            ipc::note_headers(next, head);
+            observability::note_headers(next, head);
             let tip = head.saturating_sub(TIP_LAG);
             if next > tip {
                 info!(target: "headers", next, head, "caught up");
@@ -221,6 +221,7 @@ mod tests {
     use ipc::{HistoryPeer, SessionInfo};
     use model::{BlockRecord, HeaderRecord, MAINNET_GENESIS_HASH};
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
     use store::{ChainStore, LocalStore};
@@ -230,13 +231,15 @@ mod tests {
 
     impl TempDir {
         fn new() -> Self {
+            static SEQ: AtomicU64 = AtomicU64::new(0);
             let path = std::env::temp_dir().join(format!(
-                "ratatoskr-header-source-{}-{}",
+                "ratatoskr-header-source-{}-{}-{}",
                 std::process::id(),
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
-                    .as_nanos()
+                    .as_nanos(),
+                SEQ.fetch_add(1, Ordering::Relaxed)
             ));
             std::fs::create_dir_all(&path).unwrap();
             Self(path)

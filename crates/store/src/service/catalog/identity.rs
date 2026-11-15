@@ -195,7 +195,7 @@ pub(super) fn count_identities(db: &Database) -> eyre::Result<BTreeMap<u8, u64>>
     let mut counts = BTreeMap::new();
     for (seen, item) in table.iter()?.enumerate() {
         if seen.is_multiple_of(100_000) {
-            tracing::info!(seen, "counting identities");
+            observability::info!(seen, "counting identities");
         }
         let (key, _) = item?;
         let key = key.value();
@@ -204,6 +204,6 @@ pub(super) fn count_identities(db: &Database) -> eyre::Result<BTreeMap<u8, u64>>
         }
         *counts.entry(key[0]).or_default() += 1;
     }
-    tracing::info!(rows = counts.values().sum::<u64>(), "counted identities");
+    observability::info!(rows = counts.values().sum::<u64>(), "counted identities");
     Ok(counts)
 }

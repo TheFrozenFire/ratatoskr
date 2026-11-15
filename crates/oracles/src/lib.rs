@@ -56,7 +56,7 @@ fn pass(
         .wrap_err("feed directory")?;
     let rows = parse_directory(&body)?;
     let listing = feeds.apply_directory(&rows)?;
-    tracing::info!(
+    observability::info!(
         generation = listing.generation,
         named = listing.named,
         "feeds"
@@ -70,7 +70,7 @@ fn pass(
     configure::configure(feeds, &rpc)?;
     let _ = feeds.remember_answers();
     if let Ok(gauges) = feeds.gauges() {
-        ipc::note_feeds(
+        observability::note_feeds(
             gauges.feeds,
             gauges.configured,
             gauges.answers,
@@ -85,8 +85,8 @@ fn pass(
     loop {
         let stopped = || *stop.borrow();
         match follow::catch_up(feeds, &rpc, &stopped) {
-            Ok(written) => tracing::info!(written, "answers"),
-            Err(err) => tracing::error!(%err, "answer follow"),
+            Ok(written) => observability::info!(written, "answers"),
+            Err(err) => observability::error!(%err, "answer follow"),
         }
         if *stop.borrow() {
             return Ok(listing);

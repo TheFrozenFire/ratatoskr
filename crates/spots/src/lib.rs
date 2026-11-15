@@ -408,13 +408,13 @@ where
                 let count = spots.len() as u64;
                 match book.replace(&spots) {
                     Ok(()) => {
-                        ipc::note_spots(count);
-                        tracing::info!(spots = count, "spots");
+                        observability::note_spots(count);
+                        observability::info!(spots = count, "spots");
                     }
-                    Err(err) => tracing::error!(%err, "spots"),
+                    Err(err) => observability::error!(%err, "spots"),
                 }
             }
-            Err(err) => tracing::error!(%err, "spots"),
+            Err(err) => observability::error!(%err, "spots"),
         }
         if *stop.borrow() {
             return Ok(());

@@ -9,6 +9,7 @@
 
 use eyre::WrapErr;
 use futures::StreamExt;
+use observability::info;
 use reth_chainspec::MAINNET;
 use reth_discv4::{Discv4, Discv4Config};
 use reth_dns_discovery::{DnsDiscoveryConfig, DnsDiscoveryService, DnsResolver};
@@ -23,7 +24,6 @@ use std::{
     time::Duration,
 };
 use tokio::time::{sleep, timeout};
-use tracing::info;
 
 const DNS_BUDGET: Duration = Duration::from_secs(75);
 const DISCV4_BUDGET: Duration = Duration::from_secs(12);

@@ -7,8 +7,7 @@ use eyre::eyre;
 use crate::catalog::Put;
 use crate::decode::rows_from_log;
 use crate::{CorpusStore, DiscoveryStore};
-use corpus::logs_in_block;
-use model::decode_block_record;
+use model::{decode_block_record, logs_in_block};
 
 pub async fn import_corpus<S>(store: &S) -> eyre::Result<u64>
 where
@@ -46,7 +45,7 @@ where
                 })
                 .join()
                 .unwrap_or_else(|_| Err(eyre!("corpus commit panicked")))?;
-                tracing::info!(block = number, "corpus");
+                observability::info!(block = number, "corpus");
             }
             Ok(())
         })

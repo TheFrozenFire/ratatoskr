@@ -38,7 +38,7 @@ fn sized(token: Address, sizes: &[i64]) -> Numeraire {
     }
 }
 
-fn of<'a>(spots: &'a [Spot], token: Address, numeraire: Address) -> Option<&'a Spot> {
+fn of(spots: &[Spot], token: Address, numeraire: Address) -> Option<&Spot> {
     spots
         .iter()
         .find(|spot| spot.token == token && spot.numeraire == numeraire)

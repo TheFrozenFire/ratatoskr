@@ -10,9 +10,11 @@ name = "peer"
 path = "src/lib.rs"
 
 [dependencies]
+store-model.workspace = true
+store.workspace = true
+observability.workspace = true
 eyre.workspace = true
 rand.workspace = true
-directory.workspace = true
 discover.workspace = true
 eth-p2p.workspace = true
 ipc.workspace = true
@@ -22,4 +24,3 @@ secp256k1.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
-tracing.workspace = true

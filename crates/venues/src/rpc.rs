@@ -312,7 +312,7 @@ impl Rpc {
             for attempt in 0..5 {
                 match self.post_value(url, body) {
                     Ok((status, _value)) if status == 429 || status == 502 || status == 503 => {
-                        tracing::warn!(
+                        observability::warn!(
                             endpoint = %redact_secret(url),
                             status,
                             attempt,
@@ -332,7 +332,7 @@ impl Rpc {
                     }
                     Err(err) => {
                         let shown = redact_secret(&format!("{err:#}"));
-                        tracing::warn!(
+                        observability::warn!(
                             endpoint = %redact_secret(url),
                             error = %shown,
                             attempt,
@@ -373,7 +373,7 @@ impl Rpc {
             for attempt in 0..5 {
                 match self.post(url, &body) {
                     Ok(response) if response.rotate() => {
-                        tracing::warn!(
+                        observability::warn!(
                             endpoint = %redact_secret(url),
                             status = response.http_status,
                             error = %response.error_message,
@@ -395,7 +395,7 @@ impl Rpc {
                     }
                     Err(err) => {
                         let shown = redact_secret(&format!("{err:#}"));
-                        tracing::warn!(
+                        observability::warn!(
                             endpoint = %redact_secret(url),
                             error = %shown,
                             attempt,

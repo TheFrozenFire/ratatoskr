@@ -159,12 +159,7 @@ struct Owned {
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
     venues::install_catalog_hooks();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| DEFAULT_LOG.into()),
-        )
-        .init();
+    observability::init(DEFAULT_LOG);
     let cli = Cli::parse();
     match cli.command {
         Some(Command::Peer(cmd)) => peer_cmd::run(cmd).await,
@@ -337,16 +332,16 @@ async fn supervise(args: Args) -> eyre::Result<()> {
     }
     if let Some(src) = &args.copy_from {
         let report = venues::sample_identities(src, &paths.venues, args.sample_size)?;
-        tracing::info!(
+        observability::info!(
             copied = report.copied,
             anchor = report.anchor,
             "identity sample"
         );
         for (kind, count) in &report.by_kind {
-            tracing::info!(kind = venues::kind_name(*kind), count, "sample kind");
+            observability::info!(kind = venues::kind_name(*kind), count, "sample kind");
         }
         if !report.anchor {
-            tracing::warn!("sample did not include the USDC/WETH 0.3% pool");
+            observability::warn!("sample did not include the USDC/WETH 0.3% pool");
         }
     }
     if args.summarize {
@@ -390,13 +385,13 @@ async fn supervise(args: Args) -> eyre::Result<()> {
     let signal_tx = stop_tx.clone();
     tokio::spawn(async move {
         if let Err(err) = shutdown_signal().await {
-            tracing::error!(%err, "shutdown signal");
+            observability::error!(%err, "shutdown signal");
         }
         let _ = signal_tx.send(true);
     });
     tokio::spawn(async move {
         if let Err(err) = pause_signal().await {
-            tracing::error!(%err, "pause signal");
+            observability::error!(%err, "pause signal");
         }
     });
     let peer_task = prepared.map(|prepared| {
@@ -483,24 +478,24 @@ fn spawn_sampler(store: LocalStore) {
 }
 
 fn sample_store(store: &LocalStore) {
-    ipc::db::publish(store.cache_readings());
+    observability::cache::publish(store.cache_readings());
     let summary_ms = millis(|| match store.state_summary() {
-        Ok(summary) => venues::publish_summary(&summary),
-        Err(err) => tracing::warn!(%err, "catalog summary"),
+        Ok(summary) => observability::publish_summary(&summary),
+        Err(err) => observability::warn!(%err, "catalog summary"),
     });
-    ipc::db::record_probe("summary", summary_ms);
+    observability::cache::record_probe("summary", summary_ms);
     let header_ms = millis(|| {
         if let Ok(cursor) = store.stored_header() {
-            ipc::note_header_cursor(cursor);
+            observability::note_header_cursor(cursor);
         }
     });
-    ipc::db::record_probe("headers", header_ms);
+    observability::cache::record_probe("headers", header_ms);
     let corpus_ms = millis(|| {
         if let Ok((bytes, holes)) = store.corpus_gauge() {
-            ipc::note_corpus(bytes, holes);
+            observability::note_corpus(bytes, holes);
         }
     });
-    ipc::db::record_probe("corpus", corpus_ms);
+    observability::cache::record_probe("corpus", corpus_ms);
     log_sample(summary_ms, header_ms, corpus_ms);
 }
 
@@ -514,19 +509,19 @@ fn log_sample(summary_ms: u64, header_ms: u64, corpus_ms: u64) {
     const SLOW_MS: u64 = 50;
     const MISS_WARN: u64 = 4_096;
     if summary_ms >= SLOW_MS && warn_due("summary") {
-        tracing::warn!(ms = summary_ms, "catalog summary");
+        observability::warn!(ms = summary_ms, "catalog summary");
     }
     if header_ms >= SLOW_MS && warn_due("headers") {
-        tracing::warn!(ms = header_ms, "header cursor read");
+        observability::warn!(ms = header_ms, "header cursor read");
     }
     if corpus_ms >= SLOW_MS && warn_due("corpus") {
-        tracing::warn!(ms = corpus_ms, "corpus gauge read");
+        observability::warn!(ms = corpus_ms, "corpus gauge read");
     }
     let info = info_due();
-    for pace in ipc::db::pace() {
+    for pace in observability::cache::pace() {
         let hot = pace.read_misses_delta >= MISS_WARN || pace.write_misses_delta >= MISS_WARN;
         if hot && warn_due(&pace.name) {
-            tracing::warn!(
+            observability::warn!(
                 db = %pace.name,
                 read_misses = pace.read_misses_delta,
                 write_misses = pace.write_misses_delta,
@@ -537,7 +532,7 @@ fn log_sample(summary_ms: u64, header_ms: u64, corpus_ms: u64) {
             );
         }
         if info {
-            tracing::info!(
+            observability::info!(
                 db = %pace.name,
                 limit = pace.limit,
                 used = pace.used,
@@ -668,7 +663,7 @@ fn spawn_pipelines(
 }
 
 fn note_failure(failed: &mut Option<eyre::Report>, err: eyre::Report) {
-    tracing::error!(%err);
+    observability::error!(%err);
     if failed.is_none() {
         *failed = Some(err);
     }
@@ -698,7 +693,7 @@ async fn wait_for_stop(
                 match joined {
                     Some(Ok(Ok(()))) => {}
                     Some(Ok(Err(err))) => {
-                        tracing::error!(%err, "pipeline");
+                        observability::error!(%err, "pipeline");
                         if failed.is_none() {
                             failed = Some(err);
                         }
@@ -706,7 +701,7 @@ async fn wait_for_stop(
                     }
                     Some(Err(err)) => {
                         let err = eyre::eyre!("pipeline task: {err}");
-                        tracing::error!(%err, "pipeline task");
+                        observability::error!(%err, "pipeline task");
                         if failed.is_none() {
                             failed = Some(err);
                         }
@@ -721,14 +716,14 @@ async fn wait_for_stop(
                     Ok(Ok(())) if *stop_rx.borrow() => {}
                     Ok(Ok(())) => {
                         let err = eyre::eyre!("peer stopped");
-                        tracing::error!(%err, "peer");
+                        observability::error!(%err, "peer");
                         if failed.is_none() {
                             failed = Some(err);
                         }
                         let _ = stop_tx.send(true);
                     }
                     Ok(Err(err)) => {
-                        tracing::error!(%err, "peer");
+                        observability::error!(%err, "peer");
                         if failed.is_none() {
                             failed = Some(err);
                         }
@@ -736,7 +731,7 @@ async fn wait_for_stop(
                     }
                     Err(err) => {
                         let err = eyre::eyre!("peer maintain: {err}");
-                        tracing::error!(%err, "peer task");
+                        observability::error!(%err, "peer task");
                         if failed.is_none() {
                             failed = Some(err);
                         }
@@ -887,7 +882,7 @@ fn open_owned(services: &Services, pipelines: &Pipelines, paths: &Paths) -> eyre
 
 fn default_paths() -> eyre::Result<Paths> {
     Ok(Paths {
-        peers: directory::default_path(),
+        peers: store::service::Peers::default_path(),
         headers: store::service::HeaderChain::default_path(),
         corpus: store::service::Corpus::default_path(),
         venues: store::service::Catalog::default_path(),
@@ -940,7 +935,7 @@ fn resolve_rpcs(given: &[String], state: bool) -> eyre::Result<Vec<String>> {
     let Some(key) = alchemy_key() else {
         return Err(eyre::eyre!("state needs --rpc or ALCHEMY_API_KEY"));
     };
-    tracing::info!("state rpc is the alchemy endpoint");
+    observability::info!("state rpc is the alchemy endpoint");
     Ok(vec![format!("https://eth-mainnet.g.alchemy.com/v2/{key}")])
 }
 

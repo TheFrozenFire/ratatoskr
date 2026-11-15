@@ -60,12 +60,12 @@ impl Database {
 
     /// Publish cache counters until the last strong reference of this handle is dropped.
     pub fn watch(&self) {
-        ipc::db::watch_db(self.label.clone(), self.cache, &self.inner);
+        observability::cache::watch_db(self.label.clone(), self.cache, &self.inner);
     }
 
     /// Page cache configured for this file, and the counters redb has accumulated.
-    pub fn reading(&self) -> ipc::db::CacheReading {
-        ipc::db::reading(&self.label, self.cache, self.inner.cache_stats())
+    pub fn reading(&self) -> observability::cache::CacheReading {
+        observability::cache::reading(&self.label, self.cache, self.inner.cache_stats())
     }
 }
 
@@ -86,13 +86,13 @@ impl ReadDatabase {
         Ok(Self {
             inner,
             cache: cache as u64,
-            label: ipc::db::file_label(path),
+            label: observability::cache::file_label(path),
         })
     }
 
     /// Page cache configured for this file, and the counters redb has accumulated.
-    pub fn reading(&self) -> ipc::db::CacheReading {
-        ipc::db::reading(&self.label, self.cache, self.inner.cache_stats())
+    pub fn reading(&self) -> observability::cache::CacheReading {
+        observability::cache::reading(&self.label, self.cache, self.inner.cache_stats())
     }
 }
 
@@ -130,7 +130,7 @@ impl File {
     }
 
     /// Page cache configured for this file, and the counters redb has accumulated.
-    pub fn reading(&self) -> ipc::db::CacheReading {
+    pub fn reading(&self) -> observability::cache::CacheReading {
         match self {
             Self::Write(db) => db.reading(),
             Self::Read(db) => db.reading(),
@@ -166,7 +166,7 @@ fn open_writer(path: &Path, cache: usize, create: bool) -> eyre::Result<Database
     Ok(Database {
         inner: Arc::new(inner),
         cache: cache as u64,
-        label: ipc::db::file_label(path),
+        label: observability::cache::file_label(path),
     })
 }
 

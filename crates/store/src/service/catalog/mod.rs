@@ -76,7 +76,7 @@ impl Catalog {
     }
 
     /// Page caches for the three catalog files.
-    pub fn cache_readings(&self) -> Vec<ipc::db::CacheReading> {
+    pub fn cache_readings(&self) -> Vec<observability::cache::CacheReading> {
         vec![
             self.discovery.reading(),
             self.entities.reading(),

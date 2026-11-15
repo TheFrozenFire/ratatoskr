@@ -176,7 +176,7 @@ impl EraHttp {
             match self.once(url, range, bucket).await {
                 Ok(bytes) => return Ok(bytes),
                 Err(err) if attempt < 4 && err.retry => {
-                    tracing::warn!(attempt, error = %err.report, "retrying http read");
+                    observability::warn!(attempt, error = %err.report, "retrying http read");
                     sleep(Duration::from_millis(40 * attempt)).await;
                     last = Some(err.report);
                 }
