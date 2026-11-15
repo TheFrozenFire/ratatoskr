@@ -1,4 +1,4 @@
-//! Domain services. Each service owns one file and speaks [`store_model`] records.
+//! Domain services. Each service speaks [`store_model`] records.
 //!
 //! [`Feeds`] stores directory rows, proxy configuration, phases, and answers.
 //! [`Spots`] stores one priced round trip per token and numeraire.
