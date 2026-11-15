@@ -2,6 +2,8 @@
 //!
 //! One row is the pool contract plus the fee and tick spacing from `PoolCreated`.
 
+mod row;
+
 use crate::storage::Database;
 use alloy_primitives::Address;
 use eyre::WrapErr;
@@ -35,26 +37,11 @@ impl Pools {
         {
             let mut pools = write.open_table(POOLS)?;
             for (pool, row) in rows {
-                let encoded = encode_row(row);
+                let encoded = row::encode_row(row);
                 pools.insert(pool.as_slice(), encoded.as_slice())?;
             }
         }
         write.commit()?;
         Ok(())
     }
-}
-
-fn encode_row(row: &PoolRecord) -> Vec<u8> {
-    let mut out = Vec::with_capacity(1 + 20 * 3 + 4 + 4 + 8 + 32 + 8 + 8);
-    out.push(RECORD_VERSION);
-    out.extend_from_slice(row.token0.as_slice());
-    out.extend_from_slice(row.token1.as_slice());
-    out.extend_from_slice(&row.fee.to_le_bytes());
-    out.extend_from_slice(&row.tick_spacing.to_le_bytes());
-    out.extend_from_slice(row.factory.as_slice());
-    out.extend_from_slice(&row.block_number.to_le_bytes());
-    out.extend_from_slice(row.block_hash.as_slice());
-    out.extend_from_slice(&row.tx_index.to_le_bytes());
-    out.extend_from_slice(&row.log_index.to_le_bytes());
-    out
 }
