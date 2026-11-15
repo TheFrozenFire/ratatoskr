@@ -12,11 +12,7 @@ A settlement records fills. It is not a pool the state pipeline fits.
 
 ## Quote inputs
 
-The quote inputs are the configuration, the quoting state, and the tick book at one generation. Fit stores the price curve from local quotes of those inputs. The curve is in the venue catalog before any search reads it.
-
-## Chain quote
-
-A chain quote checks a price curve. Building the price curve does not read the quote record. There is no live stage that fetches chain quotes. [docs/quotes.md](docs/quotes.md) says what a chain quote is.
+The quote inputs are the configuration, the quoting state, and the tick book at one generation. Fit stores the price curve from local quotes of those inputs. The curve is in the venue catalog before any search reads it. [docs/quotes.md](docs/quotes.md) says what a local quote is.
 
 ## Native ETH
 

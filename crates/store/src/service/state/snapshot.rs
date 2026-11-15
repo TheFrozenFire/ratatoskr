@@ -3,9 +3,9 @@
 use alloy_primitives::B256;
 use redb::{Durability, ReadableDatabase, ReadableTable};
 use store_model::{
-    decode_curve_record, decode_dirty, decode_mutable, decode_quote_record, decode_tick_words,
-    encode_mutable, encode_tick_page, entity_key, Dirty, ImmutablePut, ImmutableRow, MutableStored,
-    MutableWrite, PoolState, TickPage, TickWord, CLASS_HEAD,
+    decode_curve_record, decode_dirty, decode_mutable, decode_tick_words, encode_mutable,
+    encode_tick_page, entity_key, Dirty, ImmutablePut, ImmutableRow, MutableStored, MutableWrite,
+    PoolState, TickPage, TickWord, CLASS_HEAD,
 };
 
 use super::super::catalog::Catalog;
@@ -65,8 +65,6 @@ impl Catalog {
     /// Write one mutable snapshot. Tick pages from an older bitmap, or from a
     /// mint, are deleted here. A head refresh with the same bitmap keeps the
     /// pages and stamps the new generation on them. The curve is always dropped.
-    /// Stored chain samples stay. They are validation data for the snapshot
-    /// that produced them, and a later generation does not treat them as current.
     /// The dirty flag is removed only when it does not name a newer block.
     pub fn put_mutable(&self, row: &MutableWrite) -> eyre::Result<MutableStored> {
         let mut write = self.entities.begin_write()?;
@@ -172,10 +170,6 @@ impl Catalog {
             Some(bytes) => Some(decode_curve_record(kind, id, &bytes)?),
             None => None,
         };
-        let quotes = match read_optional(&read, QUOTES, &key)? {
-            Some(bytes) => Some(decode_quote_record(kind, id, &bytes)?),
-            None => None,
-        };
         let dirty = match read_optional(&read, DIRTY, &key)? {
             Some(bytes) => {
                 let (block, class) = decode_dirty(&bytes)?;
@@ -190,7 +184,6 @@ impl Catalog {
             mutable,
             ticks,
             curve,
-            quotes,
             dirty,
         })
     }

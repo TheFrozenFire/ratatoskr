@@ -16,7 +16,6 @@ impl Catalog {
             mutable: count_bytes(&self.entities, MUTABLE)?,
             curves: count_bytes(&self.entities, CURVES)?,
             conduits: super::super::conduit::count_conduits(&self.entities)?,
-            quotes: count_bytes(&self.entities, QUOTES)?,
             tick_pages: count_bytes(&self.entities, TICK_PAGES)?,
             mismatches: count_bytes(&self.entities, MISMATCH)?,
             tokens: self.token_count()?,

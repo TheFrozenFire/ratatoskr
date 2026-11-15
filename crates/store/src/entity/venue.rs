@@ -2,8 +2,8 @@
 
 use alloy_primitives::B256;
 use store_model::{
-    CurveRecord, ImmutablePut, ImmutableRow, MutableStored, MutableWrite, PoolState, QuoteRecord,
-    TickPage, VenueRow, WatchHit, WorkFail, WorkJob,
+    CurveRecord, ImmutablePut, ImmutableRow, MutableStored, MutableWrite, PoolState, TickPage,
+    VenueRow, WatchHit, WorkFail, WorkJob,
 };
 
 use crate::{blocking, LocalStore};
@@ -25,8 +25,6 @@ pub trait VenueStore: Send + Sync {
     async fn put_mutable(&self, row: &MutableWrite) -> eyre::Result<MutableStored>;
     async fn put_tick_pages(&self, pages: &[TickPage]) -> eyre::Result<()>;
     async fn put_curve(&self, curve: &CurveRecord) -> eyre::Result<()>;
-    async fn put_quote(&self, quote: &QuoteRecord) -> eyre::Result<()>;
-    async fn put_quotes(&self, quotes: &[QuoteRecord]) -> eyre::Result<()>;
     async fn read_state(&self, kind: u8, id: B256) -> eyre::Result<PoolState>;
     async fn apply_watch(&self, through: u64, hits: &[WatchHit]) -> eyre::Result<()>;
     async fn watch_through(&self) -> eyre::Result<Option<u64>>;
@@ -89,18 +87,6 @@ impl VenueStore for LocalStore {
         let catalog = self.catalog_db()?;
         let curve = curve.clone();
         blocking(move || catalog.put_curve(&curve)).await
-    }
-
-    async fn put_quote(&self, quote: &QuoteRecord) -> eyre::Result<()> {
-        let catalog = self.catalog_db()?;
-        let quote = quote.clone();
-        blocking(move || catalog.put_quote(&quote)).await
-    }
-
-    async fn put_quotes(&self, quotes: &[QuoteRecord]) -> eyre::Result<()> {
-        let catalog = self.catalog_db()?;
-        let quotes = quotes.to_vec();
-        blocking(move || catalog.put_quotes(&quotes)).await
     }
 
     async fn read_state(&self, kind: u8, id: B256) -> eyre::Result<PoolState> {

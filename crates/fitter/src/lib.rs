@@ -3,8 +3,8 @@
 //! A [`Formula`] is the stored quote for one direction. Prediction is the
 //! integer quote for each invariant. Selection searches those formulas against
 //! a labeled sample and keeps the best score. The search order matches
-//! `cas/select_fit.py`. Catalog export and on-chain quote collection stay in
-//! `venues`.
+//! `cas/select_fit.py`. Venues calls this crate when it stores a curve from
+//! local quotes of a snapshot.
 
 #![allow(dead_code)]
 #![allow(

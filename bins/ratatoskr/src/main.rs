@@ -87,22 +87,12 @@ struct Args {
     #[arg(long)]
     status_url: Option<String>,
     /// Rewrite every stored curve from the current fitter, then exit.
-    /// Combine with `--export-fit` to write the extract after the rewrite.
     #[arg(long)]
     refit: bool,
     /// Re-read these catalog kinds through the detail lens, store each curve, rebuild
     /// the conduit jobs those writes queued, then exit. Kinds are comma-separated numbers.
     #[arg(long)]
     refresh_kinds: Option<String>,
-    /// Copy stored quote samples for `--data-dir` into a JSONL file and exit.
-    #[arg(long)]
-    export_fit: Option<PathBuf>,
-    /// Load chain quote samples from a JSONL extract into `--data-dir` and exit.
-    #[arg(long)]
-    import_fit: Option<PathBuf>,
-    /// Delete quote rows that stopped on a transport or decode failure, then exit.
-    #[arg(long)]
-    drop_partial_quotes: bool,
     /// JSON-RPC URL for venue lists. Repeat to rotate.
     #[arg(long)]
     rpc: Vec<String>,
@@ -204,51 +194,12 @@ async fn supervise(args: Args, loaded: config::Config) -> eyre::Result<()> {
     if args.refresh_kinds.is_some() && args.data_dir.is_none() {
         return Err(eyre::eyre!("--refresh-kinds needs --data-dir"));
     }
-    if args.export_fit.is_some() && args.data_dir.is_none() {
-        return Err(eyre::eyre!("--export-fit needs --data-dir"));
-    }
-    if args.import_fit.is_some() && args.data_dir.is_none() {
-        return Err(eyre::eyre!("--import-fit needs --data-dir"));
-    }
-    if args.drop_partial_quotes && args.data_dir.is_none() {
-        return Err(eyre::eyre!("--drop-partial-quotes needs --data-dir"));
-    }
     let data_dir = match &args.data_dir {
         Some(dir) => dir.clone(),
         None => config::expand_home(&loaded.process.data_dir)?,
     };
     let paths = paths_from(&data_dir, &loaded.peer.socket)?;
     let caches = loaded.store.clone();
-    if args.drop_partial_quotes {
-        let venues_path = paths.venues.clone();
-        let caches = caches.clone();
-        let dropped = tokio::task::spawn_blocking(move || {
-            let catalog = store::service::Catalog::open_with(&venues_path, &caches)?;
-            venues::drop_partial_quotes(&catalog)
-        })
-        .await
-        .wrap_err("drop partial quotes")??;
-        println!("dropped {dropped}");
-        return Ok(());
-    }
-    if let Some(path) = args.import_fit.clone() {
-        let venues_path = paths.venues.clone();
-        let caches = caches.clone();
-        let report = tokio::task::spawn_blocking(move || {
-            let catalog = store::service::Catalog::open_with(&venues_path, &caches)?;
-            venues::import_curve_fit(&catalog, &path)
-        })
-        .await
-        .wrap_err("fit import task")??;
-        println!("pools {}", report.pools);
-        println!("resumed {}", report.resumed);
-        println!("chain_ok {}", report.chain_ok);
-        println!("chain_fail {}", report.chain_fail);
-        println!("chain_absent {}", report.chain_absent);
-        if args.export_fit.is_none() {
-            return Ok(());
-        }
-    }
     if args.refit {
         let venues_path = paths.venues.clone();
         let caches = caches.clone();
@@ -259,9 +210,7 @@ async fn supervise(args: Args, loaded: config::Config) -> eyre::Result<()> {
         .await
         .wrap_err("refit task")??;
         println!("curves {wrote}");
-        if args.export_fit.is_none() {
-            return Ok(());
-        }
+        return Ok(());
     }
     if let Some(spec) = args.refresh_kinds.clone() {
         let kinds = parse_kind_list(&spec)?;
@@ -281,22 +230,6 @@ async fn supervise(args: Args, loaded: config::Config) -> eyre::Result<()> {
         println!("failed {}", report.failed);
         println!("curves {}", report.curves);
         println!("conduits {built}");
-        return Ok(());
-    }
-    if let Some(out) = args.export_fit.clone() {
-        let venues_path = paths.venues.clone();
-        let caches = caches.clone();
-        let report = tokio::task::spawn_blocking(move || {
-            let catalog = store::service::Catalog::open_with(&venues_path, &caches)?;
-            venues::export_curve_fit(&catalog, &out)
-        })
-        .await
-        .wrap_err("fit export task")??;
-        println!("pools {}", report.pools);
-        println!("resumed {}", report.resumed);
-        println!("chain_ok {}", report.chain_ok);
-        println!("chain_fail {}", report.chain_fail);
-        println!("chain_absent {}", report.chain_absent);
         return Ok(());
     }
     if args.drop_empty && args.data_dir.is_none() {
@@ -386,7 +319,6 @@ async fn supervise(args: Args, loaded: config::Config) -> eyre::Result<()> {
         println!("mutable {}", summary.mutable);
         println!("curves {}", summary.curves);
         println!("conduits {}", summary.conduits);
-        println!("quotes {}", summary.quotes);
         println!("tick_pages {}", summary.tick_pages);
         println!("mismatches {}", summary.mismatches);
         println!("tokens {}", summary.tokens);
@@ -637,6 +569,7 @@ fn conduit_edges(store: &LocalStore) -> eyre::Result<Vec<spots::Edge>> {
     Ok(edges)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_pipelines(
     pipelines: &Pipelines,
     store: Option<LocalStore>,

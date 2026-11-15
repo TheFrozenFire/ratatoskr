@@ -37,7 +37,7 @@ The objective is the basket count. Gas is charged once on an action the first ti
 ## Other sessions
 
 - A pricing pipeline measures after the plan. It does not enter the searcher or the optimizer, and it does not change stored curves.
-- Diagnostic tooling reads through `EntityRead` or a chain quote at the stored block ([docs/quotes.md](quotes.md)). It is not a searcher service and not a database API. redb has no replica log.
+- Diagnostic tooling reads through `EntityRead` ([docs/quotes.md](quotes.md)). It is not a searcher service and not a database API. redb has no replica log.
 - Vegvisir extraction: `crates/searcher`, `crates/trade`, and `crates/optimizer` do not depend on `venues`. Catalog reads stay in `venues`. Vegvisir's own text does not name this repository. Do not add a dependency from those crates to the catalog as part of orientation. No change stream exists.
 
 [PROBLEM.md](../PROBLEM.md) is the ingestion problem. [docs/search.md](search.md) is the search problem. [ARCHITECTURE.md](../ARCHITECTURE.md) is the pipeline. [docs/quotes.md](quotes.md) is how a quote is checked.

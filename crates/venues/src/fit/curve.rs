@@ -71,12 +71,11 @@ pub(super) fn product_fit(
 /// Choose each direction from local quotes of `detail`.
 ///
 /// The selector's label field is named `chain_out`. The amounts written there
-/// are `PoolDetail::quote` results. A stored quoter sample is not read. When
-/// no direction has a positive local quote, the payload is the structural
-/// product formula or a skip reason.
+/// are `PoolDetail::quote` results. When no direction has a positive local
+/// quote, the payload is the structural product formula or a skip reason.
 pub(crate) fn local_curve_payload(detail: &PoolDetail) -> Result<Vec<u8>, String> {
     let state = state_json(detail);
-    let (_, pairs) = pairs_of(detail);
+    let pairs = pairs_of(detail);
     let mut fits = Vec::new();
     for (token_in, token_out) in pairs {
         let built = direction_of(detail, token_in, token_out);

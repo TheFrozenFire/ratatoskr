@@ -1,4 +1,4 @@
-//! Pool snapshot, curve, quote, and work records.
+//! Pool snapshot, curve, and work records.
 
 use super::tick::TickWord;
 use super::venue::VenueRow;
@@ -9,14 +9,12 @@ use std::collections::BTreeMap;
 /// Payload schema. A version 3 curve is chosen from local quotes of the
 /// ingested snapshot. Older rows were fit to quoter samples or left empty.
 pub const CURVE_VERSION: u32 = 3;
-/// Sampling scheme stored on a quote row. A bump re-reads every quoter.
-pub const QUOTE_VERSION: u32 = 1;
 pub const TICK_PAGE: u32 = 512;
 pub const STAGE_IMMUTABLE: u8 = 1;
 pub const STAGE_MUTABLE: u8 = 2;
 pub const STAGE_TICKS: u8 = 3;
 pub const STAGE_CURVE: u8 = 4;
-/// Retained so older work rows can be dropped. The pipeline does not claim this stage.
+/// Retired work-queue stage. Reconcile and identity deletion still clear these rows.
 pub const STAGE_QUOTE: u8 = 5;
 /// Pair conduit. Claimed after the curve batch, from `conduit_jobs`.
 pub const STAGE_CONDUIT: u8 = 6;
@@ -91,18 +89,6 @@ pub struct CurveRecord {
     pub payload: Vec<u8>,
 }
 
-/// Chain quote samples for one snapshot. `payload` is the direction grid.
-/// Local quote outputs are not stored; they are recomputed from the snapshot.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct QuoteRecord {
-    pub kind: u8,
-    pub id: B256,
-    pub generation: u64,
-    pub version: u32,
-    pub block: u64,
-    pub payload: Vec<u8>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dirty {
     pub block: u64,
@@ -150,7 +136,6 @@ pub struct StateSummary {
     pub mutable: u64,
     pub curves: u64,
     pub conduits: u64,
-    pub quotes: u64,
     pub tick_pages: u64,
     pub mismatches: u64,
     pub tokens: u64,
@@ -166,7 +151,6 @@ pub struct PoolState {
     pub mutable: Option<MutableView>,
     pub ticks: Vec<TickWord>,
     pub curve: Option<CurveRecord>,
-    pub quotes: Option<QuoteRecord>,
     pub dirty: Option<Dirty>,
 }
 
@@ -395,35 +379,6 @@ pub fn encode_curve(curve: &CurveRecord) -> Vec<u8> {
     push_u64(&mut out, curve.generation);
     push_bytes(&mut out, &curve.payload);
     out
-}
-
-pub fn encode_quote(quote: &QuoteRecord) -> Vec<u8> {
-    let mut out = vec![1];
-    push_u32(&mut out, quote.version);
-    push_u64(&mut out, quote.generation);
-    push_u64(&mut out, quote.block);
-    push_bytes(&mut out, &quote.payload);
-    out
-}
-
-pub fn decode_quote_record(kind: u8, id: B256, bytes: &[u8]) -> eyre::Result<QuoteRecord> {
-    let mut reader = Reader::new(bytes);
-    if reader.u8().map_err(|err| eyre::eyre!(err))? != 1 {
-        return Err(eyre::eyre!("quote"));
-    }
-    let version = reader.u32().map_err(|err| eyre::eyre!(err))?;
-    let generation = reader.u64().map_err(|err| eyre::eyre!(err))?;
-    let block = reader.u64().map_err(|err| eyre::eyre!(err))?;
-    let payload = reader.bytes().map_err(|err| eyre::eyre!(err))?;
-    reader.finish().map_err(|err| eyre::eyre!(err))?;
-    Ok(QuoteRecord {
-        kind,
-        id,
-        generation,
-        version,
-        block,
-        payload,
-    })
 }
 
 pub fn decode_curve_record(kind: u8, id: B256, bytes: &[u8]) -> eyre::Result<CurveRecord> {

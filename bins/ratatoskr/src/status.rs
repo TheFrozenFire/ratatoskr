@@ -383,12 +383,11 @@ fn catalog(view: &View) -> Paragraph<'static> {
     let snap = view.snap.as_ref();
     let num = |field: &str| snap.and_then(|snap| snap[field].as_u64()).unwrap_or(0);
     let text = format!(
-        " identities {}   immutable {}   mutable {}   tick pages {}   quotes {}   curves {}   conduits {}   mismatches {}   jobs {}",
+        " identities {}   immutable {}   mutable {}   tick pages {}   curves {}   conduits {}   mismatches {}   jobs {}",
         commas(num("identities")),
         commas(num("immutable")),
         commas(num("mutable")),
         commas(num("tick_pages")),
-        commas(num("quotes")),
         commas(num("curves")),
         commas(num("conduits")),
         commas(num("mismatches")),

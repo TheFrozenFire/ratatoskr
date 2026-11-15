@@ -1,18 +1,15 @@
 //! Pool state, durable work, and the watch.
 //!
-//! Immutable rows are written once. Mutable rows, tick pages, on-chain quote
-//! samples, and curves live beside them in `entities.redb`. `work.redb` only
-//! remembers leases. A deleted work file is rebuilt by scanning entities. The
-//! watch cursor and the dirty flags commit together. A mutable snapshot clears
-//! its dirty flag in the same transaction, and only when no newer event arrived
-//! during the read. A new snapshot drops the curve. Stored quote samples stay.
+//! Immutable rows are written once. Mutable rows, tick pages, and curves live
+//! beside them in `entities.redb`. `work.redb` only remembers leases. A deleted
+//! work file is rebuilt by scanning entities. The watch cursor and the dirty
+//! flags commit together. A mutable snapshot clears its dirty flag in the same
+//! transaction, and only when no newer event arrived during the read. A new
+//! snapshot drops the curve.
 //!
 //! An empty snapshot stays in the catalog and gets no tick or curve job.
-//! The state pipeline does not call the quoter. Chain samples already stored
-//! stay in the quote table for validation. A new snapshot does not delete
-//! them, and a curve is never fit to them. The curve is chosen from local
-//! quotes of the ingested snapshot: reserves, tick words, balances, and the
-//! other fields that pool uses when it quotes.
+//! The curve is chosen from local quotes of the ingested snapshot: reserves,
+//! tick words, balances, and the other fields that pool uses when it quotes.
 //! Tick words still load when the bitmap lists them and those pages are not
 //! stored, because the ladder's `max_in` is only known once the words are in.
 //! Claim order is a rank index: a watch hit, then a larger `max_in`.
@@ -50,10 +47,9 @@ pub use self::drive::run;
 pub(crate) use store_model::decode_job;
 pub(crate) use store_model::{priority_of, DIRTY_BAND};
 pub use store_model::{
-    CurveRecord, ImmutablePut, ImmutableRow, MutableStored, MutableView, MutableWrite, PoolState,
-    QuoteRecord, StateSummary, TickPage, WatchHit, WorkFail, WorkJob, CLASS_HEAD, CLASS_NONE,
-    CLASS_TICKS, CURVE_VERSION, QUOTE_VERSION, STAGE_CONDUIT, STAGE_CURVE, STAGE_IMMUTABLE,
-    STAGE_MUTABLE, STAGE_QUOTE, STAGE_TICKS, TICK_PAGE,
+    CurveRecord, ImmutablePut, ImmutableRow, MutableStored, MutableWrite, PoolState, StateSummary,
+    TickPage, WatchHit, WorkFail, WorkJob, CLASS_HEAD, CLASS_NONE, CLASS_TICKS, CURVE_VERSION,
+    STAGE_CONDUIT, STAGE_CURVE, STAGE_IMMUTABLE, STAGE_MUTABLE, STAGE_TICKS, TICK_PAGE,
 };
 
 pub(crate) fn limits() -> config::Venues {
@@ -95,7 +91,7 @@ pub struct Plan {
 ///
 /// A head refresh with the same bitmap keeps tick pages and derives a curve.
 /// A mint or a changed bitmap has to read ticks again. A truncated bitmap
-/// stays on the mutable stage. The quoter is not a stage.
+/// stays on the mutable stage.
 pub fn plan_follow_up(
     class: u8,
     bitmap_changed: bool,
@@ -119,18 +115,6 @@ pub fn plan_follow_up(
     Plan {
         retry_mutable: false,
         stage: Some(STAGE_CURVE),
-    }
-}
-
-/// Stored chain samples match this snapshot and the current sampling scheme.
-pub fn quote_is_current(quote: Option<&QuoteRecord>, mutable: &MutableView) -> bool {
-    match quote {
-        Some(quote) => {
-            quote.generation == mutable.generation
-                && quote.version == QUOTE_VERSION
-                && quote.block == mutable.block
-        }
-        None => false,
     }
 }
 
@@ -520,7 +504,7 @@ pub fn refresh_kinds(catalog: &Catalog, rpc: &Rpc, kinds: &[u8]) -> eyre::Result
     Ok(report)
 }
 
-/// Choose a curve from local quotes of `detail`. Quoter samples are not read.
+/// Choose a curve from local quotes of `detail`.
 pub(crate) fn curve_for_snapshot(
     detail: &PoolDetail,
     generation: u64,
@@ -555,14 +539,6 @@ fn blank_job(stage: u8, kind: u8, id: B256) -> WorkJob {
 
 pub(crate) fn curve_job(kind: u8, id: B256, generation: u64) -> WorkJob {
     let mut job = blank_job(STAGE_CURVE, kind, id);
-    job.generation = generation;
-    job
-}
-
-/// A quote-stage key. The pipeline no longer enqueues these.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn quote_job(kind: u8, id: B256, generation: u64) -> WorkJob {
-    let mut job = blank_job(STAGE_QUOTE, kind, id);
     job.generation = generation;
     job
 }
@@ -1176,16 +1152,6 @@ mod tests {
         assert!(catalog.put_curve(&curve).is_err());
         curve.generation = stored.generation;
         catalog.put_curve(&curve).unwrap();
-        catalog
-            .put_quote(&QuoteRecord {
-                kind: sample.kind,
-                id: sample.id,
-                generation: stored.generation,
-                version: QUOTE_VERSION,
-                block: mutable.block,
-                payload: b"{}".to_vec(),
-            })
-            .unwrap();
         let quote = estimate(
             &curve,
             stored.generation,
@@ -1207,15 +1173,9 @@ mod tests {
         mutable.class = CLASS_HEAD;
         catalog.put_mutable(&mutable).unwrap();
         let kept = catalog.read_state(sample.kind, sample.id).unwrap();
-        assert!(kept.quotes.is_some());
         assert!(kept.curve.is_none());
-        assert_eq!(catalog.claim_work(STAGE_QUOTE, 4, 1, 10).unwrap().len(), 0);
         assert!(catalog.reconcile(1).unwrap() >= 1);
         assert_eq!(catalog.claim_work(STAGE_CURVE, 4, 1, 10).unwrap().len(), 1);
-        assert!(catalog
-            .claim_work(STAGE_QUOTE, 4, 1, 10)
-            .unwrap()
-            .is_empty());
     }
 
     #[test]
@@ -1269,10 +1229,6 @@ mod tests {
             .unwrap()
             .is_empty());
         assert_eq!(catalog.claim_work(STAGE_CURVE, 4, 2, 10).unwrap().len(), 1);
-        assert!(catalog
-            .claim_work(STAGE_QUOTE, 4, 2, 10)
-            .unwrap()
-            .is_empty());
     }
 
     #[test]
@@ -1422,7 +1378,7 @@ mod tests {
     #[test]
     fn a_tag1_job_decodes_with_priority_zero() {
         let mut key = [0u8; 34];
-        key[0] = STAGE_QUOTE;
+        key[0] = STAGE_CURVE;
         key[1] = UNI_V2;
         let mut bytes = vec![1];
         push_u64(&mut bytes, 0);
@@ -1436,7 +1392,7 @@ mod tests {
         assert_eq!(job.priority, 0);
         assert_eq!(job.attempt, 1);
         assert_eq!(job.generation, 4);
-        assert_eq!(job.stage, STAGE_QUOTE);
+        assert_eq!(job.stage, STAGE_CURVE);
     }
 
     #[test]
@@ -1444,16 +1400,12 @@ mod tests {
         let (_dir, catalog) = open();
         let (venue, detail) = with_reserves(3, 0);
         store_detail(&catalog, &venue, &detail);
-        let mut seeded = quote_job(venue.kind, venue.id, 1);
+        let mut seeded = curve_job(venue.kind, venue.id, 1);
         seeded.priority = 50;
         catalog
             .enqueue_work(std::slice::from_ref(&seeded), 1)
             .unwrap();
         catalog.reconcile(1).unwrap();
-        assert!(catalog
-            .claim_work(STAGE_QUOTE, 4, 1, 10)
-            .unwrap()
-            .is_empty());
         assert!(catalog
             .claim_work(STAGE_TICKS, 4, 1, 10)
             .unwrap()
@@ -1466,15 +1418,11 @@ mod tests {
     }
 
     #[test]
-    fn a_one_wei_pool_derives_locally_and_skips_the_quoter() {
+    fn a_one_wei_pool_derives_locally() {
         let (_dir, catalog) = open();
         let (venue, detail) = with_reserves(2, 1);
         store_detail(&catalog, &venue, &detail);
         catalog.reconcile(1).unwrap();
-        assert!(catalog
-            .claim_work(STAGE_QUOTE, 4, 1, 10)
-            .unwrap()
-            .is_empty());
         let curves = catalog.claim_work(STAGE_CURVE, 4, 1, 10).unwrap();
         assert_eq!(curves.len(), 1);
         assert!(curves[0].priority > 0);
@@ -1517,12 +1465,12 @@ mod tests {
     #[test]
     fn a_dirty_job_is_claimed_before_a_large_quiet_pool() {
         let (_dir, catalog) = open();
-        let mut quiet = quote_job(UNI_V2, row(1).id, 1);
+        let mut quiet = curve_job(UNI_V2, row(1).id, 1);
         quiet.priority = priority_of(false, U256::from(u64::MAX));
-        let mut dirty = quote_job(UNI_V2, row(9).id, 1);
+        let mut dirty = curve_job(UNI_V2, row(9).id, 1);
         dirty.priority = priority_of(true, U256::from(1u64));
         catalog.enqueue_work(&[quiet, dirty], 1).unwrap();
-        let claimed = catalog.claim_work(STAGE_QUOTE, 1, 1, 10).unwrap();
+        let claimed = catalog.claim_work(STAGE_CURVE, 1, 1, 10).unwrap();
         assert_eq!(claimed.len(), 1);
         assert_eq!(claimed[0].id, row(9).id);
         assert!(claimed[0].priority >= DIRTY_BAND);
@@ -1531,10 +1479,10 @@ mod tests {
     #[test]
     fn a_leased_job_is_not_replaced() {
         let (_dir, catalog) = open();
-        let mut job = quote_job(UNI_V2, row(1).id, 1);
+        let mut job = curve_job(UNI_V2, row(1).id, 1);
         job.priority = 1;
         catalog.enqueue_work(std::slice::from_ref(&job), 1).unwrap();
-        assert_eq!(catalog.claim_work(STAGE_QUOTE, 1, 1, 100).unwrap().len(), 1);
+        assert_eq!(catalog.claim_work(STAGE_CURVE, 1, 1, 100).unwrap().len(), 1);
         let mut hotter = job;
         hotter.priority = 99;
         hotter.lease_until = 0;
@@ -1542,10 +1490,10 @@ mod tests {
             .enqueue_work(std::slice::from_ref(&hotter), 1)
             .unwrap();
         assert!(catalog
-            .claim_work(STAGE_QUOTE, 1, 1, 10)
+            .claim_work(STAGE_CURVE, 1, 1, 10)
             .unwrap()
             .is_empty());
-        let later = catalog.claim_work(STAGE_QUOTE, 1, 101, 10).unwrap();
+        let later = catalog.claim_work(STAGE_CURVE, 1, 101, 10).unwrap();
         assert_eq!(later.len(), 1);
         assert_eq!(later[0].priority, 1);
     }
@@ -1603,10 +1551,6 @@ mod tests {
         store_detail(&catalog, &venue, &detail);
         catalog.reconcile(1).unwrap();
         assert_eq!(catalog.claim_work(STAGE_TICKS, 4, 1, 10).unwrap().len(), 1);
-        assert!(catalog
-            .claim_work(STAGE_QUOTE, 4, 1, 10)
-            .unwrap()
-            .is_empty());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Ratatoskr
 
-Ratatoskr is the catalog of mainnet pools and the history used to find them. The words below keep a pool, its configuration, its quoting state, its tick book, the stored price curve, a chain quote, a receipt, and a peer from being treated as the same thing. The ingestion flow is described in [ARCHITECTURE.md](ARCHITECTURE.md).
+Ratatoskr is the catalog of mainnet pools and the history used to find them. The words below keep a pool, its configuration, its quoting state, its tick book, the stored price curve, a receipt, and a peer from being treated as the same thing. The ingestion flow is described in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Language
 
@@ -256,18 +256,6 @@ _Avoid_: chain quote, local quote
 An output amount computed from the quote inputs.
 _Avoid_: chain quote, estimate, label
 
-**Chain quote**:
-An output amount from executing the swap through QuoteLens at the quoting state's block. The amount is the output-token balance delta.
-_Avoid_: local quote, label, price curve
-
-**Quote record**:
-The stored chain quotes for one quoting state and its generation.
-_Avoid_: price curve, local quote, grid
-
-**Quoter**:
-The quote address on an enumeration root in `corpus/mainnet.yaml`. It is configuration. A chain quote calls QuoteLens, not that address.
-_Avoid_: router
-
 **Estimate**:
 The output amount a stored price curve assigns to an input on one direction.
 _Avoid_: local quote, chain quote
@@ -455,11 +443,11 @@ _Avoid_: sighting, fetch
 ### Services and work
 
 **Seed file**:
-`corpus/mainnet.yaml`. It names the wrapper, the enumeration roots, and quote contracts the chain does not point at. Ingest writes list shapes and deploy blocks into the venue catalog, asks the address provider for registries on each discovery start, and the token lens writes symbols and decimals onto token records.
+`corpus/mainnet.yaml`. It names the wrapper and the enumeration roots the chain does not point at. Ingest writes list shapes and deploy blocks into the venue catalog, asks the address provider for registries on each discovery start, and the token lens writes symbols and decimals onto token records.
 _Avoid_: corpus, receipt bundle
 
 **Venue catalog**:
-Pool identities, token records, configuration, quoting state, tick books, price curves, quote records, and watch marks.
+Pool identities, token records, configuration, quoting state, tick books, price curves, and watch marks.
 _Avoid_: catalog, corpus, peer directory
 
 **Discovery store**:
@@ -594,9 +582,8 @@ _Avoid_: price, quote, spot
 - A stable **Balancer pool**'s price curve is determined by the balances, **Amplification**, and the **Pool fee**
 - A **Metric pool**'s structural formula is its current **Bin**
 - A **Crypto pool**'s **Local quote** is the crypto invariant on its balances, precisions, price scales, amplification, and gamma. It is not a spot line. A stableswap with gamma zero and without the crypto flag stays on the stableswap invariant
-- **Selection** scores formulas against **Labels**. A label whose source is a **Local quote** is not a **Chain quote**
+- **Selection** scores formulas against **Labels**. A label whose source is a **Local quote** is that local amount
 - A **Grid** is the series of quotes used to sample a **Price curve**. A **Knot** is a grid point a **Sample formula** is drawn through. A **Holdout** is a grid point that is not a knot
-- A **Quote record** stores **Chain quotes** for checking a price curve. Building a **Price curve** does not read a quote record
 - An **Estimate** is read from the stored **Price curve**. A **Local quote** is read from the **Quote inputs**
 - A **Canonical pool** is a shape whose **Structural formula** is determined by the quote inputs. A **Metric pool**, a **Crypto pool**, and a **Failed read** are not canonical pools
 - A **Bloom hit** becomes pool identities only after the **Receipt bundle** is read and a **Creation event** matches
@@ -609,20 +596,20 @@ _Avoid_: price, quote, spot
 - A **Client** does not open those files. A **Colocated pipeline** calls the store in process
 - **Discovery** writes **Pool identities**. The **State pipeline** then writes **Configuration**, **Quoting state**, the **Tick book**, the **Price curve**, and the **Pair conduit**. The **Watch** is another producer of **Dirty** marks
 - A **Head class** with an unchanged **Tick bitmap** keeps the **Tick book**. A **Tick class**, or a changed bitmap, reads **Tick words** again. Tick class replaces head class
-- A new **Generation** drops the **Price curve**. The **Quote record** stays until the **Pool identity** is deleted. Dropping the price curve queues the **Pair conduit** again
+- A new **Generation** drops the **Price curve**. Dropping the price curve queues the **Pair conduit** again
 - A **Pair conduit** merges the direct actions for one ordered pair of tokens. A path through a third token is a composition of pair conduits
 - A **Slope segment** is one step of that merge. A **Meta-action** is the stored edge. A pool direction is a member of a meta-action
 - An **Action** spends tokens and pays tokens in one transaction. Amounts are not part of it. A **Pair conduit** stores the swaps between one ordered pair. A **Liquidity mint**, a **Vault deposit**, and an **Order fill** are actions a pair conduit does not store
 - A **Basket** counts the outputs a set of holdings can still pay. The count is the minimum of the last counts
 - **Depletion** is the reserve a quote uses. A **Trading set** quotes a direction from its original reserves. Same-direction tenders are one submission. The accrued-fee update is not that ledger
 - A **Hub label** is the directed quote from a token to one hub. It is not a stage. The choice among the direct quote, one shared hub, and two hubs is the maximum of the cleared cross keys
-- A **Stage** is configuration, quoting state, the tick book, **Fit**, or the pair conduit. There is no live stage for chain quotes
+- A **Stage** is configuration, quoting state, the tick book, **Fit**, or the pair conduit
 - A **Sample catalog** is a copy of identities for a trial. It is not the **Live catalog**
 
 ## Example dialogue
 
 > **Dev:** "When we build a price curve, do we call the quoter at a few sizes?"
-> **Domain expert:** "No. **Fit** stores a **Price curve** from the **Quote inputs**: the **Configuration**, the **Quoting state**, and the **Tick book**. A **Local quote** is an output computed from those records. **Selection** may score formulas on a **Grid** of local quotes. A **Chain quote** is the output of executing the swap through QuoteLens at the quoting state's block. It is stored as a **Quote record** for checking, and it is not an input to fit."
+> **Domain expert:** "No. **Fit** stores a **Price curve** from the **Quote inputs**: the **Configuration**, the **Quoting state**, and the **Tick book**. A **Local quote** is an output computed from those records. **Selection** may score formulas on a **Grid** of local quotes."
 
 > **Dev:** "So the product formula is the reserves and the fee?"
 > **Domain expert:** "The **Product formula** is the formula of a **Constant-product pool**. That formula is determined by the two **Reserves** and the **Pool fee**. The reserves are inputs. They are not the formula."
@@ -661,18 +648,18 @@ _Avoid_: price, quote, spot
 > **Dev:** "A swap landed. What is dirty?"
 > **Domain expert:** "The **Watch** reads logs the **Peer service** already has. A swap or a sync is a **Head class**. A mint or a burn is a **Tick class**. Tick class replaces head class."
 
-> **Dev:** "Does that reload ticks and throw away quotes?"
-> **Domain expert:** "A head class with the same **Tick bitmap** keeps the **Tick book**. A tick class reads tick words again. The new **Generation** drops the **Price curve**. The **Quote record** stays."
+> **Dev:** "Does that reload ticks and throw away the curve?"
+> **Domain expert:** "A head class with the same **Tick bitmap** keeps the **Tick book**. A tick class reads tick words again. The new **Generation** drops the **Price curve**."
 
 ## Flagged ambiguities
 
 - **"Curve"** is a **Curve pool** or, loosely, a **Price curve**. Say one of those. "Curve" alone is not a term.
-- **"Quote"** is a **Local quote**, a **Chain quote**, a **Quote record**, or the verb. Name the object. A **Label** is what **Selection** scores, and the label names its source. An amount computed from the quote inputs is a **Local quote** even when a stored field is still called chain output.
+- **"Quote"** is a **Local quote** or the verb. Name the object. A **Label** is what **Selection** scores, and the label names its source. An amount computed from the quote inputs is a **Local quote** even when the selector's label field is still called chain output.
 - **"Catalog"** is the **Venue catalog**, the **Sample catalog**, or the **Peer directory**. Say which.
-- **"Generation"** identifies one **Quoting state**. A version identifies the schema of a **Price curve** or a **Quote record**. A generation is not a version.
+- **"Generation"** identifies one **Quoting state**. A version identifies the schema of a **Price curve**. A generation is not a version.
 - **"Head"** is the newest block a **Peer** reports, or a **Head class**. The block-pinned record is the **Quoting state**.
 - **"Hit"** is a **Bloom hit**, a **Discovery hit**, or a **Watch** mark.
-- **"Sample"** is a **Sample catalog**, a **Chain quote**, or one point of a **Grid**.
+- **"Sample"** is a **Sample catalog** or one point of a **Grid**.
 - **"Body"** is a **Block body**, which is not stored, or the era1 receipt bytes in the **Discovery store**. The corpus object is a **Receipt bundle**.
 - **"Peer"** is a node. The **Peer service** is the process. The **Peer directory** is the sightings and summaries.
 - **"Index"** is a **List** or a position in a **Tick bitmap**. A list names pools. A bitmap names ticks.
@@ -684,9 +671,8 @@ _Avoid_: price, quote, spot
 - **Discovery** is the pipeline that writes pool identities. A **Discovery hit** is one log's asset or pool identity.
 - **"Fit"** is the stage that stores a **Price curve**. The choice among formulas inside that stage is **Selection**.
 - **"The function"** is not a name for a **Price curve** or a **Formula**.
-- **Quote stage.** Older work named a stage that fetched chain quotes. That stage is not claimed. Chain quotes already stored remain **Quote records**.
 - **"Route"** and **"hop"** are not names for a **Pair conduit**. The conduit is one ordered pair of tokens. A path through a third token is a composition of pair conduits. A **Basket** is the count of fixed-weight outputs. It is not a pair conduit.
 - A **Score** marks a finished **Plan** in one numeraire. The **Searcher** and the **Optimizer** quote in the tokens' own units. The prices are read after the plan exists. An **Acceptance bar** is the formula error of a stored price curve, and it is a different number.
 - **Unequal-weight Balancer.** The local quote and the stored weighted formula are both determined by balances, weights, and the pool fee, and they are different evaluations. Selection can store a **Sample formula** instead. Do not treat the local quote and the stored formula as one object.
-- **Crypto pool.** Its local quote is the crypto invariant on balances, precisions, price scales, amplification, and gamma. That quote is not a spot line and not a chain quote. Gamma zero without the crypto flag stays on the stableswap.
+- **Crypto pool.** Its local quote is the crypto invariant on balances, precisions, price scales, amplification, and gamma. That quote is not a spot line. Gamma zero without the crypto flag stays on the stableswap.
 - **Kind and shape.** Kind is the family on the pool identity. Shape is the quoting rule of the pool.

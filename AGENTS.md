@@ -12,5 +12,5 @@ The language covers pool identity, pool shape, quote inputs, price curves, chain
 
 - [PROBLEM.md](PROBLEM.md) is the ingestion problem.
 - [docs/search.md](docs/search.md) is the search problem.
-- [docs/quotes.md](docs/quotes.md) is local quotes and chain quotes.
+- [docs/quotes.md](docs/quotes.md) is local quotes.
 - [docs/catalog.md](docs/catalog.md) is who may open the catalog.

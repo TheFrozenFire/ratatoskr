@@ -1,8 +1,8 @@
 //! Seeds in `corpus/mainnet.yaml`.
 //!
-//! The file names the contracts the chain does not point at: the wrapper, the
-//! enumeration roots, and the quote contracts. A list root is probed. A log
-//! root carries its event. Symbols and decimals are read from the token.
+//! The file names the contracts the chain does not point at: the wrapper and
+//! the enumeration roots. A list root is probed. A log root carries its event.
+//! Symbols and decimals are read from the token.
 
 use alloy_primitives::{keccak256, Address, B256};
 use std::str::FromStr;
@@ -23,7 +23,6 @@ pub struct Root {
     pub name: String,
     pub kind: u8,
     pub address: Address,
-    pub quote: Option<Address>,
     pub topics: Vec<B256>,
     /// Probe this root for a list view. Log-only roots leave this false.
     pub list: bool,
@@ -90,27 +89,6 @@ pub fn custodial_wrap() -> (Address, Address) {
     (wrap.token, wrap.wrapper)
 }
 
-/// Quote contract for this factory, or the only quoted root of `kind`.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn quoter(kind: u8, factory: Option<Address>) -> Option<Address> {
-    let doc = document();
-    if let Some(factory) = factory {
-        if let Some(root) = doc.by_address(factory) {
-            return root.quote;
-        }
-    }
-    let mut quotes = doc
-        .roots
-        .iter()
-        .filter(|root| root.kind == kind)
-        .filter_map(|root| root.quote);
-    let first = quotes.next()?;
-    if quotes.next().is_some() {
-        return None;
-    }
-    Some(first)
-}
-
 pub(crate) fn parse_document(text: &str) -> Result<Document, String> {
     let value = parse_yaml(text)?;
     let map = value.as_map().ok_or("document")?;
@@ -144,10 +122,6 @@ fn root_of(value: &Value) -> Result<Root, String> {
     let name = map_str(map, "name")?.to_string();
     let kind = kind_of(map_str(map, "kind")?)?;
     let home = address(map_str(map, "address")?)?;
-    let quote = match map_get(map, "quote") {
-        Some(value) => Some(address(value.as_str().ok_or("quote")?)?),
-        None => None,
-    };
     let mut topics = Vec::new();
     if let Some(event) = map_get(map, "event") {
         topics.push(event_topic(event.as_str().ok_or("event")?)?);
@@ -174,7 +148,6 @@ fn root_of(value: &Value) -> Result<Root, String> {
         name,
         kind,
         address: home,
-        quote,
         topics,
         list,
         registries,
@@ -408,7 +381,7 @@ fn scalar(text: &str) -> Result<Value, String> {
 mod tests {
     use super::*;
     use alloy_primitives::b256;
-    use store_model::{UNI_V2, UNI_V3, V2_FORK};
+    use store_model::{UNI_V2, V2_FORK};
 
     #[test]
     fn the_seed_file_names_each_root_once() {
@@ -430,13 +403,6 @@ mod tests {
             Some(doc.by_name("uni-v2").address)
         );
         assert!(doc.kind_address(V2_FORK).is_none());
-        assert_eq!(quoter(UNI_V3, None), doc.by_name("uni-v3").quote);
-        let quiet = doc
-            .roots
-            .iter()
-            .find(|root| root.kind == V2_FORK && root.quote.is_none())
-            .unwrap();
-        assert_eq!(quoter(V2_FORK, Some(quiet.address)), None);
     }
 
     #[test]

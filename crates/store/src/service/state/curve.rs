@@ -1,10 +1,7 @@
-//! Curves and chain-sample quotes.
+//! Stored price curves.
 
 use redb::{Durability, ReadableTable};
-use store_model::{
-    decode_curve_record, decode_mutable, encode_curve, encode_quote, entity_key, CurveRecord,
-    QuoteRecord,
-};
+use store_model::{decode_curve_record, decode_mutable, encode_curve, entity_key, CurveRecord};
 
 use super::super::catalog::Catalog;
 use super::*;
@@ -83,70 +80,5 @@ impl Catalog {
             )?;
         }
         Ok(())
-    }
-
-    pub fn put_quote(&self, quote: &QuoteRecord) -> eyre::Result<()> {
-        let mut write = self.entities.begin_write()?;
-        write.set_durability(Durability::Immediate)?;
-        {
-            let mutable_table = write.open_table(MUTABLE)?;
-            let mut quotes = write.open_table(QUOTES)?;
-            let key = entity_key(quote.kind, &quote.id);
-            let Some(stored) = mutable_table.get(key.as_slice())? else {
-                return Err(eyre::eyre!("quote has no mutable row"));
-            };
-            let view = decode_mutable(stored.value())?;
-            if view.generation != quote.generation || view.block != quote.block {
-                return Err(eyre::eyre!("quote generation"));
-            }
-            let bytes = encode_quote(quote);
-            quotes.insert(key.as_slice(), bytes.as_slice())?;
-        }
-        write.commit()?;
-        Ok(())
-    }
-
-    /// Store a page of quotes in one commit. A generation mismatch stores none of them.
-    pub fn put_quotes(&self, quotes: &[QuoteRecord]) -> eyre::Result<()> {
-        if quotes.is_empty() {
-            return Ok(());
-        }
-        let mut write = self.entities.begin_write()?;
-        write.set_durability(Durability::Immediate)?;
-        {
-            let mutable_table = write.open_table(MUTABLE)?;
-            for quote in quotes {
-                let key = entity_key(quote.kind, &quote.id);
-                let Some(stored) = mutable_table.get(key.as_slice())? else {
-                    return Err(eyre::eyre!("quote has no mutable row"));
-                };
-                let view = decode_mutable(stored.value())?;
-                if view.generation != quote.generation || view.block != quote.block {
-                    return Err(eyre::eyre!("quote generation"));
-                }
-            }
-            let mut quote_table = write.open_table(QUOTES)?;
-            for quote in quotes {
-                let key = entity_key(quote.kind, &quote.id);
-                let bytes = encode_quote(quote);
-                quote_table.insert(key.as_slice(), bytes.as_slice())?;
-            }
-        }
-        write.commit()?;
-        Ok(())
-    }
-
-    /// Remove one quote row. The snapshot and the curve stay.
-    pub fn delete_quote(&self, kind: u8, id: B256) -> eyre::Result<bool> {
-        let mut write = self.entities.begin_write()?;
-        write.set_durability(Durability::Immediate)?;
-        let removed = {
-            let mut quotes = write.open_table(QUOTES)?;
-            let key = entity_key(kind, &id);
-            let removed = quotes.remove(key.as_slice())?.is_some();
-            removed
-        };
-        write.commit()?;
-        Ok(removed)
     }
 }

@@ -1,22 +1,14 @@
 # Quotes
 
-For a session that measures or diagnoses quotes. The fit stage is [ARCHITECTURE.md](../ARCHITECTURE.md). The words are [CONTEXT.md](../CONTEXT.md).
+For a session that measures or diagnoses local quotes. The fit stage is [ARCHITECTURE.md](../ARCHITECTURE.md). The words are [CONTEXT.md](../CONTEXT.md).
 
-## Three amounts
+## Two amounts
 
-A stored price curve, a local quote, and a chain quote are three amounts.
+A stored price curve and a local quote are two amounts.
 
-The optimizer pays a stored price curve through `routing::quote` on slope segments in `crates/routing/src/lib.rs`. The searcher returns those segments. A local quote is `PoolDetail::quote` in `crates/venues/src/detail/mod.rs`, computed from the quote inputs. A chain quote is an execution through QuoteLens.
+The optimizer pays a stored price curve through `routing::quote` on slope segments in `crates/routing/src/lib.rs`. The searcher returns those segments. A local quote is `chain::detail::PoolDetail::quote` in `crates/chain/src/detail/mod.rs`, computed from the quote inputs.
 
-Output that matches the stored segments does not mean the local quote matches the chain quote. A change to local-quote code does not change a stored plan until that kind's curves are written again and the pair conduits those curves feed are rebuilt. The state pipeline's fit stage writes the curve. `ratatoskr --refresh-kinds` re-reads the named kinds through the detail lens at one chain head, stores each curve, and drains the conduit jobs that write queued. A concentrated pool whose tick book is not kept stores no curve.
-
-## Chain quote
-
-The call target is QuoteLens at `0x0000000000000000000000000000000000510e51`, `contracts/lens/QuoteLens.sol`. `prepare` and `dispatch_raw` in `crates/venues/src/fit.rs` build that call. The stored method name is `"swap"`. `dispatch_raw` sends the calls inside Multicall3. `eth_call` uses the quoting state's block and a state override that installs the lens runtime at that address. Block 0 is refused before any RPC. `eth_call_at` in `crates/venues/src/rpc.rs` still accepts a missing block as `latest`. Quote calls use `eth_call_block`, which requires a block.
-
-The lens returns the output-token balance delta. An input tax is what the pool received. An output tax is what the caller kept. Quote addresses in `corpus/mainnet.yaml` stay configuration on the enumeration root. They are not the call target. `drive_quotes` is not a pipeline stage. The lens does not change `PoolDetail::quote`, selection, or stored curves.
-
-A failed chain quote is an execution result. It is not a reason to change the fitter. The stored text is the revert string, or `"reverted"` with a short payload prefix. A v4 pool manager can revert with `PoolNotInitialized` or `CurrencyNotSettled`. The fitter does not decode those names. A missing balance slot is stored as `"balance slot"` before the call. A token that refuses the lens transfer is stored as `"transfer"`. A native-coin Curve pool is skipped as `"native curve"`. A failed chain quote is not, by itself, a tax measurement. Tax detection is not done here, and a wrong on-chain `decimals()` is not corrected. Do not hardcode a decimals map. Do not drop steep slope segments to hide a disagreement.
+Output that matches the stored segments does not mean the local quote matches that curve at a size the grid did not sample. A change to local-quote code does not change a stored plan until that kind's curves are written again and the pair conduits those curves feed are rebuilt. The state pipeline's fit stage writes the curve. `ratatoskr --refresh-kinds` re-reads the named kinds through the detail lens at one chain head, stores each curve, and drains the conduit jobs that write queued. A concentrated pool whose tick book is not kept stores no curve.
 
 ## Local quote
 
@@ -30,4 +22,4 @@ A Metric oracle price is whole token1 per whole token0. `quote_metric` reads `ma
 
 ## One judgment
 
-When a finished plan's numeraire output exceeds its numeraire input on a trade whose honest ceiling is near one-for-one, say so in the same report and name a plausible cause. A chain quote that matches the local quote on a pool does not explain a surplus that comes from using two pools' curves together. Do not treat that surplus as a successful retained value.
+When a finished plan's numeraire output exceeds its numeraire input on a trade whose honest ceiling is near one-for-one, say so in the same report and name a plausible cause. A local quote that matches one pool's curve does not explain a surplus that comes from using two pools' curves together. Do not treat that surplus as a successful retained value.

@@ -21,6 +21,7 @@ const TICK_PAGES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("tick_pag
 
 const CURVES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("curves");
 
+/// Retired chain-sample table. Deleting a pool identity still removes its row.
 const QUOTES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("quotes");
 
 const DIRTY: TableDefinition<&[u8], &[u8]> = TableDefinition::new("dirty");
