@@ -1,3 +1,2 @@
 peer:
   target: 16
-  key: ~/.config/ratatoskr/node.key

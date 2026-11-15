@@ -1,7 +1,8 @@
 //! Process settings.
 //!
 //! [`load`] reads every yaml file in a directory and merges them onto these
-//! defaults. A directory with no yaml file is an error. The binaries pass the
+//! defaults. A directory with no yaml file is an error. A `*.local.yaml` file
+//! merges after the shared files, so it overrides them. The binaries pass the
 //! loaded value into the domain crates. A field that is not in a yaml file
 //! keeps the default written on its struct.
 
@@ -363,12 +364,14 @@ impl Default for Simulate {
 /// Merge every yaml file in `dir` onto [`Config::default`].
 ///
 /// `dir` must be a directory and must contain at least one `.yaml` or `.yml`
-/// file. A file that fails to parse fails the load. Files merge in name order.
+/// file. A file that fails to parse fails the load. Shared files merge in
+/// name order, then each `*.local.yaml` file merges in name order.
 pub fn load(dir: &Path) -> eyre::Result<Config> {
     if !dir.is_dir() {
         return Err(eyre::eyre!("config directory {} is missing", dir.display()));
     }
-    let mut files = Vec::new();
+    let mut shared = Vec::new();
+    let mut local = Vec::new();
     for entry in fs::read_dir(dir).wrap_err_with(|| format!("read {}", dir.display()))? {
         let path = entry.wrap_err("read config directory")?.path();
         if !path.is_file() {
@@ -377,24 +380,36 @@ pub fn load(dir: &Path) -> eyre::Result<Config> {
         let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
             continue;
         };
-        if ext == "yaml" || ext == "yml" {
-            files.push(path);
+        if ext != "yaml" && ext != "yml" {
+            continue;
+        }
+        if is_local_yaml(&path) {
+            local.push(path);
+        } else {
+            shared.push(path);
         }
     }
-    if files.is_empty() {
+    if shared.is_empty() && local.is_empty() {
         return Err(eyre::eyre!(
             "config directory {} has no config file",
             dir.display()
         ));
     }
-    files.sort();
+    shared.sort();
+    local.sort();
     let mut figment = Figment::from(Serialized::defaults(Config::default()));
-    for file in &files {
+    for file in shared.iter().chain(&local) {
         figment = figment.merge(Yaml::file(file));
     }
     figment
         .extract()
         .wrap_err_with(|| format!("parse config in {}", dir.display()))
+}
+
+fn is_local_yaml(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".local.yaml"))
 }
 
 /// Expand a leading `~/` with the `HOME` directory.
@@ -470,6 +485,20 @@ mod tests {
         assert_eq!(loaded.process.data_dir, Process::default().data_dir);
         assert_eq!(loaded.store, Store::default());
         assert_eq!(loaded.network.call_rpcs, Network::default().call_rpcs);
+    }
+
+    #[test]
+    fn a_local_file_overrides_the_shared_file() {
+        let dir = TempDir::new();
+        fs::write(
+            dir.0.join("peer.yaml"),
+            "peer:\n  target: 3\n  key: shared\n",
+        )
+        .unwrap();
+        fs::write(dir.0.join("peer.local.yaml"), "peer:\n  key: local\n").unwrap();
+        let loaded = load(&dir.0).unwrap();
+        assert_eq!(loaded.peer.target, 3);
+        assert_eq!(loaded.peer.key, "local");
     }
 
     #[test]
