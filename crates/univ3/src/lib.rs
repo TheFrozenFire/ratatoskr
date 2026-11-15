@@ -5,7 +5,7 @@
 //! is [`store::service::Pools`].
 
 use alloy_primitives::{address, Address};
-use discover::univ3_pool;
+use chain::decode::univ3_pool;
 use journal::logs_in_block;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

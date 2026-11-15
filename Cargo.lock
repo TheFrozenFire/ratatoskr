@@ -1129,7 +1129,6 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "config",
- "discover",
  "eyre",
  "fitter",
  "journal",
@@ -6057,7 +6056,7 @@ name = "univ3"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
- "discover",
+ "chain",
  "eyre",
  "journal",
  "observability",

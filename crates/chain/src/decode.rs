@@ -5,7 +5,6 @@
 //! only from their canonical contract.
 
 use alloy_primitives::{keccak256, Address, B256};
-use discover::univ3_pool;
 use journal::Log;
 use std::sync::OnceLock;
 
@@ -34,15 +33,70 @@ fn seed_topic(name: &str, index: usize) -> B256 {
     crate::seeds::document().by_name(name).topics[index]
 }
 
+const POOL_CREATED: &str = "PoolCreated(address,address,uint24,int24,address)";
+
 struct Topics {
     pair: B256,
+    pool_created: B256,
 }
 
 fn topics() -> &'static Topics {
     static TOPICS: OnceLock<Topics> = OnceLock::new();
     TOPICS.get_or_init(|| Topics {
         pair: keccak256("PairCreated(address,address,address,uint256)"),
+        pool_created: keccak256(POOL_CREATED),
     })
+}
+
+/// Identity of a Uniswap v3 pool from a `PoolCreated` log.
+///
+/// `fee` and `tick_spacing` come from the event. Tick reads later use the
+/// pool address and this spacing; this function does not read pool storage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Univ3Pool {
+    pub pool: Address,
+    pub token0: Address,
+    pub token1: Address,
+    pub fee: u32,
+    pub tick_spacing: i32,
+}
+
+/// `None` when the log is not a `PoolCreated` shape or the words do not fit.
+pub fn univ3_pool(log: &Log) -> Option<Univ3Pool> {
+    let known = topics();
+    if log.topics.len() != 4 || log.topics[0] != known.pool_created {
+        return None;
+    }
+    let fee = uint24(&log.topics[3])?;
+    let tick_spacing = int24_word(&log.data, 0)?;
+    let pool = address_word(&log.data, 1)?;
+    Some(Univ3Pool {
+        pool,
+        token0: address_from_topic(log.topics[1]),
+        token1: address_from_topic(log.topics[2]),
+        fee,
+        tick_spacing,
+    })
+}
+
+fn uint24(word: &B256) -> Option<u32> {
+    let bytes = word.as_slice();
+    if bytes[..29].iter().any(|byte| *byte != 0) {
+        return None;
+    }
+    Some(u32::from_be_bytes([0, bytes[29], bytes[30], bytes[31]]))
+}
+
+/// ABI `int24`: a sign-extended 32-byte word.
+fn int24_word(data: &[u8], index: usize) -> Option<i32> {
+    let start = index.checked_mul(32)?;
+    let word = data.get(start..start + 32)?;
+    let negative = word[29] & 0x80 != 0;
+    let fill = if negative { 0xff } else { 0x00 };
+    if word[..29].iter().any(|byte| *byte != fill) {
+        return None;
+    }
+    Some(i32::from_be_bytes([word[28], word[29], word[30], word[31]]))
 }
 
 pub struct Known {
@@ -584,6 +638,57 @@ mod tests {
         assert_eq!(row[0].kind, UNI_V2);
         assert_eq!(row[0].id, VenueRow::address_id(pair));
         assert_eq!(row[0].tokens, vec![token0, token1]);
+    }
+
+    #[test]
+    fn pool_created_reads_fee_spacing_and_pool() {
+        let token0 = address("0000000000000000000000000000000000000001");
+        let token1 = address("0000000000000000000000000000000000000002");
+        let pool = address("000000000000000000000000000000000000002a");
+        let mut fee = B256::ZERO;
+        fee.0[31] = 3;
+        let mut data = vec![0_u8; 64];
+        data[31] = 9;
+        data[63] = 0x2a;
+        let event = bare(
+            Address::ZERO,
+            vec![
+                topics().pool_created,
+                addr_word(token0).into(),
+                addr_word(token1).into(),
+                fee,
+            ],
+            data,
+        );
+        let parsed = univ3_pool(&event).expect("pool");
+        assert_eq!(parsed.fee, 3);
+        assert_eq!(parsed.tick_spacing, 9);
+        assert_eq!(parsed.pool, pool);
+        assert_eq!(parsed.token0, token0);
+        assert_eq!(parsed.token1, token1);
+    }
+
+    #[test]
+    fn pool_created_keeps_negative_tick_spacing() {
+        let mut data = vec![0_u8; 64];
+        data[..32].fill(0xff);
+        data[31] = 0xc4;
+        data[63] = 1;
+        let mut fee = B256::ZERO;
+        fee.0[28..32].copy_from_slice(&3000u32.to_be_bytes());
+        let event = bare(
+            Address::ZERO,
+            vec![
+                topics().pool_created,
+                addr_word(address("0000000000000000000000000000000000000001")).into(),
+                addr_word(address("0000000000000000000000000000000000000002")).into(),
+                fee,
+            ],
+            data,
+        );
+        let pool = univ3_pool(&event).expect("pool");
+        assert_eq!(pool.fee, 3000);
+        assert_eq!(pool.tick_spacing, -60);
     }
 
     #[test]
