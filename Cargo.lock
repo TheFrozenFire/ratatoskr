@@ -4187,6 +4187,7 @@ dependencies = [
  "serde_json",
  "spots",
  "store",
+ "store-model",
  "tokio",
  "venues",
 ]

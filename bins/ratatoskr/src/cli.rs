@@ -148,24 +148,7 @@ pub(crate) fn egress_from(
 }
 
 pub(crate) fn parse_kind_list(text: &str) -> eyre::Result<Vec<u8>> {
-    let mut kinds = Vec::new();
-    for part in text.split(',') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        let kind: u8 = part
-            .parse()
-            .map_err(|_| eyre::eyre!("kind {part} is not a catalog kind"))?;
-        if kind == 0 {
-            return Err(eyre::eyre!("kind 0 is not a catalog kind"));
-        }
-        kinds.push(kind);
-    }
-    if kinds.is_empty() {
-        return Err(eyre::eyre!("--refresh-kinds needs a kind"));
-    }
-    Ok(kinds)
+    store_model::parse_kind_list(text)
 }
 
 pub(crate) fn parse_services(text: &str) -> eyre::Result<Services> {
