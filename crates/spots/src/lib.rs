@@ -11,5 +11,5 @@ mod price;
 mod run;
 
 pub use price::{mainnet_numeraires, price, rank_hubs, CustodialWrap, Edge, Numeraire, USDC, WETH};
-pub use run::run;
+pub use run::{conduit_edges, run};
 pub use store_model::Spot;

@@ -128,20 +128,6 @@ pub(crate) async fn supervise(args: Args, loaded: config::Config) -> eyre::Resul
     }
 }
 
-fn conduit_edges(store: &LocalStore) -> eyre::Result<Vec<spots::Edge>> {
-    let mut edges = Vec::new();
-    store.visit_conduit_blocks(|token_in, token_out, block, segments| {
-        edges.push(spots::Edge {
-            token_in,
-            token_out,
-            block: Some(block),
-            segments: segments.to_vec(),
-        });
-        Ok(())
-    })?;
-    Ok(edges)
-}
-
 #[allow(clippy::too_many_arguments)]
 fn spawn_pipelines(
     pipelines: &Pipelines,
@@ -186,15 +172,10 @@ fn spawn_pipelines(
         let spot_cache = loaded.store.spots;
         let spot_settings = loaded.spots.clone();
         tasks.spawn_local(async move {
-            let (native, wrapped) = venues::custodial_wrap();
             let book = store::service::Spots::open_with(&spots_path, spot_cache)?;
-            spots::run(
-                book,
-                stop,
-                Some(spots::CustodialWrap { native, wrapped }),
-                spot_settings,
-                move || conduit_edges(&store),
-            )
+            spots::run(book, stop, spot_settings, move || {
+                spots::conduit_edges(&store)
+            })
             .await
         });
     }

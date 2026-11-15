@@ -7,18 +7,19 @@ use crate::price::{mainnet_numeraires, price, CustodialWrap, Edge};
 /// Read conduits, replace the stored spots, and wait. One failed pass is logged.
 ///
 /// `gather` reads the open venue catalog. This task does not open it and does
-/// not open the feed file. `wrap` is the custodial wrap from the seed file.
+/// not open the feed file. The custodial wrap is the seed file's first pair.
 /// The caller opens the spot file.
 pub async fn run<F>(
     book: store::service::Spots,
     mut stop: tokio::sync::watch::Receiver<bool>,
-    wrap: Option<CustodialWrap>,
     settings: config::Spots,
     gather: F,
 ) -> eyre::Result<()>
 where
     F: Fn() -> eyre::Result<Vec<Edge>> + Send + Sync + 'static,
 {
+    let (native, wrapped) = chain::custodial_wrap();
+    let wrap = Some(CustodialWrap { native, wrapped });
     let gather = std::sync::Arc::new(gather);
     loop {
         if *stop.borrow() {
@@ -58,4 +59,19 @@ where
             _ = tokio::time::sleep(settings.pass()) => {}
         }
     }
+}
+
+/// Stored pair conduits as spot edges. The block is the one the merge used.
+pub fn conduit_edges(store: &store::LocalStore) -> eyre::Result<Vec<Edge>> {
+    let mut edges = Vec::new();
+    store.visit_conduit_blocks(|token_in, token_out, block, segments| {
+        edges.push(Edge {
+            token_in,
+            token_out,
+            block: Some(block),
+            segments: segments.to_vec(),
+        });
+        Ok(())
+    })?;
+    Ok(edges)
 }
