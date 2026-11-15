@@ -85,7 +85,7 @@ impl Catalog {
     }
 
     pub fn default_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/ratatoskr/entities.redb")
+        crate::storage::data_file("entities.redb")
     }
 }
 

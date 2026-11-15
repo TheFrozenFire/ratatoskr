@@ -3,11 +3,11 @@
 //! A pass replaces the table, so a token that lost its route is gone. The
 //! table is not the feed answer table, and this file is not `feeds.redb`.
 
+use crate::storage::Database;
 use alloy_primitives::Address;
 use num_bigint::BigInt;
 use redb::{Durability, ReadableDatabase, ReadableTable, TableDefinition};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::Path;
 use store_model::Spot;
 
 #[derive(Debug, thiserror::Error)]
@@ -27,31 +27,17 @@ fn db_err(err: impl std::fmt::Display) -> Error {
 }
 
 pub struct Spots {
-    db: Arc<redb::Database>,
+    db: Database,
 }
 
 impl Spots {
-    pub fn default_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/ratatoskr/spots.redb")
+    pub fn default_path() -> std::path::PathBuf {
+        crate::storage::data_file("spots.redb")
     }
 
     pub fn open(path: &Path) -> Result<Self, Error> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).map_err(db_err)?;
-            }
-        }
-        let mut builder = redb::Builder::new();
-        builder.set_cache_size(PAGE_CACHE);
-        builder.set_concurrency_mode(redb::ConcurrencyMode::SingleWriter);
-        let db = if path.exists() {
-            builder.open(path)
-        } else {
-            builder.create(path)
-        }
-        .map_err(db_err)?;
-        let db = Arc::new(db);
-        ipc::db::watch_db(ipc::db::file_label(path), PAGE_CACHE as u64, &db);
+        let db = Database::open_or_create(path, PAGE_CACHE).map_err(db_err)?;
+        db.watch();
         Ok(Self { db })
     }
 

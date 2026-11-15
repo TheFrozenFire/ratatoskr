@@ -2,11 +2,11 @@
 //!
 //! One row is the pool contract plus the fee and tick spacing from `PoolCreated`.
 
+use crate::storage::Database;
 use alloy_primitives::Address;
 use eyre::WrapErr;
 use redb::{Durability, TableDefinition};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::Path;
 use store_model::PoolRecord;
 
 /// The histogram write is one pass over the pools gathered in memory.
@@ -19,25 +19,17 @@ const RECORD_VERSION: u8 = 1;
 pub struct Pools;
 
 impl Pools {
-    pub fn default_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../data/ratatoskr")
-            .join("univ3-pools.redb")
+    pub fn default_path() -> std::path::PathBuf {
+        crate::storage::data_file("univ3-pools.redb")
     }
 
     /// Replace `path` with `rows`. An existing file is removed first.
     pub fn replace(path: &Path, rows: &[(Address, PoolRecord)]) -> eyre::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         if path.exists() {
             std::fs::remove_file(path).wrap_err("replace previous catalog")?;
         }
-        let mut builder = redb::Builder::new();
-        builder.set_cache_size(PAGE_CACHE);
-        builder.set_concurrency_mode(redb::ConcurrencyMode::SingleWriter);
-        let out = Arc::new(builder.create(path).wrap_err("create pool catalog")?);
-        ipc::db::watch_db(ipc::db::file_label(path), PAGE_CACHE as u64, &out);
+        let out = Database::create(path, PAGE_CACHE).wrap_err("create pool catalog")?;
+        out.watch();
         let mut write = out.begin_write()?;
         write.set_durability(Durability::Immediate)?;
         {

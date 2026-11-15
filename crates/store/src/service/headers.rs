@@ -6,10 +6,8 @@
 
 use alloy_primitives::B256;
 use eyre::WrapErr;
-use redb::{
-    Database, Durability, ReadOnlyDatabase, ReadableDatabase, ReadableTable, TableDefinition,
-};
-use std::path::{Path, PathBuf};
+use redb::{Durability, ReadableTable, TableDefinition};
+use std::path::Path;
 use store_model::{decode_header_record, encode_header_record, HeaderRecord, MAINNET_GENESIS_HASH};
 
 const HEADERS: TableDefinition<u64, &[u8]> = TableDefinition::new("headers");
@@ -18,69 +16,20 @@ const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 /// A header window is a few megabytes, and the next append reads one parent.
 const PAGE_CACHE: usize = 64 * 1024 * 1024;
 
-enum Db {
-    Write(Database),
-    Read(ReadOnlyDatabase),
-}
-
-impl Db {
-    fn begin_read(&self) -> Result<redb::ReadTransaction, redb::TransactionError> {
-        match self {
-            Db::Write(db) => db.begin_read(),
-            Db::Read(db) => db.begin_read(),
-        }
-    }
-
-    fn cache_stats(&self) -> redb::CacheStats {
-        match self {
-            Db::Write(db) => db.cache_stats(),
-            Db::Read(db) => db.cache_stats(),
-        }
-    }
-
-    fn begin_write(&self) -> eyre::Result<redb::WriteTransaction> {
-        match self {
-            Db::Write(db) => Ok(db.begin_write()?),
-            Db::Read(_) => Err(eyre::eyre!("header chain is open read-only")),
-        }
-    }
-}
-
 pub struct HeaderChain {
-    db: Db,
-    label: String,
-}
-
-fn open_database(path: &Path, create: bool) -> Result<Db, redb::DatabaseError> {
-    let mut builder = redb::Builder::new();
-    builder.set_cache_size(PAGE_CACHE);
-    builder.set_concurrency_mode(redb::ConcurrencyMode::SingleWriter);
-    if create {
-        Ok(Db::Write(builder.create(path)?))
-    } else {
-        Ok(Db::Read(builder.open_read_only(path)?))
-    }
+    db: crate::storage::File,
 }
 
 impl HeaderChain {
     pub fn create(path: &Path) -> eyre::Result<Self> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let db = open_database(path, true).wrap_err("create header db")?;
-        Ok(Self::new(path, db))
+        Ok(Self {
+            db: crate::storage::File::create(path, PAGE_CACHE).wrap_err("create header db")?,
+        })
     }
 
     /// Page cache configured for this file, and the counters redb has accumulated.
     pub fn cache_reading(&self) -> ipc::db::CacheReading {
-        ipc::db::reading(&self.label, PAGE_CACHE as u64, self.db.cache_stats())
-    }
-
-    fn new(path: &Path, db: Db) -> Self {
-        Self {
-            db,
-            label: ipc::db::file_label(path),
-        }
+        self.db.reading()
     }
 
     /// First block number that is not stored. A new database starts at 0.
@@ -157,14 +106,15 @@ impl HeaderChain {
         Ok(last)
     }
 
-    pub fn default_path() -> PathBuf {
-        data_dir().join("headers.redb")
+    pub fn default_path() -> std::path::PathBuf {
+        crate::storage::data_file("headers.redb")
     }
 
     /// Open a chain another process may be appending to. Callers only read.
     pub fn open(path: &Path) -> eyre::Result<Self> {
-        let db = open_database(path, false).wrap_err("open header chain")?;
-        Ok(Self::new(path, db))
+        Ok(Self {
+            db: crate::storage::File::read(path, PAGE_CACHE).wrap_err("open header chain")?,
+        })
     }
 
     /// Visit headers in `[from, to)` as one snapshot.
@@ -234,7 +184,7 @@ impl HeaderChain {
     }
 }
 
-fn meta_get(db: &Db, key: &str) -> eyre::Result<Option<u64>> {
+fn meta_get(db: &crate::storage::File, key: &str) -> eyre::Result<Option<u64>> {
     let txn = db.begin_read()?;
     let table = match txn.open_table(META) {
         Ok(table) => table,
@@ -244,14 +194,11 @@ fn meta_get(db: &Db, key: &str) -> eyre::Result<Option<u64>> {
     Ok(table.get(key)?.map(|value| value.value()))
 }
 
-fn data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/ratatoskr")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloy_primitives::b256;
+    use std::path::PathBuf;
 
     fn record(number: u64, hash: B256, parent: B256) -> HeaderRecord {
         HeaderRecord {

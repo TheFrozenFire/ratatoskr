@@ -374,7 +374,7 @@ pub(super) fn anchor_id() -> B256 {
 }
 
 fn live_share_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/ratatoskr")
+    crate::storage::data_dir()
 }
 
 fn dirs_equal(left: &Path, right: &Path) -> eyre::Result<bool> {

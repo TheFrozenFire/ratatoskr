@@ -3,13 +3,13 @@
 //! The file remembers peers this process has dialed. Dial ranking stays with
 //! the dialer. Records are [`store_model`] peer types.
 
-use redb::{Database, Durability, ReadableDatabase, ReadableTable, TableDefinition};
+use crate::storage::Database;
+use redb::{Durability, ReadableDatabase, ReadableTable, TableDefinition};
 use reth_network_peers::PeerId;
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    path::{Path, PathBuf},
-    sync::Arc,
+    path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
 use store_model::{
@@ -30,23 +30,17 @@ const HAS_LATEST: u8 = 2;
 const HAS_SERVED: u8 = 4;
 
 pub struct Peers {
-    db: Arc<Database>,
+    db: Database,
     pub next_seq: u64,
     pub summaries: HashMap<PeerId, Summary>,
 }
 
 impl Peers {
     pub fn open(path: &Path) -> eyre::Result<Self> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let mut builder = redb::Builder::new();
-        builder.set_cache_size(PAGE_CACHE);
-        builder.set_concurrency_mode(redb::ConcurrencyMode::SingleWriter);
-        let db = Arc::new(builder.create(path)?);
-        ipc::db::watch_db(ipc::db::file_label(path), PAGE_CACHE as u64, &db);
-        let next_seq = meta_get(db.as_ref(), "sighting_seq")?.unwrap_or(0);
-        let summaries = load_summaries(db.as_ref())?;
+        let db = Database::create(path, PAGE_CACHE)?;
+        db.watch();
+        let next_seq = meta_get(&db, "sighting_seq")?.unwrap_or(0);
+        let summaries = load_summaries(&db)?;
         Ok(Self {
             db,
             next_seq,
@@ -106,10 +100,8 @@ impl Peers {
         Ok(())
     }
 
-    pub fn default_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../data/ratatoskr")
-            .join("peers.redb")
+    pub fn default_path() -> std::path::PathBuf {
+        crate::storage::data_file("peers.redb")
     }
 }
 

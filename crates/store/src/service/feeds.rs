@@ -4,8 +4,10 @@
 //! are written once. A new chain phase appends, and that write inserts one
 //! history job. Deleting the job table leaves the feeds and the phases.
 
+use crate::storage::Database;
 use alloy_primitives::{Address, I256, U256};
 use redb::{Durability, ReadableDatabase, ReadableTable, TableDefinition};
+use std::path::Path;
 use store_model::{
     Answer, Configuration, DirectoryRow, Feed, Gauges, HistoryJob, Listing, Mismatch,
     ObservedAnswer, Phase, ProxyHead, Read,
@@ -18,8 +20,6 @@ pub enum Error {
     #[error("{0}")]
     Store(String),
 }
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 /// Feed rows are small. The cache holds the directory and the latest answers.
 const PAGE_CACHE: usize = 8 * 1024 * 1024;
@@ -65,31 +65,17 @@ fn count_open(table: &impl ReadableTable<&'static [u8], &'static [u8]>) -> Resul
 }
 
 pub struct Feeds {
-    db: Arc<redb::Database>,
+    db: Database,
 }
 
 impl Feeds {
-    pub fn default_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/ratatoskr/feeds.redb")
+    pub fn default_path() -> std::path::PathBuf {
+        crate::storage::data_file("feeds.redb")
     }
 
     pub fn open(path: &Path) -> Result<Self, Error> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).map_err(db_err)?;
-            }
-        }
-        let mut builder = redb::Builder::new();
-        builder.set_cache_size(PAGE_CACHE);
-        builder.set_concurrency_mode(redb::ConcurrencyMode::SingleWriter);
-        let db = if path.exists() {
-            builder.open(path)
-        } else {
-            builder.create(path)
-        }
-        .map_err(db_err)?;
-        let db = Arc::new(db);
-        ipc::db::watch_db(ipc::db::file_label(path), PAGE_CACHE as u64, &db);
+        let db = Database::open_or_create(path, PAGE_CACHE).map_err(db_err)?;
+        db.watch();
         Ok(Self { db })
     }
 

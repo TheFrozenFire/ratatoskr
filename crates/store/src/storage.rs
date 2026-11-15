@@ -7,11 +7,12 @@
 
 use eyre::WrapErr;
 use redb::ReadableDatabase;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// A redb file this process writes.
 pub struct Database {
-    inner: redb::Database,
+    inner: Arc<redb::Database>,
     cache: u64,
     label: String,
 }
@@ -28,8 +29,16 @@ pub struct ReadDatabase {
     label: String,
 }
 
+/// One service file, opened for writing or for reading.
+pub enum File {
+    Write(Database),
+    Read(ReadDatabase),
+}
+
 impl Database {
-    /// Create the file. The parent directory is created when it is missing.
+    /// Create the file, or open it when it already exists.
+    ///
+    /// The parent directory is created when it is missing.
     pub fn create(path: &Path, cache: usize) -> eyre::Result<Self> {
         ensure_parent(path)?;
         open_writer(path, cache, true)
@@ -49,6 +58,11 @@ impl Database {
         }
     }
 
+    /// Publish cache counters until the last strong reference of this handle is dropped.
+    pub fn watch(&self) {
+        ipc::db::watch_db(self.label.clone(), self.cache, &self.inner);
+    }
+
     /// Page cache configured for this file, and the counters redb has accumulated.
     pub fn reading(&self) -> ipc::db::CacheReading {
         ipc::db::reading(&self.label, self.cache, self.inner.cache_stats())
@@ -66,10 +80,7 @@ impl std::ops::Deref for Database {
 impl ReadDatabase {
     /// Open a file another process may be writing.
     pub fn open(path: &Path, cache: usize) -> eyre::Result<Self> {
-        let mut builder = redb::Builder::new();
-        builder.set_cache_size(cache);
-        builder.set_concurrency_mode(redb::ConcurrencyMode::SingleWriter);
-        let inner = builder
+        let inner = builder(cache)
             .open_read_only(path)
             .wrap_err_with(|| format!("open {} read-only", path.display()))?;
         Ok(Self {
@@ -93,19 +104,67 @@ impl std::ops::Deref for ReadDatabase {
     }
 }
 
-fn open_writer(path: &Path, cache: usize, create: bool) -> eyre::Result<Database> {
+impl File {
+    /// Create the file, or open it for writing when it already exists.
+    pub fn create(path: &Path, cache: usize) -> eyre::Result<Self> {
+        Ok(Self::Write(Database::create(path, cache)?))
+    }
+
+    /// Open a file another process may be writing. Callers only read.
+    pub fn read(path: &Path, cache: usize) -> eyre::Result<Self> {
+        Ok(Self::Read(ReadDatabase::open(path, cache)?))
+    }
+
+    pub fn begin_read(&self) -> Result<redb::ReadTransaction, redb::TransactionError> {
+        match self {
+            Self::Write(db) => db.begin_read(),
+            Self::Read(db) => db.begin_read(),
+        }
+    }
+
+    pub fn begin_write(&self) -> eyre::Result<redb::WriteTransaction> {
+        match self {
+            Self::Write(db) => Ok(db.begin_write()?),
+            Self::Read(db) => Err(eyre::eyre!("{} is open read-only", db.label)),
+        }
+    }
+
+    /// Page cache configured for this file, and the counters redb has accumulated.
+    pub fn reading(&self) -> ipc::db::CacheReading {
+        match self {
+            Self::Write(db) => db.reading(),
+            Self::Read(db) => db.reading(),
+        }
+    }
+}
+
+/// `data/ratatoskr` beside the store crate.
+pub fn data_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/ratatoskr")
+}
+
+/// One file in [`data_dir`].
+pub fn data_file(name: &str) -> PathBuf {
+    data_dir().join(name)
+}
+
+fn builder(cache: usize) -> redb::Builder {
     let mut builder = redb::Builder::new();
     builder.set_cache_size(cache);
     builder.set_concurrency_mode(redb::ConcurrencyMode::SingleWriter);
+    builder
+}
+
+fn open_writer(path: &Path, cache: usize, create: bool) -> eyre::Result<Database> {
     let verb = if create { "create" } else { "open" };
     let inner = if create {
-        builder.create(path)
+        builder(cache).create(path)
     } else {
-        builder.open(path)
+        builder(cache).open(path)
     }
     .wrap_err_with(|| format!("{verb} {}", path.display()))?;
     Ok(Database {
-        inner,
+        inner: Arc::new(inner),
         cache: cache as u64,
         label: ipc::db::file_label(path),
     })
