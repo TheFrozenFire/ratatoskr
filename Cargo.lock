@@ -1137,7 +1137,6 @@ dependencies = [
  "observability",
  "reqwest 0.12.28",
  "serde_json",
- "store",
  "store-model",
  "tokio",
 ]
@@ -2020,7 +2019,6 @@ dependencies = [
  "secp256k1 0.30.0",
  "store-model",
  "tokio",
- "zstd",
 ]
 
 [[package]]
@@ -3114,7 +3112,6 @@ dependencies = [
  "reth-ethereum-primitives",
  "serde",
  "store-model",
- "zstd",
 ]
 
 [[package]]
@@ -5466,6 +5463,7 @@ dependencies = [
  "num-bigint",
  "reth-ethereum-primitives",
  "reth-network-peers",
+ "zstd",
 ]
 
 [[package]]
