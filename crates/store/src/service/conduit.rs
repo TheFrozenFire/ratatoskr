@@ -489,7 +489,7 @@ impl Catalog {
 }
 
 pub(crate) fn read_conduit_at(
-    db: &impl redb::ReadableDatabase,
+    db: &impl crate::storage::Handle,
     token_in: Address,
     token_out: Address,
 ) -> eyre::Result<Option<StoredConduit>> {
@@ -505,7 +505,7 @@ pub(crate) fn read_conduit_at(
 }
 
 pub(crate) fn visit_conduits_at(
-    db: &impl redb::ReadableDatabase,
+    db: &impl crate::storage::Handle,
     mut visit: impl FnMut(Address, Address, &[SlopeSegment]) -> eyre::Result<()>,
 ) -> eyre::Result<()> {
     visit_conduit_rows(db, |token_in, token_out, _block, segments| {
@@ -514,7 +514,7 @@ pub(crate) fn visit_conduits_at(
 }
 
 pub(crate) fn visit_conduit_rows(
-    db: &impl redb::ReadableDatabase,
+    db: &impl crate::storage::Handle,
     mut visit: impl FnMut(Address, Address, u64, &[SlopeSegment]) -> eyre::Result<()>,
 ) -> eyre::Result<()> {
     let read = db.begin_read()?;

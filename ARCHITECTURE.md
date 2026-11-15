@@ -114,7 +114,7 @@ The dirty mark clears in the same write as the quoting state when the newest wat
 
 One `ratatoskr` process owns both file sets (`--services db,peer` by default). The peer service is the only dialer.
 
-The database service owns `headers.redb` (the header chain), `corpus.redb` (the corpus), `discovery.redb` (the discovery store), `entities.redb` (the venue catalog), and `work.redb` (the work queue). That is `ratatoskr` with `--services db`. `store::service::HeaderChain` opens the header chain. `store::service::Corpus` opens the corpus. `store::service::Catalog` opens the discovery store, the venue catalog, and the work queue. A path ending in `venues.redb` still names that directory. On open, a lone `venues.redb` is renamed to `entities.redb` and its crawl tables move into `discovery.redb`. An `entities.redb` that is already present leaves a sibling `venues.redb` closed.
+The database service owns `headers.redb` (the header chain), `corpus.redb` (the corpus), `discovery.redb` (the discovery store), `entities.redb` (the venue catalog), and `work.redb` (the work queue). That is `ratatoskr` with `--services db`. `store::service::HeaderChain` opens the header chain. `store::service::Corpus` opens the corpus. `store::service::Catalog` opens the discovery store, the venue catalog, and the work queue. A path ending in `venues.redb` still names that directory.
 
 The peer service owns `peers.redb`, the peer directory. `store::service::Peers` opens that file. That is `ratatoskr` with `--services peer`. A peer-only run opens the peer directory. The default supervisor opens that file before the entity files and stops if the open fails.
 

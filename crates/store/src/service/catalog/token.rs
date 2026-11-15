@@ -132,7 +132,7 @@ fn merge_token(stored: Option<TokenRecord>, incoming: &TokenRecord) -> TokenReco
 }
 
 pub(crate) fn read_token_row(
-    db: &impl redb::ReadableDatabase,
+    db: &impl crate::storage::Handle,
     address: Address,
 ) -> eyre::Result<Option<TokenRecord>> {
     let read = db.begin_read()?;
@@ -147,7 +147,7 @@ pub(crate) fn read_token_row(
     }
 }
 
-pub(crate) fn read_token_rows(db: &impl redb::ReadableDatabase) -> eyre::Result<Vec<TokenRecord>> {
+pub(crate) fn read_token_rows(db: &impl crate::storage::Handle) -> eyre::Result<Vec<TokenRecord>> {
     let read = db.begin_read()?;
     let table = match read.open_table(TOKENS) {
         Ok(table) => table,

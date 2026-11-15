@@ -1,8 +1,9 @@
 //! Storage services.
 //!
 //! [`service`] is the interface a domain crate calls. Those services read and
-//! write [`store_model`] records. [`LocalStore`] opens the header chain, the
-//! receipt corpus, and the venue catalog through those services.
+//! write [`store_model`] records. [`storage`] opens the redb files and keeps
+//! the handles. [`LocalStore`] opens the header chain, the receipt corpus, and
+//! the venue catalog through those services.
 
 use alloy_primitives::{Address, B256};
 use eyre::WrapErr;
@@ -20,6 +21,7 @@ mod entity;
 mod remote;
 mod serve;
 pub mod service;
+pub mod storage;
 mod wire;
 
 pub use entity::EntityStore;

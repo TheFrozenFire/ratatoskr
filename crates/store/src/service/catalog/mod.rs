@@ -6,15 +6,11 @@
 //! first and the cursor second, so a crash retries the chunk instead of
 //! skipping it. Deleting `work.redb` drops leases, not rows.
 //!
-//! The identity table keeps the name `venues`. A directory that still has
-//! `venues.redb` and no `entities.redb` is renamed, and the crawl tables are
-//! copied into `discovery.redb`. An existing `entities.redb` is left in place
-//! and the old file is not read again.
+//! The identity table keeps the name `venues`. A path whose file name ends in
+//! `.redb` selects that file's parent.
 
 mod discovery;
 mod identity;
-mod migrate;
-mod open;
 mod sample;
 mod token;
 
@@ -24,7 +20,8 @@ pub use sample::{
     write_fill_ids, FillReport, SampleReport,
 };
 
-use redb::{Database, TableDefinition};
+use crate::storage::{Database, ReadDatabase};
+use redb::TableDefinition;
 use std::path::{Path, PathBuf};
 
 pub(crate) const VENUES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("venues");
@@ -48,22 +45,61 @@ pub struct Catalog {
 
 /// Read `entities.redb` while another process writes it.
 ///
-/// The open uses single-writer mode. Discovery and the work queue stay closed.
+/// Discovery and the work queue stay closed.
 pub struct EntityRead {
-    pub(crate) entities: redb::ReadOnlyDatabase,
+    pub(crate) entities: ReadDatabase,
 }
 
 /// redb's builder default is 1 GiB. These are the budgets this process sets.
 const ENTITIES_CACHE: usize = 256 * 1024 * 1024;
 const DISCOVERY_CACHE: usize = 128 * 1024 * 1024;
 const WORK_CACHE: usize = 16 * 1024 * 1024;
-const DEFAULT_CACHE: usize = 64 * 1024 * 1024;
 
 /// Page cache for a process that follows the writer.
 ///
 /// The writer keeps the larger entity cache. This reader scans conduits and
 /// then reads the pairs a trade names.
 const READ_CACHE: usize = 64 * 1024 * 1024;
+
+impl Catalog {
+    /// Open the catalog directory.
+    ///
+    /// A path whose file name ends in `.redb` selects that file's parent, so
+    /// existing callers that pass `venues.redb` keep the same directory.
+    pub fn open(path: &Path) -> eyre::Result<Self> {
+        let dir = catalog_dir(path);
+        Ok(Self {
+            discovery: Database::open_or_create(&dir.join("discovery.redb"), DISCOVERY_CACHE)?,
+            entities: Database::open_or_create(&dir.join("entities.redb"), ENTITIES_CACHE)?,
+            work: Database::open_or_create(&dir.join("work.redb"), WORK_CACHE)?,
+        })
+    }
+
+    /// Page caches for the three catalog files.
+    pub fn cache_readings(&self) -> Vec<ipc::db::CacheReading> {
+        vec![
+            self.discovery.reading(),
+            self.entities.reading(),
+            self.work.reading(),
+        ]
+    }
+
+    pub fn default_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/ratatoskr/entities.redb")
+    }
+}
+
+impl EntityRead {
+    /// Open `entities.redb` in the catalog directory.
+    ///
+    /// A path whose file name ends in `.redb` selects that file's parent.
+    pub fn open(path: &Path) -> eyre::Result<Self> {
+        let file = catalog_dir(path).join("entities.redb");
+        Ok(Self {
+            entities: ReadDatabase::open(&file, READ_CACHE)?,
+        })
+    }
+}
 
 fn catalog_dir(path: &Path) -> PathBuf {
     let name = path
@@ -85,7 +121,6 @@ mod tests {
     use super::sample::{allocate_sample, anchor_id};
     use super::*;
     use alloy_primitives::{address, B256};
-    use redb::Durability;
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicU64, Ordering};
     use store_model::{
@@ -95,10 +130,7 @@ mod tests {
 
     /// redb's builder default is 1 GiB. A test file uses a 1 MiB budget.
     fn empty_db(path: &std::path::Path) -> Database {
-        let mut builder = redb::Builder::new();
-        builder.set_cache_size(1024 * 1024);
-        builder.set_concurrency_mode(redb::ConcurrencyMode::SingleWriter);
-        builder.create(path).unwrap()
+        Database::create(path, 1024 * 1024).unwrap()
     }
 
     fn sample() -> VenueRow {
@@ -314,43 +346,6 @@ mod tests {
         let stored = catalog.read_bodies(&[4, 5]).unwrap();
         assert_eq!(stored[0].as_ref(), Some(&body));
         assert!(stored[1].is_none());
-    }
-
-    #[test]
-    fn a_legacy_venues_file_is_renamed_and_crawl_tables_move() {
-        let dir = TempDir::new();
-        let legacy = dir.0.join("venues.redb");
-        let db = empty_db(&legacy);
-        {
-            let mut write = db.begin_write().unwrap();
-            write.set_durability(Durability::Immediate).unwrap();
-            {
-                let mut cursors = write.open_table(CURSORS).unwrap();
-                cursors.insert("logs:old", 42_u64).unwrap();
-                let mut venues = write.open_table(VENUES).unwrap();
-                let row = sample();
-                let bytes = encode_row(&row).unwrap();
-                venues
-                    .insert(row.key().as_slice(), bytes.as_slice())
-                    .unwrap();
-            }
-            write.commit().unwrap();
-        }
-        drop(db);
-        let catalog = Catalog::open(&legacy).unwrap();
-        assert!(!legacy.exists());
-        assert!(dir.0.join("entities.redb").exists());
-        assert_eq!(catalog.cursor("logs:old").unwrap(), Some(42));
-        let page = catalog.page_venues(sample().kind, None, 10).unwrap();
-        assert_eq!(page, vec![sample()]);
-        drop(catalog);
-        let again = Catalog::open(&dir.0.join("entities.redb")).unwrap();
-        assert_eq!(again.cursor("logs:old").unwrap(), Some(42));
-        let untouched = dir.0.join("venues.redb");
-        std::fs::write(&untouched, b"leave-me").unwrap();
-        drop(again);
-        let _ = Catalog::open(&dir.0).unwrap();
-        assert_eq!(std::fs::read(&untouched).unwrap(), b"leave-me");
     }
 
     #[test]

@@ -147,7 +147,7 @@ pub(super) fn merge(mut old: VenueRow, new: VenueRow) -> VenueRow {
 }
 
 pub(crate) fn read_venue_row(
-    db: &impl redb::ReadableDatabase,
+    db: &impl crate::storage::Handle,
     kind: u8,
     id: B256,
 ) -> eyre::Result<Option<VenueRow>> {
