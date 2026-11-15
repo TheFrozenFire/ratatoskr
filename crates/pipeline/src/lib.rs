@@ -14,7 +14,7 @@ use model::{BlockRecord, HeaderRecord};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use store::{ChainStore, CorpusStore, DiscoveryStore, LocalStore, RemoteStore};
+use store::{ChainStore, CorpusStore, DiscoveryStore, LocalStore};
 use tokio::sync::mpsc;
 use venues::{Put, ReceiptBody, VenueRow};
 
@@ -130,7 +130,7 @@ where
     }
 }
 
-// The port traits do not promise `Send` futures. These stores' futures are
+// The port traits do not promise `Send` futures. `LocalStore`'s futures are
 // `Send`, which this `dyn Sink` needs. The traits stay concrete, not `dyn`.
 macro_rules! impl_store_sink {
     ($ty:ty) => {
@@ -183,7 +183,6 @@ macro_rules! impl_store_sink {
 }
 
 impl_store_sink!(LocalStore);
-impl_store_sink!(RemoteStore);
 
 fn pin<'a, T>(
     future: impl Future<Output = T> + Send + 'a,

@@ -7,7 +7,6 @@ use peer::LocalPeer;
 use pipeline::{HeaderSource, Source, StoreSink, VenueSource};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use store::LocalStore;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -148,7 +147,6 @@ struct Paths {
     corpus: PathBuf,
     venues: PathBuf,
     peer_socket: PathBuf,
-    db_socket: PathBuf,
     feeds: PathBuf,
     spots: PathBuf,
 }
@@ -406,30 +404,6 @@ async fn supervise(args: Args) -> eyre::Result<()> {
         tokio::spawn(async move { peer::run(prepared, stop).await })
     });
     let store = owned.store.clone();
-    let mut db_cancel = None;
-    let mut db_result = None;
-    let db_thread = owned.store.take().map(|store| {
-        let socket = paths.db_socket.clone();
-        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        db_cancel = Some(cancel_tx);
-        db_result = Some(result_rx);
-        std::thread::spawn(move || {
-            let result = (|| {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .wrap_err("db runtime")?;
-                runtime.block_on(async move {
-                    tokio::select! {
-                        result = store::serve(Arc::new(store), &socket) => result,
-                        _ = cancel_rx => Ok(()),
-                    }
-                })
-            })();
-            let _ = result_tx.send(result);
-        })
-    });
     let opts = RunOpts {
         rpcs,
         only: args.only,
@@ -466,7 +440,6 @@ async fn supervise(args: Args) -> eyre::Result<()> {
             wait_for_stop(
                 &mut tasks,
                 &mut peer_task,
-                &mut db_result,
                 pipelines_started,
                 &stop_tx,
                 &mut stop_rx,
@@ -480,21 +453,6 @@ async fn supervise(args: Args) -> eyre::Result<()> {
             Ok(Ok(())) => {}
             Ok(Err(err)) => note_failure(&mut failed, err),
             Err(err) => note_failure(&mut failed, eyre::eyre!("peer task: {err}")),
-        }
-    }
-    if let Some(cancel) = db_cancel {
-        let _ = cancel.send(());
-    }
-    if let Some(result) = db_result {
-        match result.await {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => note_failure(&mut failed, err),
-            Err(_) => note_failure(&mut failed, eyre::eyre!("db socket thread dropped")),
-        }
-    }
-    if let Some(thread) = db_thread {
-        if thread.join().is_err() {
-            note_failure(&mut failed, eyre::eyre!("db socket thread panicked"));
         }
     }
     drop(store);
@@ -719,7 +677,6 @@ fn note_failure(failed: &mut Option<eyre::Report>, err: eyre::Report) {
 async fn wait_for_stop(
     tasks: &mut JoinSet<eyre::Result<()>>,
     peer_task: &mut Option<tokio::task::JoinHandle<eyre::Result<()>>>,
-    db_result: &mut Option<tokio::sync::oneshot::Receiver<eyre::Result<()>>>,
     pipelines_started: bool,
     stop_tx: &watch::Sender<bool>,
     stop_rx: &mut watch::Receiver<bool>,
@@ -732,7 +689,7 @@ async fn wait_for_stop(
         if tasks.is_empty() && pipelines_started && failed.is_none() && !*stop_rx.borrow() {
             break;
         }
-        if tasks.is_empty() && peer_task.is_none() && db_result.is_none() {
+        if tasks.is_empty() && peer_task.is_none() {
             break;
         }
         tokio::select! {
@@ -786,19 +743,6 @@ async fn wait_for_stop(
                         let _ = stop_tx.send(true);
                     }
                 }
-            }
-            result = async { db_result.as_mut().unwrap().await }, if db_result.is_some() => {
-                *db_result = None;
-                let err = match result {
-                    Ok(Err(err)) => err,
-                    Ok(Ok(())) => eyre::eyre!("db socket stopped"),
-                    Err(_) => eyre::eyre!("db socket thread dropped"),
-                };
-                tracing::error!(%err, "db socket");
-                if failed.is_none() {
-                    failed = Some(err);
-                }
-                let _ = stop_tx.send(true);
             }
             changed = stop_rx.changed(), if !*stop_rx.borrow() => {
                 if changed.is_err() {
@@ -948,7 +892,6 @@ fn default_paths() -> eyre::Result<Paths> {
         corpus: store::service::Corpus::default_path(),
         venues: store::service::Catalog::default_path(),
         peer_socket: peer::socket_path()?,
-        db_socket: store::db_socket()?,
         feeds: store::service::Feeds::default_path(),
         spots: store::service::Spots::default_path(),
     })
@@ -964,7 +907,6 @@ fn paths_from(data_dir: Option<&Path>) -> eyre::Result<Paths> {
         corpus: dir.join("corpus.redb"),
         venues: dir.join("entities.redb"),
         peer_socket: dir.join("peer.sock"),
-        db_socket: dir.join("db.sock"),
         feeds: dir.join("feeds.redb"),
         spots: dir.join("spots.redb"),
     })
@@ -1026,7 +968,6 @@ fn alchemy_key() -> Option<String> {
 mod tests {
     use super::*;
     use clap::CommandFactory;
-    use std::os::unix::fs::FileTypeExt;
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1067,7 +1008,6 @@ mod tests {
             corpus: dir.join("corpus.redb"),
             venues: dir.join("venues.redb"),
             peer_socket: dir.join("peer.sock"),
-            db_socket: dir.join("db.sock"),
             feeds: dir.join("feeds.redb"),
             spots: dir.join("spots.redb"),
         }
@@ -1171,7 +1111,6 @@ mod tests {
         let paths = paths_from(Some(&dir.0)).unwrap();
         assert_eq!(paths.venues, dir.0.join("entities.redb"));
         assert_eq!(paths.headers, dir.0.join("headers.redb"));
-        assert_eq!(paths.db_socket, dir.0.join("db.sock"));
         assert_eq!(paths.feeds, dir.0.join("feeds.redb"));
         assert_eq!(paths.spots, dir.0.join("spots.redb"));
         assert!(refuse_live(&dir.0).is_ok());
@@ -1371,7 +1310,6 @@ mod tests {
         let dir = TempDir::new();
         let paths = paths_in(&dir.0);
         std::fs::write(&paths.peer_socket, b"stale-peer").unwrap();
-        std::fs::write(&paths.db_socket, b"stale-db").unwrap();
         let held = peer::open(&paths.peers).unwrap();
         let err = must_err(open_owned(&both(), &every_pipeline(), &paths));
         let text = format!("{err:#}");
@@ -1380,7 +1318,6 @@ mod tests {
         assert!(!paths.corpus.exists());
         assert!(!paths.venues.exists());
         assert_eq!(std::fs::read(&paths.peer_socket).unwrap(), b"stale-peer");
-        assert_eq!(std::fs::read(&paths.db_socket).unwrap(), b"stale-db");
         drop(held);
     }
 
@@ -1389,7 +1326,6 @@ mod tests {
         let dir = TempDir::new();
         let paths = paths_in(&dir.0);
         std::fs::write(&paths.peer_socket, b"stale-peer").unwrap();
-        std::fs::write(&paths.db_socket, b"stale-db").unwrap();
         let held = LocalStore::open_headers(&paths.headers).unwrap();
         let err = must_err(open_owned(&both(), &every_pipeline(), &paths));
         let text = format!("{err:#}");
@@ -1397,63 +1333,8 @@ mod tests {
         assert!(!paths.corpus.exists());
         assert!(!paths.venues.exists());
         assert_eq!(std::fs::read(&paths.peer_socket).unwrap(), b"stale-peer");
-        assert_eq!(std::fs::read(&paths.db_socket).unwrap(), b"stale-db");
         let reopened = peer::open(&paths.peers).unwrap();
         drop(reopened);
         drop(held);
-    }
-
-    #[tokio::test]
-    async fn db_socket_is_replaced_after_the_entity_files_open() {
-        let dir = TempDir::new();
-        let paths = paths_in(&dir.0);
-        std::fs::write(&paths.db_socket, b"stale-db").unwrap();
-        std::fs::write(&paths.peer_socket, b"stale-peer").unwrap();
-        let owned = open_owned(
-            &Services {
-                db: true,
-                peer: false,
-            },
-            &Pipelines {
-                headers: false,
-                venues: true,
-                state: false,
-                oracles: false,
-                spots: false,
-            },
-            &paths,
-        )
-        .unwrap();
-        assert!(!paths.peers.exists());
-        assert_eq!(std::fs::read(&paths.db_socket).unwrap(), b"stale-db");
-        let store = Arc::new(owned.store.unwrap());
-        let socket = paths.db_socket.clone();
-        let (cancel, cancel_rx) = tokio::sync::oneshot::channel();
-        let path = socket.clone();
-        let thread = std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            runtime.block_on(async move {
-                tokio::select! {
-                    result = store::serve(store, &path) => result.unwrap(),
-                    _ = cancel_rx => {}
-                }
-            });
-        });
-        let mut ready = false;
-        for _ in 0..100 {
-            if tokio::net::UnixStream::connect(&socket).await.is_ok() {
-                ready = true;
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        assert!(ready, "db socket was not bound");
-        assert!(socket.metadata().unwrap().file_type().is_socket());
-        assert_eq!(std::fs::read(&paths.peer_socket).unwrap(), b"stale-peer");
-        let _ = cancel.send(());
-        thread.join().unwrap();
     }
 }

@@ -516,18 +516,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "api"
-version = "0.1.0"
-dependencies = [
- "alloy-primitives",
- "eyre",
- "model",
- "serde",
- "serde_json",
- "store-model",
-]
-
-[[package]]
 name = "ar_archive_writer"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5398,7 +5386,6 @@ name = "store"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
- "api",
  "eyre",
  "ipc",
  "model",
@@ -5407,7 +5394,6 @@ dependencies = [
  "redb",
  "reth-network-peers",
  "routing",
- "serde_json",
  "store-model",
  "thiserror",
  "tokio",

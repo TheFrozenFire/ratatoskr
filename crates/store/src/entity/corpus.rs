@@ -1,10 +1,7 @@
 //! Receipt corpus.
 
-use api::{Op, Reply, SCAN_PAGE};
-use eyre::eyre;
 use model::BlockRecord;
 
-use crate::remote::{empty, wrote, RemoteStore};
 use crate::{blocking, LocalStore};
 
 /// Block bytes copied out of one corpus read. The table is multiple gigabytes,
@@ -81,95 +78,6 @@ impl CorpusStore for LocalStore {
                 break;
             }
             from = next;
-        }
-        Ok(())
-    }
-}
-
-impl CorpusStore for RemoteStore {
-    async fn read_block(&self, number: u64) -> eyre::Result<Option<BlockRecord>> {
-        match self.request(Op::ReadBlock { number }).await? {
-            Reply::Block(record) => Ok(record),
-            _ => Err(eyre!("unexpected reply")),
-        }
-    }
-
-    async fn put_blocks(&self, records: &[BlockRecord]) -> eyre::Result<u64> {
-        wrote(
-            self.request(Op::PutBlocks {
-                records: records.to_vec(),
-            })
-            .await?,
-        )
-    }
-
-    async fn write_records(&self, cursor_key: &str, records: &[BlockRecord]) -> eyre::Result<u64> {
-        wrote(
-            self.request(Op::WriteRecords {
-                cursor_key: cursor_key.to_string(),
-                records: records.to_vec(),
-            })
-            .await?,
-        )
-    }
-
-    async fn write_hole(&self, number: u64) -> eyre::Result<()> {
-        empty(self.request(Op::WriteHole { number }).await?)
-    }
-
-    async fn meta(&self, key: &str) -> eyre::Result<Option<u64>> {
-        match self
-            .request(Op::Meta {
-                key: key.to_string(),
-            })
-            .await?
-        {
-            Reply::Meta(value) => Ok(value),
-            _ => Err(eyre!("unexpected reply")),
-        }
-    }
-
-    async fn put_meta(&self, key: &str, value: u64) -> eyre::Result<()> {
-        empty(
-            self.request(Op::PutMeta {
-                key: key.to_string(),
-                value,
-            })
-            .await?,
-        )
-    }
-
-    async fn for_each_block(
-        &self,
-        visit: &mut dyn FnMut(u64, &[u8]) -> eyre::Result<()>,
-    ) -> eyre::Result<()> {
-        let mut after = None;
-        loop {
-            let page = match self
-                .request(Op::ScanBlocks {
-                    after,
-                    limit: SCAN_PAGE,
-                })
-                .await?
-            {
-                Reply::Scan(page) => page,
-                _ => return Err(eyre!("unexpected reply")),
-            };
-            let short = (page.len() as u64) < SCAN_PAGE;
-            let end = page.last().map(|(number, _)| *number);
-            for (number, bytes) in page {
-                visit(number, &bytes)?;
-            }
-            if short {
-                break;
-            }
-            let Some(end) = end else {
-                break;
-            };
-            if after.is_some_and(|after| end <= after) {
-                break;
-            }
-            after = Some(end);
         }
         Ok(())
     }

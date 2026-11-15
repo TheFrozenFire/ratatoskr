@@ -11,7 +11,6 @@ members = [
     "crates/store-model",
     "crates/store",
     "crates/pipeline",
-    "crates/api",
     "crates/directory",
     "crates/ipc",
     "crates/univ3",
@@ -46,7 +45,6 @@ eyre = "0.6"
 redb = { version = "4.6.0", features = ["cache_metrics"] }
 futures = "0.3"
 rand = "0.8"
-api = { path = "crates/api" }
 chain = { path = "crates/chain" }
 corpus = { path = "crates/corpus" }
 store-model = { path = "crates/store-model" }

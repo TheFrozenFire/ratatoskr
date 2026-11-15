@@ -2,8 +2,7 @@
 //!
 //! [`crate::LocalStore`] holds an optional header chain, receipt corpus, and
 //! venue catalog. Each trait names one of those services. A caller bounds the
-//! ports its work uses. [`crate::RemoteStore`] implements the ports the
-//! entity-store socket speaks: chain, corpus, discovery, and venue.
+//! ports its work uses.
 
 mod chain;
 mod conduit;

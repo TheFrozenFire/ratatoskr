@@ -32,11 +32,6 @@ mod state;
 mod tick;
 mod tokens;
 
-pub use store::{
-    decode_state_call, decode_state_reply, encode_state_call, encode_state_reply, StateCall,
-    StateReply,
-};
-
 pub use catalog::{
     append_dropped_ids, append_fill_ids, decode_body, decode_row, encode_body, encode_row,
     fill_identities, kind_name, read_fill_ids, sample_identities, write_fill_ids, Catalog,
