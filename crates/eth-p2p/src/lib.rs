@@ -7,8 +7,6 @@ mod discover;
 mod fetch;
 mod session;
 
-pub use discover::{
-    census_mainnet_dns, dns_candidates, find_mainnet_peers, DnsPeer, DNS_ALL, DNS_SNAP,
-};
+pub use discover::{collect_dns, find_mainnet_peers};
 pub use fetch::{encode_block_records, fetch_block_logs, fetch_block_range, fetch_header_range};
 pub use session::{shared_eth_version, Egress, OutboundSession};

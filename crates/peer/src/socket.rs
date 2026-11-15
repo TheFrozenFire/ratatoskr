@@ -3,7 +3,9 @@
 use crate::dial::CatalogCmd;
 use crate::history::{clamp_count, BatchKind};
 use crate::jobs::{slot_head, Job, RangeRecords, Table};
-use eth_p2p::{census_mainnet_dns, encode_block_records, DnsPeer, DNS_ALL, DNS_SNAP};
+use eth_p2p::encode_block_records;
+
+use crate::discover::{census_mainnet_dns, DnsPeer, DNS_ALL, DNS_SNAP};
 use eyre::WrapErr;
 use serde::Deserialize;
 use serde_json::{json, Value};

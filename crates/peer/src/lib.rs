@@ -8,11 +8,13 @@
 
 mod catalog;
 mod dial;
+mod discover;
 mod history;
 mod jobs;
 mod key;
 mod socket;
 
+pub use discover::{census_mainnet_dns, dns_candidates, DnsPeer, DNS_ALL, DNS_SNAP};
 pub use history::{clamp_count, json_call, max_head, serving, BatchKind, HistoryPeer, SessionInfo};
 pub use jobs::LocalPeer;
 

@@ -1,7 +1,9 @@
 //! Directory merge, dial rank, cooldown, and the maintain loop.
 
 use crate::jobs::{run_peer, session_is_dead, Slot, Table};
-use eth_p2p::{dns_candidates, fetch_header_range, Egress, OutboundSession};
+use eth_p2p::{fetch_header_range, Egress, OutboundSession};
+
+use crate::discover::dns_candidates;
 use observability::{debug, info, note_peers, warn};
 use reth_network_peers::{NodeRecord, PeerId};
 use secp256k1::SecretKey;
@@ -506,7 +508,7 @@ fn apply_catalog_cmd(catalog: &crate::catalog::Catalog, cmd: CatalogCmd) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eth_p2p::DNS_ALL;
+    use crate::discover::DNS_ALL;
     use std::{
         fs,
         net::Ipv4Addr,
