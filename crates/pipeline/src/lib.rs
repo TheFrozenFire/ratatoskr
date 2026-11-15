@@ -14,7 +14,7 @@ use model::{BlockRecord, HeaderRecord};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use store::{EntityStore, LocalStore, RemoteStore};
+use store::{ChainStore, CorpusStore, DiscoveryStore, LocalStore, RemoteStore};
 use tokio::sync::mpsc;
 use venues::{Put, ReceiptBody, VenueRow};
 
@@ -116,19 +116,22 @@ impl Sink for Fanout {
     }
 }
 
-/// Required sink. `push` calls [`EntityStore`]. It does not call `put_meta`.
+/// Required sink. `push` calls the chain, corpus, and discovery ports. It does not call `put_meta`.
 pub struct StoreSink<S> {
     store: S,
 }
 
-impl<S: EntityStore> StoreSink<S> {
+impl<S> StoreSink<S>
+where
+    S: ChainStore + CorpusStore + DiscoveryStore,
+{
     pub fn new(store: S) -> Self {
         Self { store }
     }
 }
 
-// `EntityStore` does not promise `Send` futures. These stores' futures are
-// `Send`, which this `dyn Sink` needs. The trait stays concrete, not `dyn`.
+// The port traits do not promise `Send` futures. These stores' futures are
+// `Send`, which this `dyn Sink` needs. The traits stay concrete, not `dyn`.
 macro_rules! impl_store_sink {
     ($ty:ty) => {
         impl Sink for StoreSink<$ty> {
@@ -199,7 +202,7 @@ fn applied<T>(result: eyre::Result<T>) -> eyre::Result<SinkReply> {
 }
 
 /// Parent and cursor checks are data the source can submit again.
-/// `EntityStore` reports them as text, not a typed error.
+/// The ports report them as text, not a typed error.
 fn source_retries(err: &eyre::Report) -> bool {
     let message = err.to_string();
     message.contains("parent does not match")
@@ -218,7 +221,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
-    use store::{EntityStore, LocalStore};
+    use store::{ChainStore, CorpusStore, DiscoveryStore, LocalStore};
     use tokio::sync::watch;
     use venues::{Put, VenueRow};
 

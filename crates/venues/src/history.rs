@@ -18,7 +18,7 @@ use model::BlockRecord;
 use crate::catalog::{Put, ReceiptBody};
 use crate::decode::rows_from_log;
 use crate::logs::{job_filter, LogJob, Walk, MERGE_BLOCK};
-use crate::EntityStore;
+use crate::{ChainStore, CorpusStore, DiscoveryStore};
 
 const CHUNK_MAX: u64 = 64;
 const RECEIPT_PIPELINE: usize = 8;
@@ -78,14 +78,14 @@ pub async fn ingest_all<S, P>(
     stop: &tokio::sync::watch::Receiver<bool>,
 ) -> eyre::Result<Vec<String>>
 where
-    S: EntityStore,
+    S: ChainStore + CorpusStore + DiscoveryStore,
     P: HistoryPeer + Clone + 'static,
 {
     let scan = scan_blooms(store, jobs, stop).await?;
     fetch_receipts(store, peer, scan, stop).await
 }
 
-async fn load_and_scan<S: EntityStore>(
+async fn load_and_scan<S: ChainStore + DiscoveryStore>(
     store: &S,
     jobs: &[LogJob],
     stop: &tokio::sync::watch::Receiver<bool>,
@@ -199,7 +199,7 @@ pub struct BloomScan {
     stopped: bool,
 }
 
-pub(crate) async fn scan_blooms<S: EntityStore>(
+pub(crate) async fn scan_blooms<S: ChainStore + DiscoveryStore>(
     store: &S,
     jobs: &[LogJob],
     stop: &tokio::sync::watch::Receiver<bool>,
@@ -214,7 +214,7 @@ pub(crate) async fn fetch_receipts<S, P>(
     stop: &tokio::sync::watch::Receiver<bool>,
 ) -> eyre::Result<Vec<String>>
 where
-    S: EntityStore,
+    S: CorpusStore + DiscoveryStore,
     P: HistoryPeer + Clone + 'static,
 {
     if scan.stopped {
@@ -253,7 +253,7 @@ where
     Ok(notes)
 }
 
-async fn flush_hits<S: EntityStore>(
+async fn flush_hits<S: DiscoveryStore>(
     store: &S,
     jobs: &mut [PendingJob],
     to: u64,
@@ -293,7 +293,7 @@ async fn fetch_job<S, P, E>(
     stop: &tokio::sync::watch::Receiver<bool>,
 ) -> eyre::Result<Walk>
 where
-    S: EntityStore,
+    S: CorpusStore + DiscoveryStore,
     P: HistoryPeer + Clone + 'static,
     E: EraFetch,
 {
@@ -331,7 +331,7 @@ async fn fetch_era<S, E>(
     stop: &tokio::sync::watch::Receiver<bool>,
 ) -> eyre::Result<Option<Walk>>
 where
-    S: EntityStore,
+    S: DiscoveryStore,
     E: EraFetch,
 {
     if hits.is_empty() {
@@ -430,7 +430,7 @@ async fn fetch_peer<S, P>(
     stop: &tokio::sync::watch::Receiver<bool>,
 ) -> eyre::Result<Walk>
 where
-    S: EntityStore,
+    S: CorpusStore + DiscoveryStore,
     P: HistoryPeer + Clone + 'static,
 {
     let spans = hit_spans(hits);
@@ -543,7 +543,7 @@ where
     Ok(Walk::Done)
 }
 
-async fn commit_rows<S: EntityStore>(
+async fn commit_rows<S: DiscoveryStore>(
     store: &S,
     name: &str,
     next: u64,
@@ -598,7 +598,7 @@ async fn finish_span<P: HistoryPeer>(
     })
 }
 
-async fn cached_prefix<S: EntityStore>(
+async fn cached_prefix<S: CorpusStore>(
     store: &S,
     start: u64,
     count: u64,
@@ -716,27 +716,7 @@ mod tests {
         catalog: crate::Catalog,
     }
 
-    impl EntityStore for Files {
-        async fn header_cursor(&self) -> eyre::Result<u64> {
-            Err(eyre::eyre!("unused"))
-        }
-        async fn header_parent(&self, _: u64) -> eyre::Result<alloy_primitives::B256> {
-            Err(eyre::eyre!("unused"))
-        }
-        async fn append_headers(
-            &self,
-            _: &[model::HeaderRecord],
-        ) -> eyre::Result<model::HeaderRecord> {
-            Err(eyre::eyre!("unused"))
-        }
-        async fn for_each_header(
-            &self,
-            _: u64,
-            _: u64,
-            _: &mut dyn FnMut(&[model::HeaderRecord]) -> eyre::Result<()>,
-        ) -> eyre::Result<u64> {
-            Err(eyre::eyre!("unused"))
-        }
+    impl CorpusStore for Files {
         async fn read_block(&self, number: u64) -> eyre::Result<Option<BlockRecord>> {
             self.corpus.read_block(number)
         }
@@ -761,6 +741,9 @@ mod tests {
         ) -> eyre::Result<()> {
             Err(eyre::eyre!("unused"))
         }
+    }
+
+    impl DiscoveryStore for Files {
         async fn cursor(&self, job: &str) -> eyre::Result<Option<u64>> {
             self.catalog.cursor(job)
         }
@@ -788,57 +771,11 @@ mod tests {
         async fn put_bodies(&self, bodies: &[(u64, ReceiptBody)]) -> eyre::Result<()> {
             self.catalog.put_bodies(bodies)
         }
-        async fn read_venue(&self, _: u8, _: B256) -> eyre::Result<Option<crate::VenueRow>> {
-            Err(eyre::eyre!("unused"))
+        async fn note(&self, _: &str) -> eyre::Result<Option<u64>> {
+            Err(eyre::eyre!("discovery notes are not open"))
         }
-        async fn reconcile(&self, _: u64) -> eyre::Result<u64> {
-            Err(eyre::eyre!("unused"))
-        }
-        async fn claim_work(
-            &self,
-            _: u8,
-            _: u32,
-            _: u64,
-            _: u64,
-        ) -> eyre::Result<Vec<crate::WorkJob>> {
-            Err(eyre::eyre!("unused"))
-        }
-        async fn finish_work(
-            &self,
-            _: &[(u8, u8, B256)],
-            _: &[crate::WorkFail],
-        ) -> eyre::Result<()> {
-            Err(eyre::eyre!("unused"))
-        }
-        async fn enqueue_work(&self, _: &[crate::WorkJob], _: u64) -> eyre::Result<()> {
-            Err(eyre::eyre!("unused"))
-        }
-        async fn put_immutable(
-            &self,
-            _: &[crate::ImmutableRow],
-        ) -> eyre::Result<Vec<crate::ImmutablePut>> {
-            Err(eyre::eyre!("unused"))
-        }
-        async fn put_mutable(&self, _: &crate::MutableWrite) -> eyre::Result<crate::MutableStored> {
-            Err(eyre::eyre!("unused"))
-        }
-        async fn put_tick_pages(&self, _: &[crate::TickPage]) -> eyre::Result<()> {
-            Err(eyre::eyre!("unused"))
-        }
-        async fn put_curve(&self, _: &crate::CurveRecord) -> eyre::Result<()> {
-            Err(eyre::eyre!("unused"))
-        }
-        async fn put_quote(&self, _: &crate::QuoteRecord) -> eyre::Result<()> {
-            Err(eyre::eyre!("unused"))
-        }
-        async fn read_state(&self, _: u8, _: B256) -> eyre::Result<crate::PoolState> {
-            Err(eyre::eyre!("unused"))
-        }
-        async fn apply_watch(&self, _: u64, _: &[crate::WatchHit]) -> eyre::Result<()> {
-            Err(eyre::eyre!("unused"))
-        }
-        async fn watch_through(&self) -> eyre::Result<Option<u64>> {
-            Err(eyre::eyre!("unused"))
+        async fn put_note(&self, _: &str, _: u64) -> eyre::Result<()> {
+            Err(eyre::eyre!("discovery notes are not open"))
         }
     }
 

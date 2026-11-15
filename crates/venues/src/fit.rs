@@ -34,8 +34,8 @@ use crate::state::{
     unix_now, CurveRecord, PoolState, QuoteRecord, WorkJob, CURVE_VERSION, QUOTE_VERSION,
 };
 use crate::Catalog;
-use crate::EntityStore;
 use crate::Rpc;
+use crate::VenueStore;
 use alloy_primitives::{Address, B256, U256};
 use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
@@ -387,7 +387,7 @@ pub fn import_curve_fit(catalog: &Catalog, path: &Path) -> eyre::Result<FitRepor
 
 /// Fetch chain samples and store them. The state pipeline does not call this.
 #[allow(dead_code)]
-pub(crate) async fn drive_quotes<S: EntityStore>(
+pub(crate) async fn drive_quotes<S: VenueStore>(
     store: &S,
     rpc: &Rpc,
     jobs: &[WorkJob],

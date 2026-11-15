@@ -3,19 +3,15 @@
 //! [`service`] is the interface a domain crate calls. Those services read and
 //! write [`store_model`] records. [`storage`] opens the redb files and keeps
 //! the handles. [`LocalStore`] opens the header chain, the receipt corpus, and
-//! the venue catalog through those services.
+//! the venue catalog through those services. The port traits name those
+//! services for a caller that does not open the files.
 
 use alloy_primitives::{Address, B256};
 use eyre::WrapErr;
-use model::{BlockRecord, HeaderRecord};
 use service::{Catalog, Corpus, HeaderChain};
 use std::path::Path;
 use std::sync::Arc;
-use store_model::{
-    ConduitFail, ConduitJob, CurveRecord, ImmutablePut, ImmutableRow, MutableStored, MutableWrite,
-    PoolState, Put, QuoteRecord, ReceiptBody, StateSummary, TickPage, TokenRecord, VenueRow,
-    WatchHit, WorkFail, WorkJob,
-};
+use store_model::{StateSummary, VenueRow};
 
 mod entity;
 mod remote;
@@ -24,7 +20,7 @@ pub mod service;
 pub mod storage;
 mod wire;
 
-pub use entity::EntityStore;
+pub use entity::{ChainStore, ConduitStore, CorpusStore, DiscoveryStore, TokenStore, VenueStore};
 pub use remote::RemoteStore;
 pub use serve::{db_socket, serve};
 pub use service::{FeedError, Feeds, SpotError, Spots};
@@ -32,11 +28,6 @@ pub use wire::{
     decode_state_call, decode_state_reply, encode_state_call, encode_state_reply, StateCall,
     StateReply,
 };
-
-const HEADER_BATCH: u64 = 8192;
-/// Block bytes copied out of one corpus read. The table is multiple gigabytes,
-/// so the next page is read only after this one has been visited.
-const BLOCK_PAGE: usize = 8 * 1024 * 1024;
 
 /// Which corpus file to open. Ingest uses [`CorpusOpen::Create`]. A venue
 /// import uses [`CorpusOpen::Open`] so a missing path still fails.
@@ -200,326 +191,6 @@ fn open_corpus(mode: CorpusOpen<'_>) -> eyre::Result<Corpus> {
     }
 }
 
-impl EntityStore for LocalStore {
-    async fn header_cursor(&self) -> eyre::Result<u64> {
-        let chain = self.chain_db()?;
-        blocking(move || chain.cursor()).await
-    }
-
-    async fn header_parent(&self, next: u64) -> eyre::Result<B256> {
-        let chain = self.chain_db()?;
-        blocking(move || chain.parent_hash(next)).await
-    }
-
-    async fn append_headers(&self, records: &[HeaderRecord]) -> eyre::Result<HeaderRecord> {
-        let chain = self.chain_db()?;
-        let records = records.to_vec();
-        blocking(move || {
-            let next = chain.cursor()?;
-            let parent = chain.parent_hash(next)?;
-            chain.append(&records, next, parent)
-        })
-        .await
-    }
-
-    async fn for_each_header(
-        &self,
-        from: u64,
-        to: u64,
-        visit: &mut dyn FnMut(&[HeaderRecord]) -> eyre::Result<()>,
-    ) -> eyre::Result<u64> {
-        // `to` stays the caller's end. A callback that appends must not extend it.
-        if from > to {
-            return Err(eyre::eyre!("header range {from}..{to} is backwards"));
-        }
-        let mut seen = 0_u64;
-        let mut at = from;
-        while at < to {
-            let end = at.saturating_add(HEADER_BATCH).min(to);
-            let chain = self.chain_db()?;
-            let batch = blocking(move || chain.read_range(at, end)).await?;
-            let rows = batch.len() as u64;
-            if rows != end - at {
-                seen += rows;
-                return Err(short_header_range(seen, from, to));
-            }
-            visit(&batch)?;
-            seen += rows;
-            at = end;
-        }
-        if seen != to - from {
-            return Err(short_header_range(seen, from, to));
-        }
-        Ok(seen)
-    }
-
-    async fn read_block(&self, number: u64) -> eyre::Result<Option<BlockRecord>> {
-        let corpus = self.corpus_db()?;
-        blocking(move || corpus.read_block(number)).await
-    }
-
-    async fn put_blocks(&self, records: &[BlockRecord]) -> eyre::Result<u64> {
-        let corpus = self.corpus_db()?;
-        let records = records.to_vec();
-        blocking(move || corpus.put_blocks(&records)).await
-    }
-
-    async fn write_records(&self, cursor_key: &str, records: &[BlockRecord]) -> eyre::Result<u64> {
-        let corpus = self.corpus_db()?;
-        let cursor_key = cursor_key.to_string();
-        let records = records.to_vec();
-        blocking(move || corpus.write_records(&cursor_key, &records)).await
-    }
-
-    async fn write_hole(&self, number: u64) -> eyre::Result<()> {
-        let corpus = self.corpus_db()?;
-        blocking(move || corpus.write_hole(number)).await
-    }
-
-    async fn meta(&self, key: &str) -> eyre::Result<Option<u64>> {
-        let corpus = self.corpus_db()?;
-        let key = key.to_string();
-        blocking(move || corpus.meta(&key)).await
-    }
-
-    async fn put_meta(&self, key: &str, value: u64) -> eyre::Result<()> {
-        let corpus = self.corpus_db()?;
-        let key = key.to_string();
-        blocking(move || corpus.put_meta(&key, value)).await
-    }
-
-    async fn for_each_block(
-        &self,
-        visit: &mut dyn FnMut(u64, &[u8]) -> eyre::Result<()>,
-    ) -> eyre::Result<()> {
-        let mut from = 0_u64;
-        loop {
-            let corpus = self.corpus_db()?;
-            let start = from;
-            let page = blocking(move || corpus.read_block_page(start, BLOCK_PAGE)).await?;
-            let Some((last, _)) = page.last() else {
-                break;
-            };
-            let next = last.saturating_add(1);
-            for (number, bytes) in &page {
-                visit(*number, bytes)?;
-            }
-            if next <= from {
-                break;
-            }
-            from = next;
-        }
-        Ok(())
-    }
-
-    async fn cursor(&self, job: &str) -> eyre::Result<Option<u64>> {
-        let catalog = self.catalog_db()?;
-        let job = job.to_string();
-        blocking(move || catalog.cursor(&job)).await
-    }
-
-    async fn commit_chunk(
-        &self,
-        job: &str,
-        next: u64,
-        rows: &[VenueRow],
-        put: Put,
-    ) -> eyre::Result<u64> {
-        let catalog = self.catalog_db()?;
-        let job = job.to_string();
-        let rows = rows.to_vec();
-        blocking(move || catalog.commit_chunk(&job, next, &rows, put)).await
-    }
-
-    async fn hit_scan(&self, job: &str) -> eyre::Result<Option<u64>> {
-        let catalog = self.catalog_db()?;
-        let job = job.to_string();
-        blocking(move || catalog.hit_scan(&job)).await
-    }
-
-    async fn hits_from(&self, job: &str, from: u64, to: u64) -> eyre::Result<Vec<u64>> {
-        let catalog = self.catalog_db()?;
-        let job = job.to_string();
-        blocking(move || catalog.hits_from(&job, from, to)).await
-    }
-
-    async fn commit_hits(&self, job: &str, scanned_to: u64, hits: &[u64]) -> eyre::Result<()> {
-        let catalog = self.catalog_db()?;
-        let job = job.to_string();
-        let hits = hits.to_vec();
-        blocking(move || catalog.commit_hits(&job, scanned_to, &hits)).await
-    }
-
-    async fn read_bodies(&self, numbers: &[u64]) -> eyre::Result<Vec<Option<ReceiptBody>>> {
-        let catalog = self.catalog_db()?;
-        let numbers = numbers.to_vec();
-        blocking(move || catalog.read_bodies(&numbers)).await
-    }
-
-    async fn put_bodies(&self, bodies: &[(u64, ReceiptBody)]) -> eyre::Result<()> {
-        let catalog = self.catalog_db()?;
-        let bodies = bodies.to_vec();
-        blocking(move || catalog.put_bodies(&bodies)).await
-    }
-
-    async fn read_venue(&self, kind: u8, id: B256) -> eyre::Result<Option<VenueRow>> {
-        let catalog = self.catalog_db()?;
-        blocking(move || catalog.read_venue(kind, id)).await
-    }
-
-    async fn put_tokens(&self, rows: &[TokenRecord]) -> eyre::Result<()> {
-        let catalog = self.catalog_db()?;
-        let rows = rows.to_vec();
-        blocking(move || catalog.put_tokens(&rows)).await
-    }
-
-    async fn tokens(&self) -> eyre::Result<Vec<TokenRecord>> {
-        let catalog = self.catalog_db()?;
-        blocking(move || catalog.tokens()).await
-    }
-
-    async fn token(&self, address: Address) -> eyre::Result<Option<TokenRecord>> {
-        let catalog = self.catalog_db()?;
-        blocking(move || catalog.token(address)).await
-    }
-
-    async fn missing_tokens(&self, limit: usize) -> eyre::Result<Vec<Address>> {
-        let catalog = self.catalog_db()?;
-        blocking(move || catalog.missing_tokens(limit)).await
-    }
-
-    async fn note(&self, key: &str) -> eyre::Result<Option<u64>> {
-        let catalog = self.catalog_db()?;
-        let key = key.to_string();
-        blocking(move || catalog.note(&key)).await
-    }
-
-    async fn put_note(&self, key: &str, value: u64) -> eyre::Result<()> {
-        let catalog = self.catalog_db()?;
-        let key = key.to_string();
-        blocking(move || catalog.put_note(&key, value)).await
-    }
-
-    async fn reconcile(&self, now: u64) -> eyre::Result<u64> {
-        let catalog = self.catalog_db()?;
-        blocking(move || catalog.reconcile(now)).await
-    }
-
-    async fn claim_work(
-        &self,
-        stage: u8,
-        limit: u32,
-        now: u64,
-        lease_for: u64,
-    ) -> eyre::Result<Vec<WorkJob>> {
-        let catalog = self.catalog_db()?;
-        blocking(move || catalog.claim_work(stage, limit, now, lease_for)).await
-    }
-
-    async fn finish_work(&self, done: &[(u8, u8, B256)], failed: &[WorkFail]) -> eyre::Result<()> {
-        let catalog = self.catalog_db()?;
-        let done = done.to_vec();
-        let failed = failed.to_vec();
-        blocking(move || catalog.finish_work(&done, &failed)).await
-    }
-
-    async fn enqueue_work(&self, jobs: &[WorkJob], now: u64) -> eyre::Result<()> {
-        let catalog = self.catalog_db()?;
-        let jobs = jobs.to_vec();
-        blocking(move || catalog.enqueue_work(&jobs, now)).await
-    }
-
-    async fn put_immutable(&self, rows: &[ImmutableRow]) -> eyre::Result<Vec<ImmutablePut>> {
-        let catalog = self.catalog_db()?;
-        let rows = rows.to_vec();
-        blocking(move || catalog.put_immutable(&rows)).await
-    }
-
-    async fn put_mutable(&self, row: &MutableWrite) -> eyre::Result<MutableStored> {
-        let catalog = self.catalog_db()?;
-        let row = row.clone();
-        blocking(move || catalog.put_mutable(&row)).await
-    }
-
-    async fn put_tick_pages(&self, pages: &[TickPage]) -> eyre::Result<()> {
-        let catalog = self.catalog_db()?;
-        let pages = pages.to_vec();
-        blocking(move || catalog.put_tick_pages(&pages)).await
-    }
-
-    async fn put_curve(&self, curve: &CurveRecord) -> eyre::Result<()> {
-        let catalog = self.catalog_db()?;
-        let curve = curve.clone();
-        blocking(move || catalog.put_curve(&curve)).await
-    }
-
-    async fn put_quote(&self, quote: &QuoteRecord) -> eyre::Result<()> {
-        let catalog = self.catalog_db()?;
-        let quote = quote.clone();
-        blocking(move || catalog.put_quote(&quote)).await
-    }
-
-    async fn put_quotes(&self, quotes: &[QuoteRecord]) -> eyre::Result<()> {
-        let catalog = self.catalog_db()?;
-        let quotes = quotes.to_vec();
-        blocking(move || catalog.put_quotes(&quotes)).await
-    }
-
-    async fn read_state(&self, kind: u8, id: B256) -> eyre::Result<PoolState> {
-        let catalog = self.catalog_db()?;
-        blocking(move || catalog.read_state(kind, id)).await
-    }
-
-    async fn apply_watch(&self, through: u64, hits: &[WatchHit]) -> eyre::Result<()> {
-        let catalog = self.catalog_db()?;
-        let hits = hits.to_vec();
-        blocking(move || catalog.apply_watch(through, &hits)).await
-    }
-
-    async fn watch_through(&self) -> eyre::Result<Option<u64>> {
-        let catalog = self.catalog_db()?;
-        blocking(move || catalog.watch_through()).await
-    }
-
-    async fn enqueue_conduit_fill(&self) -> eyre::Result<u64> {
-        let catalog = self.catalog_db()?;
-        blocking(move || catalog.enqueue_conduit_fill()).await
-    }
-
-    async fn claim_conduits(
-        &self,
-        limit: u32,
-        now: u64,
-        lease_for: u64,
-    ) -> eyre::Result<Vec<ConduitJob>> {
-        let catalog = self.catalog_db()?;
-        blocking(move || catalog.claim_conduits(limit, now, lease_for)).await
-    }
-
-    async fn finish_conduits(
-        &self,
-        done: &[(Address, Address)],
-        again: &[(Address, Address)],
-        failed: &[ConduitFail],
-    ) -> eyre::Result<()> {
-        let catalog = self.catalog_db()?;
-        let done = done.to_vec();
-        let again = again.to_vec();
-        let failed = failed.to_vec();
-        blocking(move || catalog.finish_conduits(&done, &again, &failed)).await
-    }
-
-    async fn build_conduit(&self, token_in: Address, token_out: Address) -> eyre::Result<bool> {
-        let catalog = self.catalog_db()?;
-        blocking(move || catalog.build_conduit(token_in, token_out)).await
-    }
-}
-
-pub(crate) fn short_header_range(seen: u64, from: u64, to: u64) -> eyre::Report {
-    let span = to - from;
-    eyre::eyre!("header chain has {seen} rows for {span} blocks starting at {from}")
-}
-
 async fn blocking<T, F>(work: F) -> eyre::Result<T>
 where
     T: Send + 'static,
@@ -532,7 +203,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{serve, EntityStore, LocalStore, RemoteStore};
+    use super::{serve, ChainStore, CorpusStore, DiscoveryStore, LocalStore, RemoteStore};
     use alloy_primitives::{address, b256, Address, B256};
     use model::{encode_block_record, BlockRecord, HeaderRecord, MAINNET_GENESIS_HASH};
     use std::os::unix::fs::PermissionsExt;

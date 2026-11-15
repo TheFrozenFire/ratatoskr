@@ -27,7 +27,8 @@ use crate::detail::{
 use crate::rpc::Rpc;
 use crate::tick::{self, TickWordRead};
 use crate::{
-    Catalog, EntityStore, RunOpts, RunReport, VenueRow, PANCAKE_V3, SUSHI_V3, UNI_V3, V3_FORK,
+    Catalog, ChainStore, ConduitStore, RunOpts, RunReport, VenueRow, VenueStore, PANCAKE_V3,
+    SUSHI_V3, UNI_V3, V3_FORK,
 };
 use alloy_primitives::{keccak256, Address, B256, U256};
 use eyre::WrapErr;
@@ -695,7 +696,7 @@ fn follow_for_detail(input: &FollowInput<'_>) -> FollowPlan {
 }
 
 /// Local curve once the tick words for this generation are stored.
-async fn after_book<S: EntityStore>(store: &S, job: &WorkJob) -> eyre::Result<Option<WorkJob>> {
+async fn after_book<S: VenueStore>(store: &S, job: &WorkJob) -> eyre::Result<Option<WorkJob>> {
     let state = store.read_state(job.kind, job.id).await?;
     let Some(mutable) = state.mutable else {
         return Ok(Some(blank_job(STAGE_MUTABLE, job.kind, job.id)));

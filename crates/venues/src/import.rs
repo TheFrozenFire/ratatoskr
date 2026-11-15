@@ -6,13 +6,13 @@ use eyre::eyre;
 
 use crate::catalog::Put;
 use crate::decode::rows_from_log;
-use crate::EntityStore;
+use crate::{CorpusStore, DiscoveryStore};
 use corpus::logs_in_block;
 use model::decode_block_record;
 
 pub async fn import_corpus<S>(store: &S) -> eyre::Result<u64>
 where
-    S: EntityStore + Clone + 'static,
+    S: CorpusStore + DiscoveryStore + Clone + 'static,
 {
     let cursor = store.cursor("corpus").await?.unwrap_or(0);
     let mut pending = Vec::new();

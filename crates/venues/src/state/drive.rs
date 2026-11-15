@@ -16,7 +16,7 @@ pub async fn run<S, P>(
     mut stop: tokio::sync::watch::Receiver<bool>,
 ) -> eyre::Result<RunReport>
 where
-    S: EntityStore + Clone + 'static,
+    S: ChainStore + VenueStore + ConduitStore + Clone + 'static,
     P: HistoryPeer + Clone + 'static,
 {
     let mut report = RunReport::default();
@@ -109,11 +109,7 @@ fn tagged_block(pin: Option<u64>, cursor: u64) -> Option<u64> {
     cursor.checked_sub(1)
 }
 
-async fn current_block<S: EntityStore>(
-    store: &S,
-    rpc: &Rpc,
-    pin: Option<u64>,
-) -> eyre::Result<u64> {
+async fn current_block<S: ChainStore>(store: &S, rpc: &Rpc, pin: Option<u64>) -> eyre::Result<u64> {
     if let Some(block) = tagged_block(pin, store.header_cursor().await?) {
         return Ok(block);
     }
@@ -139,7 +135,7 @@ async fn drive_one<S>(
     notes: &mut Vec<String>,
 ) -> eyre::Result<bool>
 where
-    S: EntityStore + Clone + 'static,
+    S: VenueStore + ConduitStore + Clone + 'static,
 {
     if crate::work_paused() {
         return Ok(false);
@@ -204,7 +200,7 @@ async fn drive_conduits<S>(
     notes: &mut Vec<String>,
 ) -> eyre::Result<bool>
 where
-    S: EntityStore,
+    S: ConduitStore,
 {
     let jobs = store.claim_conduits(DETAIL_BATCH, now, LEASE_SECS).await?;
     if jobs.is_empty() {
@@ -265,7 +261,7 @@ where
     Ok(true)
 }
 
-async fn run_stage<S: EntityStore>(
+async fn run_stage<S: VenueStore>(
     store: S,
     rpc: Rpc,
     stage: u8,
@@ -293,7 +289,7 @@ async fn run_stage<S: EntityStore>(
     Ok(notes)
 }
 
-async fn drive_details<S: EntityStore>(
+async fn drive_details<S: VenueStore>(
     store: &S,
     rpc: &Rpc,
     block: u64,
@@ -434,7 +430,7 @@ async fn drive_details<S: EntityStore>(
     Ok(())
 }
 
-async fn drive_ticks<S: EntityStore>(
+async fn drive_ticks<S: VenueStore>(
     store: &S,
     rpc: &Rpc,
     jobs: &[WorkJob],
@@ -592,7 +588,7 @@ async fn drive_ticks<S: EntityStore>(
     Ok(())
 }
 
-async fn drive_curves<S: EntityStore>(
+async fn drive_curves<S: VenueStore>(
     store: &S,
     jobs: &[WorkJob],
     give_up_after: u32,
@@ -650,7 +646,7 @@ async fn drive_curves<S: EntityStore>(
     Ok(())
 }
 
-async fn watch_once<S: EntityStore, P: HistoryPeer>(
+async fn watch_once<S: ChainStore + VenueStore, P: HistoryPeer>(
     store: &S,
     peer: &P,
 ) -> eyre::Result<Option<String>> {
@@ -688,7 +684,7 @@ async fn watch_once<S: EntityStore, P: HistoryPeer>(
     Ok(Some(format!("watch {from}..{through} hits {}", hits.len())))
 }
 
-async fn watch_hit<S: EntityStore>(
+async fn watch_hit<S: VenueStore>(
     store: &S,
     log: &NormalizedLog,
 ) -> eyre::Result<Option<WatchHit>> {
@@ -735,7 +731,7 @@ async fn watch_hit<S: EntityStore>(
     Ok(classify_log(log, |_, _| false, |_| Some((kind, id))))
 }
 
-async fn find_address<S: EntityStore>(
+async fn find_address<S: VenueStore>(
     store: &S,
     address: Address,
 ) -> eyre::Result<Option<(u8, B256)>> {

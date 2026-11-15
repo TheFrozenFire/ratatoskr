@@ -57,7 +57,7 @@ pub use state::{
     estimate, refresh_kinds, CurveRecord, ImmutablePut, ImmutableRow, MutableStored, MutableWrite,
     PoolState, QuoteRecord, RefreshReport, StateSummary, TickPage, WatchHit, WorkFail, WorkJob,
 };
-pub use store::EntityStore;
+pub use store::{ChainStore, ConduitStore, CorpusStore, DiscoveryStore, TokenStore, VenueStore};
 
 use ipc::HistoryPeer;
 use std::sync::OnceLock;
@@ -175,7 +175,14 @@ pub async fn execute<S, P>(
     stop: tokio::sync::watch::Receiver<bool>,
 ) -> eyre::Result<RunReport>
 where
-    S: EntityStore + Clone + 'static,
+    S: ChainStore
+        + CorpusStore
+        + DiscoveryStore
+        + VenueStore
+        + ConduitStore
+        + TokenStore
+        + Clone
+        + 'static,
     P: HistoryPeer + Clone + 'static,
 {
     install_catalog_hooks();
@@ -317,7 +324,7 @@ where
 /// Bloom scan. The caller opens `headers.redb` for this and drops it before
 /// [`fetch_receipts`]. The corpus stays closed so an ingest lock does not
 /// block the scan.
-pub async fn scan_blooms<S: EntityStore>(
+pub async fn scan_blooms<S: ChainStore + DiscoveryStore>(
     store: &S,
     only: &Option<String>,
     stop: &tokio::sync::watch::Receiver<bool>,
@@ -350,7 +357,7 @@ pub async fn fetch_receipts<S, P>(
     stop: &tokio::sync::watch::Receiver<bool>,
 ) -> eyre::Result<Vec<String>>
 where
-    S: EntityStore,
+    S: CorpusStore + DiscoveryStore,
     P: HistoryPeer + Clone + 'static,
 {
     history::fetch_receipts(store, peer, scan, stop).await

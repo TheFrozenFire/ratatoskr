@@ -13,7 +13,7 @@ use crate::catalog::TokenRecord;
 use crate::lens::CALL_GAS;
 use crate::rpc::Rpc;
 use crate::seeds;
-use crate::EntityStore;
+use crate::TokenStore;
 
 /// keccak256("ratatoskr.token.v1").
 const MAGIC: [u8; 32] = [
@@ -41,7 +41,7 @@ enum Fetch {
 }
 
 /// Wrapper links from the seed file. An empty symbol leaves a stored symbol.
-pub(crate) async fn write_links<S: EntityStore>(store: &S) -> eyre::Result<()> {
+pub(crate) async fn write_links<S: TokenStore>(store: &S) -> eyre::Result<()> {
     let mut rows = Vec::new();
     for wrap in &seeds::document().wraps {
         rows.push(TokenRecord {
@@ -63,7 +63,7 @@ pub(crate) async fn write_links<S: EntityStore>(store: &S) -> eyre::Result<()> {
 }
 
 /// Read symbol and decimals for the wrapper and for tokens that have no record.
-pub(crate) async fn walk<S: EntityStore>(
+pub(crate) async fn walk<S: TokenStore>(
     rpc: &Rpc,
     store: &S,
     stop: &tokio::sync::watch::Receiver<bool>,
@@ -74,7 +74,7 @@ pub(crate) async fn walk<S: EntityStore>(
     result
 }
 
-async fn read_missing<S: EntityStore>(
+async fn read_missing<S: TokenStore>(
     rpc: &Rpc,
     store: &S,
     stop: &tokio::sync::watch::Receiver<bool>,
@@ -95,7 +95,7 @@ async fn read_missing<S: EntityStore>(
     Ok(wrote)
 }
 
-async fn blank_wrappers<S: EntityStore>(store: &S) -> eyre::Result<Vec<Address>> {
+async fn blank_wrappers<S: TokenStore>(store: &S) -> eyre::Result<Vec<Address>> {
     let mut out = Vec::new();
     for wrap in &seeds::document().wraps {
         if wrap.wrapper == Address::ZERO || out.contains(&wrap.wrapper) {
@@ -109,7 +109,7 @@ async fn blank_wrappers<S: EntityStore>(store: &S) -> eyre::Result<Vec<Address>>
     Ok(out)
 }
 
-async fn fill<S: EntityStore>(
+async fn fill<S: TokenStore>(
     rpc: &Rpc,
     store: &S,
     tokens: &[Address],

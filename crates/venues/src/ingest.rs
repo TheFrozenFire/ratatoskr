@@ -14,7 +14,7 @@ use crate::lists::{self, ListJob};
 use crate::logs::{self, LogJob};
 use crate::rpc::Rpc;
 use crate::seeds::{self, Document};
-use crate::EntityStore;
+use crate::{DiscoveryStore, TokenStore};
 
 const CALL_GAS: u64 = 1_000_000;
 const NO_VIEW: u64 = u64::MAX;
@@ -30,7 +30,10 @@ struct RegistryFound {
     shape: Option<u64>,
 }
 
-pub(crate) async fn plan<S: EntityStore>(store: &S, rpc: &Rpc) -> eyre::Result<Plan> {
+pub(crate) async fn plan<S: DiscoveryStore + TokenStore>(
+    store: &S,
+    rpc: &Rpc,
+) -> eyre::Result<Plan> {
     crate::tokens::write_links(store).await?;
     let doc = seeds::document();
     let mut shapes = HashMap::new();
@@ -59,7 +62,7 @@ pub(crate) async fn plan<S: EntityStore>(store: &S, rpc: &Rpc) -> eyre::Result<P
 }
 
 /// Log jobs from stored deploy notes. A missing note starts at genesis.
-pub(crate) async fn cached_logs<S: EntityStore>(store: &S) -> Vec<LogJob> {
+pub(crate) async fn cached_logs<S: DiscoveryStore>(store: &S) -> Vec<LogJob> {
     let doc = seeds::document();
     let mut jobs = Vec::new();
     for root in &doc.roots {
@@ -130,7 +133,7 @@ fn assemble(
     Plan { lists, logs }
 }
 
-async fn shape_of<S: EntityStore>(
+async fn shape_of<S: DiscoveryStore>(
     store: &S,
     rpc: &Rpc,
     name: &str,
@@ -150,7 +153,7 @@ async fn shape_of<S: EntityStore>(
     Ok(stored)
 }
 
-async fn deploy_of<S: EntityStore>(
+async fn deploy_of<S: DiscoveryStore>(
     store: &S,
     rpc: &Rpc,
     name: &str,
@@ -168,7 +171,7 @@ async fn deploy_of<S: EntityStore>(
     Ok(found)
 }
 
-async fn read_provider<S: EntityStore>(
+async fn read_provider<S: DiscoveryStore>(
     store: &S,
     rpc: &Rpc,
     provider: Address,

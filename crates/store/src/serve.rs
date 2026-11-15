@@ -14,7 +14,7 @@ use tokio::{
     net::{UnixListener, UnixStream},
 };
 
-use crate::{EntityStore, LocalStore};
+use crate::{ChainStore, CorpusStore, DiscoveryStore, LocalStore, VenueStore};
 
 /// `~/.config/ratatoskr/db.sock`. The directory is created mode 0700.
 pub fn db_socket() -> eyre::Result<PathBuf> {

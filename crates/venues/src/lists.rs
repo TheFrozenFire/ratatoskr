@@ -10,7 +10,7 @@ use eyre::eyre;
 use crate::catalog::{Put, VenueRow};
 use crate::lens::{self, LensHit, CALL_GAS};
 use crate::rpc::Rpc;
-use crate::EntityStore;
+use crate::DiscoveryStore;
 
 const ALL_PAIRS_LEN: [u8; 4] = [0x57, 0x4f, 0x2b, 0xa3];
 const ALL_PAIRS: [u8; 4] = [0x1e, 0x3d, 0xd1, 0x8b];
@@ -109,7 +109,7 @@ pub(crate) fn job_from(name: &str, factory: Address, kind: u8, view: usize, put:
     }
 }
 
-pub async fn walk<S: EntityStore>(
+pub async fn walk<S: DiscoveryStore>(
     rpc: &Rpc,
     store: &S,
     job: &ListJob,

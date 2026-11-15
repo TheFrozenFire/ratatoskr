@@ -40,7 +40,14 @@ impl<S, P> VenueSource<S, P> {
 
 impl<S, P> Source for VenueSource<S, P>
 where
-    S: venues::EntityStore + Clone + 'static,
+    S: venues::ChainStore
+        + venues::CorpusStore
+        + venues::DiscoveryStore
+        + venues::VenueStore
+        + venues::ConduitStore
+        + venues::TokenStore
+        + Clone
+        + 'static,
     P: HistoryPeer + Clone + 'static,
 {
     fn name(&self) -> &str {

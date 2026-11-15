@@ -5,7 +5,7 @@ use ipc::{max_head, serving, HistoryPeer};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use store::EntityStore;
+use store::ChainStore;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio::time::sleep;
@@ -38,7 +38,7 @@ impl<P, S> HeaderSource<P, S> {
 impl<P, S> Source for HeaderSource<P, S>
 where
     P: HistoryPeer + Clone + 'static,
-    S: EntityStore,
+    S: ChainStore,
 {
     fn name(&self) -> &str {
         "headers"
@@ -223,7 +223,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
-    use store::{EntityStore, LocalStore};
+    use store::{ChainStore, LocalStore};
     use tokio::sync::watch;
 
     struct TempDir(PathBuf);
