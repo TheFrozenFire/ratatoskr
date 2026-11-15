@@ -1,10 +1,14 @@
-//! Classify normalized logs into asset and venue identities.
+//! Classify a log into asset and venue identities.
 //!
 //! Matching is by event signature and topic count. It does not read code or storage.
 
 use alloy_primitives::{keccak256, Address, B256};
-use model::{AssetKind, DiscoveryHit, NormalizedLog, Observation, VenueId, VenueKind};
+use journal::Log;
 use std::sync::OnceLock;
+
+mod hit;
+
+pub use hit::{AssetKind, DiscoveryHit, Observation, VenueId, VenueKind};
 
 const TRANSFER: &str = "Transfer(address,address,uint256)";
 const TRANSFER_SINGLE: &str = "TransferSingle(address,address,address,uint256,uint256)";
@@ -36,7 +40,7 @@ fn topics() -> &'static Topics {
 }
 
 /// Identity hints from one log. Empty when the log is not a watched shape.
-pub fn classify(chain_id: u64, log: &NormalizedLog) -> Vec<DiscoveryHit> {
+pub fn classify(chain_id: u64, log: &Log) -> Vec<DiscoveryHit> {
     let Some(&topic0) = log.topics.first() else {
         return Vec::new();
     };
@@ -89,7 +93,7 @@ pub fn classify(chain_id: u64, log: &NormalizedLog) -> Vec<DiscoveryHit> {
     Vec::new()
 }
 
-fn observation(chain_id: u64, log: &NormalizedLog) -> Observation {
+fn observation(chain_id: u64, log: &Log) -> Observation {
     Observation {
         chain_id,
         block_number: log.block_number,
@@ -154,7 +158,7 @@ pub struct Univ3Pool {
 }
 
 /// `None` when the log is not a `PoolCreated` shape or the words do not fit.
-pub fn univ3_pool(log: &NormalizedLog) -> Option<Univ3Pool> {
+pub fn univ3_pool(log: &Log) -> Option<Univ3Pool> {
     let known = topics();
     if log.topics.len() != 4 || log.topics[0] != known.pool_created {
         return None;
@@ -201,10 +205,8 @@ fn address_word(data: &[u8], index: usize) -> Option<Address> {
 mod tests {
     use super::*;
     use alloy_primitives::{address, b256, bytes, Address, Bytes};
-    use model::{AssetKind, DiscoveryHit, VenueId, VenueKind};
-
-    fn log(topics: Vec<B256>, data: Bytes) -> NormalizedLog {
-        NormalizedLog {
+    fn log(topics: Vec<B256>, data: Bytes) -> Log {
+        Log {
             block_number: 10_000_835,
             block_hash: b256!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
             tx_index: 1,

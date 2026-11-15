@@ -6,10 +6,11 @@
 
 use alloy_primitives::{address, Address};
 use discover::univ3_pool;
-use model::{decode_block_record, logs_in_block};
+use journal::logs_in_block;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use store::service::{Corpus, Pools};
+use store_model::decode_block_record;
 
 pub use store_model::PoolRecord;
 

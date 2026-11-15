@@ -165,11 +165,10 @@ where
 mod tests {
     use super::{ChainStore, CorpusStore, DiscoveryStore, LocalStore};
     use alloy_primitives::{address, b256, Address, B256};
-    use model::{BlockRecord, HeaderRecord, MAINNET_GENESIS_HASH};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
-    use store_model::{Put, VenueRow};
+    use store_model::{BlockRecord, HeaderRecord, Put, VenueRow, MAINNET_GENESIS_HASH};
 
     struct TempDir(PathBuf);
 

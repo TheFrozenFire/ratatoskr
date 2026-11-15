@@ -219,12 +219,12 @@ mod tests {
     use crate::{RecordBatch, Sink, SinkReply, Source, StoreSink};
     use alloy_primitives::{b256, B256};
     use ipc::{HistoryPeer, SessionInfo};
-    use model::{BlockRecord, HeaderRecord, MAINNET_GENESIS_HASH};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
     use store::{ChainStore, LocalStore};
+    use store_model::{BlockRecord, HeaderRecord, MAINNET_GENESIS_HASH};
     use tokio::sync::watch;
 
     struct TempDir(PathBuf);

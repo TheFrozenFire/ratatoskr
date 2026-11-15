@@ -10,9 +10,8 @@ pub const MAINNET_GENESIS_HASH: B256 =
 
 /// One block of receipts, as stored in the corpus.
 ///
-/// `receipts_zstd` is a zstd frame. The decompressed bytes are a little-endian
-/// count of receipts, then for each receipt a little-endian length and the
-/// EIP-2718 encoding.
+/// `receipts_zstd` is a zstd frame. The decompressed bytes are
+/// [`encode_receipt_bundle`](crate::encode_receipt_bundle).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockRecord {
     pub number: u64,
@@ -156,4 +155,47 @@ pub fn decode_block_records(mut bytes: &[u8]) -> Result<Vec<BlockRecord>, &'stat
         bytes = &bytes[used..];
     }
     Ok(records)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::b256;
+
+    #[test]
+    fn block_record_roundtrip() {
+        let record = BlockRecord {
+            number: 12_369_621,
+            hash: b256!("1111111111111111111111111111111111111111111111111111111111111111"),
+            parent_hash: b256!("2222222222222222222222222222222222222222222222222222222222222222"),
+            timestamp: 1_620_000_000,
+            receipts_root: b256!(
+                "3333333333333333333333333333333333333333333333333333333333333333"
+            ),
+            transactions_root: b256!(
+                "4444444444444444444444444444444444444444444444444444444444444444"
+            ),
+            receipts_zstd: vec![1, 2, 3, 4],
+        };
+        let bytes = encode_block_record(&record);
+        let decoded = decode_block_records(&bytes).expect("decode");
+        assert_eq!(decoded, vec![record]);
+    }
+
+    #[test]
+    fn header_record_roundtrip() {
+        let record = HeaderRecord {
+            number: 0,
+            hash: MAINNET_GENESIS_HASH,
+            parent_hash: B256::ZERO,
+            timestamp: 0,
+            receipts_root: b256!(
+                "56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421"
+            ),
+            logs_bloom: [0xab; 256],
+        };
+        let bytes = encode_header_records(&[record.clone()]);
+        let decoded = decode_header_records(&bytes).expect("decode");
+        assert_eq!(decoded, vec![record]);
+    }
 }

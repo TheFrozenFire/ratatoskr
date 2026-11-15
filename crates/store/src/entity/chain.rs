@@ -2,7 +2,7 @@
 
 use alloy_primitives::B256;
 use eyre::eyre;
-use model::HeaderRecord;
+use store_model::HeaderRecord;
 
 use crate::{blocking, LocalStore};
 

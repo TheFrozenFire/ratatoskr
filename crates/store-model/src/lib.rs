@@ -8,6 +8,7 @@ pub mod conduit;
 pub mod feed;
 pub mod peer;
 pub mod pool;
+mod receipt;
 pub mod spot;
 pub mod state;
 pub mod tick;
@@ -24,6 +25,7 @@ pub use chain::{
     encode_block_record, encode_header_record, encode_header_records, BlockRecord, HeaderRecord,
     MAINNET_GENESIS_HASH,
 };
+pub use receipt::{decode_receipt_bundle, encode_receipt_bundle};
 
 pub use peer::{
     PublishedPeer, Sighting, Summary, DIAL_FAILED, DROPPED, EMPTY, SAW_STATUS, SERVED, TOO_MANY,

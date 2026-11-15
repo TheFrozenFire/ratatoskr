@@ -13,7 +13,7 @@ alloy-rlp = "0.3"
 eyre.workspace = true
 futures.workspace = true
 filter.workspace = true
-model.workspace = true
+journal.workspace = true
 serde.workspace = true
 # native-tls-alpn is what makes the TLS handshake offer h2. The http2
 # feature alone builds the HTTP/2 frames but still speaks HTTP/1.1.

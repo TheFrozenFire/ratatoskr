@@ -6,7 +6,10 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+alloy-consensus.workspace = true
+alloy-eips = "2.5"
 alloy-primitives.workspace = true
 eyre.workspace = true
 num-bigint = "0.4"
+reth-ethereum-primitives.workspace = true
 reth-network-peers.workspace = true

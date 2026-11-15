@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/model",
+    "crates/journal",
     "crates/discover",
     "crates/filter",
     "crates/eth-p2p",
@@ -54,7 +54,7 @@ era = { path = "crates/era" }
 eth-p2p = { path = "crates/eth-p2p" }
 filter = { path = "crates/filter" }
 ipc = { path = "crates/ipc" }
-model = { path = "crates/model" }
+journal = { path = "crates/journal" }
 peer = { path = "crates/peer" }
 routing = { path = "crates/routing" }
 searcher = { path = "crates/searcher" }

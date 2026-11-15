@@ -10,7 +10,7 @@ use alloy_primitives::{Bloom, B256};
 use eyre::{eyre, WrapErr};
 use filter::LogFilter;
 use futures::{stream, StreamExt};
-use model::NormalizedLog;
+use journal::Log;
 use serde::Serialize;
 use std::collections::HashSet;
 
@@ -59,7 +59,7 @@ pub struct EraBlock {
     pub header: HeaderRow,
     /// Snappy frame from the era1 receipt record. Empty when that record is empty.
     pub receipts_snappy: Vec<u8>,
-    pub logs: Vec<NormalizedLog>,
+    pub logs: Vec<Log>,
 }
 
 /// Logs for specific blocks. Each block costs a header range and a receipt
@@ -71,7 +71,7 @@ pub async fn logs_for_blocks(
     blocks: &[u64],
     filter: &LogFilter,
     inflight: usize,
-) -> eyre::Result<Vec<NormalizedLog>> {
+) -> eyre::Result<Vec<Log>> {
     let mut logs = Vec::new();
     for block in receipts_for_blocks(http, mirror, network, blocks, filter, inflight).await? {
         logs.extend(block.logs);
@@ -130,7 +130,7 @@ pub fn logs_from_snappy(
     header: &HeaderRow,
     payload: &[u8],
     filter: &LogFilter,
-) -> eyre::Result<Vec<NormalizedLog>> {
+) -> eyre::Result<Vec<Log>> {
     let receipts = era1::decode_receipts(payload)?;
     let root = era1::receipt_root(&receipts);
     if root != header.receipts_root {
@@ -197,7 +197,7 @@ pub async fn enumerate_logs(
     filter: &LogFilter,
     inflight: usize,
     window: Option<u64>,
-) -> eyre::Result<Vec<NormalizedLog>> {
+) -> eyre::Result<Vec<Log>> {
     let files = catalog::load_catalog(http, mirror, network).await?;
     let mut logs = Vec::new();
     for epoch in catalog::epoch_of(from)..=catalog::epoch_of(to) {
@@ -468,7 +468,7 @@ async fn fetch_logs(
     headers: &[LocatedHeader],
     filter: &LogFilter,
     inflight: usize,
-) -> eyre::Result<Vec<NormalizedLog>> {
+) -> eyre::Result<Vec<Log>> {
     let hits: Vec<&LocatedHeader> = headers
         .iter()
         .filter(|header| filter.bloom_maybe(&header.row.logs_bloom))
@@ -526,14 +526,14 @@ fn matching_logs(
     header: &HeaderRow,
     receipts: &[alloy_consensus::ReceiptEnvelope],
     filter: &LogFilter,
-) -> Vec<NormalizedLog> {
+) -> Vec<Log> {
     let mut logs = Vec::new();
     let mut log_index = 0u64;
     for (tx_index, receipt) in receipts.iter().enumerate() {
         for log in receipt.logs() {
             let topics = log.topics().to_vec();
             if filter.matches(log.address, &topics) {
-                logs.push(NormalizedLog {
+                logs.push(Log {
                     block_number: header.number,
                     block_hash: header.hash,
                     tx_index: tx_index as u64,

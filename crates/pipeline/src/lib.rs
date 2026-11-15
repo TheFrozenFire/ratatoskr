@@ -10,11 +10,11 @@ mod venue;
 pub use header::HeaderSource;
 pub use venue::VenueSource;
 
-use model::{BlockRecord, HeaderRecord};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use store::{ChainStore, CorpusStore, DiscoveryStore, LocalStore};
+use store_model::{BlockRecord, HeaderRecord};
 use tokio::sync::mpsc;
 use venues::{Put, ReceiptBody, VenueRow};
 
@@ -215,12 +215,12 @@ fn source_retries(err: &eyre::Report) -> bool {
 mod tests {
     use super::{Fanout, RecordBatch, Sink, SinkReply, Source, StoreSink};
     use alloy_primitives::{address, b256, Address, B256};
-    use model::{BlockRecord, HeaderRecord, MAINNET_GENESIS_HASH};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
     use store::{ChainStore, CorpusStore, DiscoveryStore, LocalStore};
+    use store_model::{BlockRecord, HeaderRecord, MAINNET_GENESIS_HASH};
     use tokio::sync::watch;
     use venues::{Put, VenueRow};
 

@@ -1,6 +1,6 @@
 //! Receipt corpus.
 
-use model::BlockRecord;
+use store_model::BlockRecord;
 
 use crate::{blocking, LocalStore};
 

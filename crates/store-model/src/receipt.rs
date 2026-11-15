@@ -1,12 +1,11 @@
-//! Receipt bundle stored inside a [`BlockRecord`](model::BlockRecord).
+//! Receipt bundle stored in [`BlockRecord`](crate::BlockRecord).
 //!
-//! The zstd payload is a little-endian receipt count, then for each receipt a
-//! little-endian length and the EIP-2718 encoding, bloom included.
+//! The bytes are a little-endian receipt count, then for each receipt a
+//! little-endian length and the EIP-2718 encoding, bloom included. The block
+//! record stores those bytes inside a zstd frame.
 
-use crate::{BlockRecord, NormalizedLog};
 use alloy_consensus::{ReceiptWithBloom, TxReceipt};
 use alloy_eips::eip2718::{Decodable2718, Encodable2718};
-use alloy_primitives::{Bytes, B256};
 use eyre::eyre;
 use reth_ethereum_primitives::Receipt;
 
@@ -46,42 +45,6 @@ pub fn decode_receipt_bundle(mut bytes: &[u8]) -> eyre::Result<Vec<Receipt>> {
     Ok(receipts)
 }
 
-/// Logs in a stored block. An empty body is a hole and yields no logs.
-pub fn logs_in_block(record: &BlockRecord) -> eyre::Result<Vec<NormalizedLog>> {
-    if record.receipts_zstd.is_empty() {
-        return Ok(Vec::new());
-    }
-    let bytes = zstd::stream::decode_all(record.receipts_zstd.as_slice())
-        .map_err(|err| eyre!("zstd: {err}"))?;
-    let receipts = decode_receipt_bundle(&bytes)?;
-    Ok(flatten_logs(record.number, record.hash, &receipts))
-}
-
-pub fn flatten_logs(
-    block_number: u64,
-    block_hash: B256,
-    receipts: &[Receipt],
-) -> Vec<NormalizedLog> {
-    let mut logs = Vec::new();
-    let mut log_index = 0_u64;
-    for (tx_index, receipt) in receipts.iter().enumerate() {
-        for log in &receipt.logs {
-            logs.push(NormalizedLog {
-                block_number,
-                block_hash,
-                tx_index: tx_index as u64,
-                tx_hash: None,
-                log_index,
-                address: log.address,
-                topics: log.data.topics().to_vec(),
-                data: Bytes::copy_from_slice(log.data.data.as_ref()),
-            });
-            log_index = log_index.saturating_add(1);
-        }
-    }
-    logs
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,18 +65,6 @@ mod tests {
                 ),
             }],
         }
-    }
-
-    #[test]
-    fn flattens_receipt_logs_in_order() {
-        let block = b256!("0202020202020202020202020202020202020202020202020202020202020202");
-        let logs = flatten_logs(5, block, &[one_log()]);
-        assert_eq!(logs.len(), 1);
-        assert_eq!(logs[0].block_number, 5);
-        assert_eq!(logs[0].tx_index, 0);
-        assert_eq!(logs[0].log_index, 0);
-        assert_eq!(logs[0].tx_hash, None);
-        assert_eq!(logs[0].data.as_ref(), &bytes!("abcd")[..]);
     }
 
     #[test]

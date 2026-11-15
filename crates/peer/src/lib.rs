@@ -8,14 +8,13 @@
 
 mod catalog;
 
-use discover::classify;
+use discover::{classify, DiscoveryHit};
 use eth_p2p::{
     census_mainnet_dns, dns_candidates, encode_block_records, fetch_block_logs, fetch_block_range,
     fetch_header_range, DnsPeer, Egress, OutboundSession, DNS_ALL, DNS_SNAP,
 };
 use eyre::WrapErr;
 use ipc::{BatchKind, HistoryPeer, SessionInfo};
-use model::{encode_header_records, BlockRecord, DiscoveryHit, HeaderRecord, ETHEREUM_MAINNET};
 use observability::{debug, info, note_peers, warn};
 use reth_network_peers::{pk2id, NodeRecord, PeerId};
 use secp256k1::{SecretKey, SECP256K1};
@@ -33,6 +32,7 @@ use std::{
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use store_model::{encode_header_records, BlockRecord, HeaderRecord};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
@@ -40,6 +40,8 @@ use tokio::{
     task::{JoinHandle, JoinSet},
     time::{sleep, timeout},
 };
+
+const MAINNET: u64 = 1;
 
 pub const TARGET_PEERS: usize = 16;
 /// One pass over a few hundred DNS records takes minutes. Revisit an address
@@ -949,7 +951,7 @@ async fn fetch_one(session: &OutboundSession, block: u64) -> Result<Fetched, Str
     let hits = block
         .logs
         .iter()
-        .flat_map(|log| classify(ETHEREUM_MAINNET, log))
+        .flat_map(|log| classify(MAINNET, log))
         .collect::<Vec<_>>();
     Ok(Fetched {
         peer: session.peer.to_string(),
@@ -1323,7 +1325,6 @@ fn hex_val(byte: u8) -> eyre::Result<u8> {
 mod tests {
     use super::*;
     use eth_p2p::{DnsPeer, DNS_ALL, DNS_SNAP};
-    use model::{decode_header_records, encode_header_records};
     use reth_network_peers::{NodeRecord, PeerId};
     use std::{
         net::{IpAddr, Ipv4Addr},
@@ -1331,6 +1332,7 @@ mod tests {
         sync::Mutex as StdMutex,
         time::UNIX_EPOCH,
     };
+    use store_model::{decode_header_records, encode_header_records};
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
     fn temp_dir(name: &str) -> PathBuf {

@@ -4,15 +4,14 @@ use crate::session::OutboundSession;
 use alloy_consensus::{constants::EMPTY_ROOT_HASH, proofs::calculate_receipt_root, TxReceipt};
 use alloy_primitives::B256;
 use eyre::eyre;
-use model::{
-    encode_block_record, encode_receipt_bundle, flatten_logs, BlockLogs, BlockRecord, HeaderRecord,
-};
+use journal::{flatten_logs, BlockLogs};
 use reth_eth_wire::EthMessage;
 use reth_eth_wire_types::{
     message::RequestPair, BlockHashOrNumber, EthVersion, GetBlockHeaders, GetReceipts,
     GetReceipts70, HeadersDirection,
 };
 use reth_ethereum_primitives::Receipt;
+use store_model::{encode_block_record, encode_receipt_bundle, BlockRecord, HeaderRecord};
 
 /// Fetch every log in `block_number` from the connected peer.
 pub async fn fetch_block_logs(

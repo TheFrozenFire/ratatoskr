@@ -6,7 +6,7 @@
 
 use alloy_primitives::{keccak256, Address, B256};
 use discover::univ3_pool;
-use model::NormalizedLog;
+use journal::Log;
 use std::sync::OnceLock;
 
 use crate::catalog::{
@@ -128,7 +128,7 @@ pub fn topic_v4() -> B256 {
     seed_topic("uni-v4", 0)
 }
 
-pub fn rows_from_log(log: &NormalizedLog) -> Vec<VenueRow> {
+pub fn rows_from_log(log: &Log) -> Vec<VenueRow> {
     let Some(&topic0) = log.topics.first() else {
         return Vec::new();
     };
@@ -157,7 +157,7 @@ pub fn rows_from_log(log: &NormalizedLog) -> Vec<VenueRow> {
     Vec::new()
 }
 
-fn pair_row(log: &NormalizedLog) -> Option<VenueRow> {
+fn pair_row(log: &Log) -> Option<VenueRow> {
     if log.topics.len() != 3 {
         return None;
     }
@@ -180,7 +180,7 @@ fn pair_row(log: &NormalizedLog) -> Option<VenueRow> {
     ))
 }
 
-fn pool_row(log: &NormalizedLog) -> Option<VenueRow> {
+fn pool_row(log: &Log) -> Option<VenueRow> {
     let pool = univ3_pool(log)?;
     Some(row(
         v3_kind(log.address),
@@ -197,7 +197,7 @@ fn pool_row(log: &NormalizedLog) -> Option<VenueRow> {
     ))
 }
 
-fn v4_row(log: &NormalizedLog) -> Option<VenueRow> {
+fn v4_row(log: &Log) -> Option<VenueRow> {
     if log.topics.len() != 4 {
         return None;
     }
@@ -222,7 +222,7 @@ fn v4_row(log: &NormalizedLog) -> Option<VenueRow> {
     ))
 }
 
-fn bal_v2_pool_row(log: &NormalizedLog) -> Option<VenueRow> {
+fn bal_v2_pool_row(log: &Log) -> Option<VenueRow> {
     if log.topics.len() < 3 {
         return None;
     }
@@ -241,7 +241,7 @@ fn bal_v2_pool_row(log: &NormalizedLog) -> Option<VenueRow> {
     ))
 }
 
-fn bal_v2_tokens_row(log: &NormalizedLog) -> Option<VenueRow> {
+fn bal_v2_tokens_row(log: &Log) -> Option<VenueRow> {
     if log.topics.len() < 2 {
         return None;
     }
@@ -260,7 +260,7 @@ fn bal_v2_tokens_row(log: &NormalizedLog) -> Option<VenueRow> {
     ))
 }
 
-fn bal_v3_row(log: &NormalizedLog) -> Option<VenueRow> {
+fn bal_v3_row(log: &Log) -> Option<VenueRow> {
     if log.topics.len() < 3 {
         return None;
     }
@@ -279,7 +279,7 @@ fn bal_v3_row(log: &NormalizedLog) -> Option<VenueRow> {
     ))
 }
 
-fn metric_row(log: &NormalizedLog) -> Option<VenueRow> {
+fn metric_row(log: &Log) -> Option<VenueRow> {
     if log.topics.len() < 4 {
         return None;
     }
@@ -427,8 +427,8 @@ mod tests {
         text.parse().unwrap()
     }
 
-    fn bare(address: Address, topics: Vec<B256>, data: Vec<u8>) -> NormalizedLog {
-        NormalizedLog {
+    fn bare(address: Address, topics: Vec<B256>, data: Vec<u8>) -> Log {
+        Log {
             block_number: 100,
             block_hash: B256::ZERO,
             tx_index: 0,

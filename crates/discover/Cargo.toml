@@ -7,5 +7,5 @@ publish.workspace = true
 
 [dependencies]
 alloy-primitives.workspace = true
-model.workspace = true
+journal.workspace = true
 serde.workspace = true

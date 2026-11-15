@@ -7,7 +7,8 @@ use eyre::eyre;
 use crate::catalog::Put;
 use crate::decode::rows_from_log;
 use crate::{CorpusStore, DiscoveryStore};
-use model::{decode_block_record, logs_in_block};
+use journal::logs_in_block;
+use store_model::decode_block_record;
 
 pub async fn import_corpus<S>(store: &S) -> eyre::Result<u64>
 where

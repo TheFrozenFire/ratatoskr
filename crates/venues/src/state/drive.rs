@@ -672,7 +672,7 @@ async fn watch_once<S: ChainStore + VenueStore, P: HistoryPeer>(
     }
     let mut hits = Vec::new();
     for block in &blocks {
-        let logs = model::logs_in_block(block)?;
+        let logs = journal::logs_in_block(block)?;
         for log in logs {
             if let Some(hit) = watch_hit(store, &log).await? {
                 hits.push(hit);
@@ -684,10 +684,7 @@ async fn watch_once<S: ChainStore + VenueStore, P: HistoryPeer>(
     Ok(Some(format!("watch {from}..{through} hits {}", hits.len())))
 }
 
-async fn watch_hit<S: VenueStore>(
-    store: &S,
-    log: &NormalizedLog,
-) -> eyre::Result<Option<WatchHit>> {
+async fn watch_hit<S: VenueStore>(store: &S, log: &Log) -> eyre::Result<Option<WatchHit>> {
     let Some(&topic) = log.topics.first() else {
         return Ok(None);
     };

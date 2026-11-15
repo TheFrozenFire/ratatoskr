@@ -5,9 +5,9 @@
 //! length is the `bytes` field.
 
 use eyre::{eyre, WrapErr};
-use model::{decode_block_records, decode_header_records, BlockRecord, HeaderRecord};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use store_model::{decode_block_records, decode_header_records, BlockRecord, HeaderRecord};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
@@ -221,7 +221,7 @@ async fn write_request(conn: &mut UnixStream, request: &Value) -> eyre::Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use model::{decode_block_records, decode_header_records, encode_header_records};
+    use store_model::{decode_block_records, decode_header_records, encode_header_records};
     use tokio::{
         io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
         net::UnixListener,

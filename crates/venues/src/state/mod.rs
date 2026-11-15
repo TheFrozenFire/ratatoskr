@@ -33,11 +33,12 @@ use crate::{
 use alloy_primitives::{keccak256, Address, B256, U256};
 use eyre::WrapErr;
 use ipc::HistoryPeer;
-use model::{BlockRecord, NormalizedLog};
+use journal::Log;
 use num_bigint::{BigInt, Sign};
 use num_traits::Zero;
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use store_model::BlockRecord;
 
 mod codec;
 mod drive;
@@ -363,7 +364,7 @@ fn u256_from_bigint(value: &BigInt) -> Result<U256, String> {
 /// Classify one log into a dirty hint. Factory creation logs are ignored.
 /// The caller resolves identities. A singleton pool id comes from the event.
 pub fn classify_log(
-    log: &NormalizedLog,
+    log: &Log,
     mut has_id: impl FnMut(u8, B256) -> bool,
     mut by_address: impl FnMut(Address) -> Option<(u8, B256)>,
 ) -> Option<WatchHit> {
@@ -754,7 +755,7 @@ fn unpack_stored(word: U256) -> (u128, i128) {
 }
 
 fn singleton_hit(
-    log: &NormalizedLog,
+    log: &Log,
     topic: B256,
     kind: u8,
     head: B256,
@@ -781,7 +782,7 @@ fn singleton_hit(
     })
 }
 
-fn topic_id(log: &NormalizedLog) -> Option<B256> {
+fn topic_id(log: &Log) -> Option<B256> {
     log.topics.get(1).copied()
 }
 
@@ -1352,7 +1353,7 @@ mod tests {
                 None
             }
         };
-        let mint = NormalizedLog {
+        let mint = Log {
             block_number: 9,
             block_hash: B256::ZERO,
             tx_index: 0,
@@ -1365,7 +1366,7 @@ mod tests {
         let hit = classify_log(&mint, has, address).unwrap();
         assert_eq!(hit.class, CLASS_TICKS);
         assert_eq!(hit.id, id);
-        let factory = NormalizedLog {
+        let factory = Log {
             address: crate::decode::known().uni_v3,
             topics: vec![TOPIC_V3_SWAP],
             ..mint.clone()

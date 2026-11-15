@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 use alloy_primitives::Bloom;
 use eyre::{eyre, WrapErr};
 use ipc::{socket_path, HistoryPeer};
-use model::{logs_in_block, BlockRecord};
+use journal::logs_in_block;
+use store_model::BlockRecord;
 
 use crate::catalog::{Put, ReceiptBody};
 use crate::decode::rows_from_log;
@@ -817,7 +818,7 @@ mod tests {
     }
 
     fn zstd_block(number: u64) -> BlockRecord {
-        let raw = model::encode_receipt_bundle(&[]);
+        let raw = store_model::encode_receipt_bundle(&[]);
         let receipts_zstd = zstd::stream::encode_all(raw.as_slice(), 0).unwrap();
         BlockRecord {
             number,
@@ -861,7 +862,7 @@ mod tests {
             &self,
             _start: u64,
             _count: u64,
-        ) -> eyre::Result<Vec<model::HeaderRecord>> {
+        ) -> eyre::Result<Vec<store_model::HeaderRecord>> {
             Ok(Vec::new())
         }
 

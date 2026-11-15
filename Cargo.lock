@@ -1748,7 +1748,7 @@ name = "discover"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
- "model",
+ "journal",
  "serde",
 ]
 
@@ -1941,7 +1941,7 @@ dependencies = [
  "eyre",
  "filter",
  "futures",
- "model",
+ "journal",
  "observability",
  "reqwest 0.12.28",
  "serde",
@@ -1967,7 +1967,7 @@ dependencies = [
  "alloy-primitives",
  "eyre",
  "futures",
- "model",
+ "journal",
  "observability",
  "rand 0.8.8",
  "reth-chainspec",
@@ -1981,6 +1981,7 @@ dependencies = [
  "reth-net-nat",
  "reth-network-peers",
  "secp256k1 0.30.0",
+ "store-model",
  "tokio",
  "zstd",
 ]
@@ -2860,8 +2861,8 @@ name = "ipc"
 version = "0.1.0"
 dependencies = [
  "eyre",
- "model",
  "serde_json",
+ "store-model",
  "tokio",
 ]
 
@@ -3048,6 +3049,18 @@ checksum = "1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3"
 dependencies = [
  "getrandom 0.4.3",
  "libc",
+]
+
+[[package]]
+name = "journal"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "eyre",
+ "reth-ethereum-primitives",
+ "serde",
+ "store-model",
+ "zstd",
 ]
 
 [[package]]
@@ -3260,20 +3273,6 @@ dependencies = [
  "log",
  "wasi",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "model"
-version = "0.1.0"
-dependencies = [
- "alloy-consensus",
- "alloy-eips",
- "alloy-primitives",
- "eyre",
- "reth-ethereum-primitives",
- "serde",
- "store-model",
- "zstd",
 ]
 
 [[package]]
@@ -3633,7 +3632,6 @@ dependencies = [
  "eth-p2p",
  "eyre",
  "ipc",
- "model",
  "observability",
  "rand 0.8.8",
  "reth-network-peers",
@@ -3748,9 +3746,9 @@ dependencies = [
  "alloy-primitives",
  "eyre",
  "ipc",
- "model",
  "observability",
  "store",
+ "store-model",
  "tokio",
  "venues",
 ]
@@ -5374,7 +5372,6 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "eyre",
- "model",
  "num-bigint",
  "observability",
  "oracles",
@@ -5390,9 +5387,12 @@ dependencies = [
 name = "store-model"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
  "alloy-primitives",
  "eyre",
  "num-bigint",
+ "reth-ethereum-primitives",
  "reth-network-peers",
 ]
 
@@ -5979,7 +5979,7 @@ dependencies = [
  "alloy-primitives",
  "discover",
  "eyre",
- "model",
+ "journal",
  "observability",
  "store",
  "store-model",
@@ -6069,7 +6069,7 @@ dependencies = [
  "eyre",
  "filter",
  "ipc",
- "model",
+ "journal",
  "num-bigint",
  "num-integer",
  "num-rational",
