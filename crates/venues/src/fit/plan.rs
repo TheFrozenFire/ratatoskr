@@ -214,8 +214,7 @@ pub(crate) fn direction_knots(
         return knots;
     }
     for (_, amount) in grid_amounts(max_in) {
-        let Ok(quote) =
-            crate::state::estimate(curve, curve.generation, token_in, token_out, amount)
+        let Ok(quote) = super::estimate(curve, curve.generation, token_in, token_out, amount)
         else {
             continue;
         };

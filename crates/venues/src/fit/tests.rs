@@ -51,13 +51,13 @@ fn a_local_product_curve_quotes_off_the_grid() {
     assert_eq!(curve.payload[1], 0);
     let off = U256::from(2_500u64);
     for (token_in, token_out) in [(token0, token1), (token1, token0)] {
-        let fitted = crate::state::estimate(&curve, 7, token_in, token_out, off).unwrap();
+        let fitted = super::estimate(&curve, 7, token_in, token_out, off).unwrap();
         let direct = detail.quote(token_in, token_out, off).unwrap();
         assert_eq!(fitted.amount_out, direct.amount_out);
         assert_eq!(fitted.fee_paid, direct.fee_paid);
         assert!(!fitted.exhausted);
     }
-    let zero = crate::state::estimate(&curve, 7, token0, token1, U256::ZERO).unwrap();
+    let zero = super::estimate(&curve, 7, token0, token1, U256::ZERO).unwrap();
     assert_eq!(zero.amount_out, U256::ZERO);
     assert_eq!(zero.fee_paid, U256::ZERO);
 }
@@ -106,7 +106,7 @@ fn a_local_concentrated_curve_quotes_off_the_grid() {
     assert_eq!(fit.directions.len(), 2);
     let off = U256::from(1_000u64);
     for (token_in, token_out) in [(token0, token1), (token1, token0)] {
-        let fitted = crate::state::estimate(&curve, 4, token_in, token_out, off).unwrap();
+        let fitted = super::estimate(&curve, 4, token_in, token_out, off).unwrap();
         let direct = detail.quote(token_in, token_out, off).unwrap();
         assert_eq!(fitted.amount_out, direct.amount_out);
     }

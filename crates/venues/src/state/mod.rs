@@ -22,16 +22,11 @@ use crate::{
     SUSHI_V3, UNI_V3, V3_FORK,
 };
 use alloy_primitives::{keccak256, Address, B256, U256};
-use chain::detail::{
-    tick_request, BitmapWord, PoolDetail, Quote, TickWord, FLAG_CRYPTO, FLAG_FAILED, FLAG_STABLE,
-    FLAG_TRUNCATED,
-};
+use chain::detail::{tick_request, BitmapWord, PoolDetail, TickWord, FLAG_FAILED, FLAG_TRUNCATED};
 use chain::rpc::Rpc;
 use chain::tick::{self, TickWordRead};
 use eyre::WrapErr;
 use journal::Log;
-use num_bigint::{BigInt, Sign};
-use num_traits::Zero;
 use peer::HistoryPeer;
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -43,6 +38,7 @@ mod drive;
 use self::codec::*;
 pub use self::drive::run;
 
+pub use crate::fit::estimate;
 #[cfg(test)]
 pub(crate) use store_model::decode_job;
 pub(crate) use store_model::{priority_of, DIRTY_BAND};
@@ -235,23 +231,6 @@ pub fn join_detail(
     }
 }
 
-pub fn is_canonical(detail: &PoolDetail) -> bool {
-    match detail {
-        PoolDetail::ConstantProduct(_) | PoolDetail::Concentrated(_) => true,
-        PoolDetail::Balancer(pool) => {
-            if pool.flags & FLAG_STABLE != 0 {
-                return true;
-            }
-            pool.weights.len() == pool.tokens.len()
-                && pool.weights.len() >= 2
-                && pool.weights.iter().all(|weight| *weight == pool.weights[0])
-                && !pool.weights[0].is_zero()
-        }
-        PoolDetail::Curve(pool) => pool.flags & FLAG_CRYPTO == 0 && pool.gamma.is_zero(),
-        PoolDetail::Metric(_) | PoolDetail::Failed(_) => false,
-    }
-}
-
 pub fn derive_curve(detail: &PoolDetail, generation: u64) -> Result<CurveRecord, String> {
     let (kind, id) = detail_id(detail)?;
     Ok(CurveRecord {
@@ -261,86 +240,6 @@ pub fn derive_curve(detail: &PoolDetail, generation: u64) -> Result<CurveRecord,
         version: CURVE_VERSION,
         payload: crate::fit::curve_payload(detail),
     })
-}
-
-pub fn estimate(
-    curve: &CurveRecord,
-    generation: u64,
-    token_in: Address,
-    token_out: Address,
-    amount_in: U256,
-) -> Result<Quote, String> {
-    if curve.version != CURVE_VERSION || curve.generation != generation {
-        return Err("curve generation".into());
-    }
-    estimate_payload(
-        &curve.payload,
-        curve.kind,
-        curve.id,
-        token_in,
-        token_out,
-        amount_in,
-    )
-}
-
-fn estimate_payload(
-    payload: &[u8],
-    _kind: u8,
-    _id: B256,
-    token_in: Address,
-    token_out: Address,
-    amount_in: U256,
-) -> Result<Quote, String> {
-    let fit = fitter::decode_fit(payload)?;
-    if fit.reason != 0 {
-        return Err("not canonical".into());
-    }
-    let Some(direction) = fit
-        .directions
-        .iter()
-        .find(|item| item.token_in == token_in && item.token_out == token_out)
-    else {
-        return Err("no quote".into());
-    };
-    if amount_in.is_zero() {
-        return Ok(Quote {
-            amount_in,
-            amount_out: U256::ZERO,
-            fee_paid: U256::ZERO,
-            exhausted: false,
-        });
-    }
-    let input = bigint_from_u256(amount_in);
-    let output =
-        fitter::eval_formula(&direction.formula, &input).ok_or_else(|| "no quote".to_string())?;
-    Ok(Quote {
-        amount_in,
-        amount_out: u256_from_bigint(&output)?,
-        fee_paid: u256_from_bigint(&fee_paid_of(&direction.formula, &input))?,
-        exhausted: false,
-    })
-}
-
-/// The fee a product quote withholds from the input.
-fn fee_paid_of(formula: &fitter::Formula, amount: &BigInt) -> BigInt {
-    match formula {
-        fitter::Formula::Product { fee, denom, .. } if !denom.is_zero() && fee <= denom => {
-            amount - (amount * (denom - fee)) / denom
-        }
-        _ => BigInt::from(0),
-    }
-}
-
-fn bigint_from_u256(value: U256) -> BigInt {
-    BigInt::from_bytes_be(Sign::Plus, &value.to_be_bytes::<32>())
-}
-
-fn u256_from_bigint(value: &BigInt) -> Result<U256, String> {
-    let (sign, bytes) = value.to_bytes_be();
-    if sign == Sign::Minus || bytes.len() > 32 {
-        return Err("quote".into());
-    }
-    Ok(U256::from_be_slice(&bytes))
 }
 
 /// Classify one log into a dirty hint. Factory creation logs are ignored.
@@ -780,15 +679,6 @@ fn detail_id(detail: &PoolDetail) -> Result<(u8, B256), String> {
         PoolDetail::Metric(pool) => (pool.kind, pool.id),
         PoolDetail::Failed(_) => return Err("pool read failed".into()),
     })
-}
-
-pub(crate) fn skip_reason(detail: &PoolDetail) -> u8 {
-    match detail {
-        PoolDetail::Metric(_) => 1,
-        PoolDetail::Curve(_) => 2,
-        PoolDetail::Balancer(_) => 3,
-        _ => 4,
-    }
 }
 
 #[cfg(test)]

@@ -6,12 +6,38 @@
 use super::formula::{addr, opt_u256};
 use super::plan::{bigint_from_u256, direction_of, pairs_of, Direction, PAGE};
 use crate::catalog::{kind_name, Catalog, METRIC};
-use crate::state::{is_canonical, join_detail};
+use crate::state::join_detail;
 use alloy_primitives::Address;
-use chain::detail::{product_fee_pips, PoolDetail};
+use chain::detail::{product_fee_pips, PoolDetail, FLAG_CRYPTO, FLAG_STABLE};
 use fitter::{choose, encode_fit, labels_of, Formula, StoredFit};
 use num_bigint::BigInt;
 use serde_json::{json, Value};
+
+pub fn is_canonical(detail: &PoolDetail) -> bool {
+    match detail {
+        PoolDetail::ConstantProduct(_) | PoolDetail::Concentrated(_) => true,
+        PoolDetail::Balancer(pool) => {
+            if pool.flags & FLAG_STABLE != 0 {
+                return true;
+            }
+            pool.weights.len() == pool.tokens.len()
+                && pool.weights.len() >= 2
+                && pool.weights.iter().all(|weight| *weight == pool.weights[0])
+                && !pool.weights[0].is_zero()
+        }
+        PoolDetail::Curve(pool) => pool.flags & FLAG_CRYPTO == 0 && pool.gamma.is_zero(),
+        PoolDetail::Metric(_) | PoolDetail::Failed(_) => false,
+    }
+}
+
+pub(crate) fn skip_reason(detail: &PoolDetail) -> u8 {
+    match detail {
+        PoolDetail::Metric(_) => 1,
+        PoolDetail::Curve(_) => 2,
+        PoolDetail::Balancer(_) => 3,
+        _ => 4,
+    }
+}
 
 pub(crate) fn curve_payload(detail: &PoolDetail) -> Vec<u8> {
     if let PoolDetail::Concentrated(pool) = detail {
@@ -20,7 +46,7 @@ pub(crate) fn curve_payload(detail: &PoolDetail) -> Vec<u8> {
         }
     }
     if !is_canonical(detail) {
-        return encode_fit(crate::state::skip_reason(detail), &[]);
+        return encode_fit(skip_reason(detail), &[]);
     }
     encode_fit(0, &structural_fits(detail))
 }
