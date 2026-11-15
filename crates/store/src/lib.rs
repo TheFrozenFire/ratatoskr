@@ -34,28 +34,46 @@ pub struct LocalStore {
     chain: Option<Arc<HeaderChain>>,
     corpus: Option<Arc<Corpus>>,
     catalog: Option<Arc<Catalog>>,
+    caches: config::Store,
 }
 
 impl LocalStore {
     pub fn open(headers: &Path, corpus: &Path, venues: &Path) -> eyre::Result<Self> {
+        Self::open_with(headers, corpus, venues, &config::Store::default())
+    }
+
+    pub fn open_with(
+        headers: &Path,
+        corpus: &Path,
+        venues: &Path,
+        caches: &config::Store,
+    ) -> eyre::Result<Self> {
         Ok(Self {
-            chain: Some(Arc::new(HeaderChain::create(headers)?)),
-            corpus: Some(Arc::new(Corpus::create(corpus)?)),
-            catalog: Some(Arc::new(Catalog::open(venues)?)),
+            chain: Some(Arc::new(HeaderChain::create_with(headers, caches.headers)?)),
+            corpus: Some(Arc::new(Corpus::create_with(corpus, caches.corpus)?)),
+            catalog: Some(Arc::new(Catalog::open_with(venues, caches)?)),
+            caches: caches.clone(),
         })
     }
 
     /// Corpus file only. Ingest must not lock `headers.redb` or `venues.redb`.
     pub fn corpus(path: &Path) -> eyre::Result<Self> {
-        Self::parts(None, Some(CorpusOpen::Create(path)), None)
+        Self::parts_with(
+            None,
+            Some(CorpusOpen::Create(path)),
+            None,
+            &config::Store::default(),
+        )
     }
 
     /// Header sync creates `headers.redb` and does not lock the other entity files.
     pub fn open_headers(headers: &Path) -> eyre::Result<Self> {
+        let caches = config::Store::default();
         Ok(Self {
-            chain: Some(Arc::new(HeaderChain::create(headers)?)),
+            chain: Some(Arc::new(HeaderChain::create_with(headers, caches.headers)?)),
             corpus: None,
             catalog: None,
+            caches,
         })
     }
 
@@ -66,22 +84,34 @@ impl LocalStore {
         corpus: Option<CorpusOpen<'_>>,
         venues: Option<&Path>,
     ) -> eyre::Result<Self> {
+        Self::parts_with(headers, corpus, venues, &config::Store::default())
+    }
+
+    pub fn parts_with(
+        headers: Option<&Path>,
+        corpus: Option<CorpusOpen<'_>>,
+        venues: Option<&Path>,
+        caches: &config::Store,
+    ) -> eyre::Result<Self> {
         let chain = match headers {
-            Some(path) => Some(Arc::new(HeaderChain::open(path).wrap_err("header chain")?)),
+            Some(path) => Some(Arc::new(
+                HeaderChain::open_with(path, caches.headers).wrap_err("header chain")?,
+            )),
             None => None,
         };
         let corpus = match corpus {
-            Some(mode) => Some(Arc::new(open_corpus(mode)?)),
+            Some(mode) => Some(Arc::new(open_corpus(mode, caches.corpus)?)),
             None => None,
         };
         let catalog = match venues {
-            Some(path) => Some(Arc::new(Catalog::open(path)?)),
+            Some(path) => Some(Arc::new(Catalog::open_with(path, caches)?)),
             None => None,
         };
         Ok(Self {
             chain,
             corpus,
             catalog,
+            caches: caches.clone(),
         })
     }
 
@@ -143,11 +173,13 @@ impl LocalStore {
     }
 }
 
-fn open_corpus(mode: CorpusOpen<'_>) -> eyre::Result<Corpus> {
+fn open_corpus(mode: CorpusOpen<'_>, cache: usize) -> eyre::Result<Corpus> {
     match mode {
-        CorpusOpen::Open(path) => Corpus::open(path),
-        CorpusOpen::Create(path) => Corpus::create(path),
-        CorpusOpen::OpenOrCreate(path) => Corpus::create(path).wrap_err("receipt cache"),
+        CorpusOpen::Open(path) => Corpus::open_with(path, cache),
+        CorpusOpen::Create(path) => Corpus::create_with(path, cache),
+        CorpusOpen::OpenOrCreate(path) => {
+            Corpus::create_with(path, cache).wrap_err("receipt cache")
+        }
     }
 }
 

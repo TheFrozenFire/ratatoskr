@@ -10,7 +10,7 @@ use crate::scan::{self, Survey};
 use crate::scenario::{self, Scenario};
 use crate::source::Source;
 use crate::token::{self, Known};
-use crate::{HUB_LIMITS, HUB_MINIMUM, QUERY_HUBS};
+use crate::HUB_LIMITS;
 
 pub(crate) struct Stage {
     pub(crate) survey: Survey,
@@ -25,7 +25,7 @@ pub(crate) struct Stage {
     pub(crate) cache: CurveCache,
 }
 
-pub(crate) fn load<S: Source>(source: &S) -> eyre::Result<Stage> {
+pub(crate) fn load<S: Source>(source: &S, spots: &config::Spots) -> eyre::Result<Stage> {
     let records = source.tokens().wrap_err("tokens")?;
     let wrapped =
         token::wrapper(&records).ok_or_else(|| eyre::eyre!("the catalog has no wrapper token"))?;
@@ -38,15 +38,15 @@ pub(crate) fn load<S: Source>(source: &S) -> eyre::Result<Stage> {
         survey.graph.out.len()
     );
     let incoming = graph::incoming(&survey.graph);
-    let census = graph::hub_census(&survey.graph, &incoming, HUB_MINIMUM, HUB_LIMITS[3]);
+    let census = graph::hub_census(&survey.graph, &incoming, spots.hub_floor, HUB_LIMITS[3]);
     let hubs: Vec<Token> = census
         .ranked
         .iter()
-        .take(QUERY_HUBS)
+        .take(spots.hub_limit)
         .map(|hub| hub.token)
         .collect();
     crate::report::note_degrees(&survey.graph, &known);
-    crate::report::note_hubs(&census, &known);
+    crate::report::note_hubs(&census, &known, spots.hub_limit);
     let mut reach_rows = Vec::new();
     for limit in HUB_LIMITS {
         let slice: Vec<Token> = census

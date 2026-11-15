@@ -10,6 +10,7 @@ name = "simulate"
 path = "src/main.rs"
 
 [dependencies]
+config.workspace = true
 observability.workspace = true
 eyre.workspace = true
 survey.workspace = true

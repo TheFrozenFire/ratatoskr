@@ -50,28 +50,22 @@ pub struct EntityRead {
     pub(crate) entities: ReadDatabase,
 }
 
-/// redb's builder default is 1 GiB. These are the budgets this process sets.
-const ENTITIES_CACHE: usize = 256 * 1024 * 1024;
-const DISCOVERY_CACHE: usize = 128 * 1024 * 1024;
-const WORK_CACHE: usize = 16 * 1024 * 1024;
-
-/// Page cache for a process that follows the writer.
-///
-/// The writer keeps the larger entity cache. This reader scans conduits and
-/// then reads the pairs a trade names.
-const READ_CACHE: usize = 64 * 1024 * 1024;
-
 impl Catalog {
     /// Open the catalog directory.
     ///
     /// A path whose file name ends in `.redb` selects that file's parent, so
     /// existing callers that pass `venues.redb` keep the same directory.
+    /// redb's builder default is 1 GiB. The cache comes from [`config::Store`].
     pub fn open(path: &Path) -> eyre::Result<Self> {
+        Self::open_with(path, &config::Store::default())
+    }
+
+    pub fn open_with(path: &Path, caches: &config::Store) -> eyre::Result<Self> {
         let dir = catalog_dir(path);
         Ok(Self {
-            discovery: Database::open_or_create(&dir.join("discovery.redb"), DISCOVERY_CACHE)?,
-            entities: Database::open_or_create(&dir.join("entities.redb"), ENTITIES_CACHE)?,
-            work: Database::open_or_create(&dir.join("work.redb"), WORK_CACHE)?,
+            discovery: Database::open_or_create(&dir.join("discovery.redb"), caches.discovery)?,
+            entities: Database::open_or_create(&dir.join("entities.redb"), caches.entities)?,
+            work: Database::open_or_create(&dir.join("work.redb"), caches.work)?,
         })
     }
 
@@ -94,9 +88,15 @@ impl EntityRead {
     ///
     /// A path whose file name ends in `.redb` selects that file's parent.
     pub fn open(path: &Path) -> eyre::Result<Self> {
+        Self::open_with(path, config::Store::default().read)
+    }
+
+    /// The writer keeps the larger entity cache. This reader scans conduits
+    /// and then reads the pairs a trade names.
+    pub fn open_with(path: &Path, cache: usize) -> eyre::Result<Self> {
         let file = catalog_dir(path).join("entities.redb");
         Ok(Self {
-            entities: ReadDatabase::open(&file, READ_CACHE)?,
+            entities: ReadDatabase::open(&file, cache)?,
         })
     }
 }
@@ -371,7 +371,7 @@ mod tests {
         }
         drop(db);
         let dest = TempDir::new();
-        let report = sample_identities(&src, &dest.0, 10).unwrap();
+        let report = sample_identities(&src, &dest.0, 10, &config::Store::default()).unwrap();
         assert_eq!(report.copied, 10);
         assert_eq!(report.by_kind.get(&V3_FORK).copied(), Some(5));
         assert_eq!(report.by_kind.get(&UNI_V2).copied(), Some(5));
@@ -405,15 +405,15 @@ mod tests {
         }
         drop(db);
         let dest = TempDir::new();
-        let first = sample_identities(&src, &dest.0, 10).unwrap();
+        let first = sample_identities(&src, &dest.0, 10, &config::Store::default()).unwrap();
         assert_eq!(first.copied, 10);
-        let filled = fill_identities(&src, &dest.0, 5).unwrap();
+        let filled = fill_identities(&src, &dest.0, 5, &config::Store::default()).unwrap();
         assert_eq!(filled.copied, 5);
         assert_eq!(filled.ids.len(), 5);
         let catalog = Catalog::open(&dest.0).unwrap();
         assert_eq!(catalog.page_venues(UNI_V2, None, 30).unwrap().len(), 15);
         drop(catalog);
-        let again = fill_identities(&src, &dest.0, 5).unwrap();
+        let again = fill_identities(&src, &dest.0, 5, &config::Store::default()).unwrap();
         assert_eq!(again.copied, 5);
         let catalog = Catalog::open(&dest.0).unwrap();
         assert_eq!(catalog.page_venues(UNI_V2, None, 30).unwrap().len(), 20);
@@ -449,7 +449,7 @@ mod tests {
         }
         drop(db);
         let dest = TempDir::new();
-        let report = sample_identities(&src, &dest.0, 3).unwrap();
+        let report = sample_identities(&src, &dest.0, 3, &config::Store::default()).unwrap();
         assert!(report.anchor);
         assert!(report.copied >= 3);
         let catalog = Catalog::open(&dest.0).unwrap();

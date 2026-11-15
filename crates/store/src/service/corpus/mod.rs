@@ -15,17 +15,18 @@ use std::path::Path;
 const BLOCKS: TableDefinition<u64, &[u8]> = TableDefinition::new("blocks");
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 
-/// Receipt batches are multi-megabyte sequential reads and writes.
-const PAGE_CACHE: usize = 64 * 1024 * 1024;
-
 pub struct Corpus {
     db: crate::storage::File,
 }
 
 impl Corpus {
     pub fn create(path: &Path) -> eyre::Result<Self> {
+        Self::create_with(path, config::Store::default().corpus)
+    }
+
+    pub fn create_with(path: &Path, cache: usize) -> eyre::Result<Self> {
         Ok(Self {
-            db: crate::storage::File::create(path, PAGE_CACHE).wrap_err("create redb")?,
+            db: crate::storage::File::create(path, cache).wrap_err("create redb")?,
         })
     }
 
@@ -36,8 +37,12 @@ impl Corpus {
 
     /// Open a corpus another process may be writing. Callers only read.
     pub fn open(path: &Path) -> eyre::Result<Self> {
+        Self::open_with(path, config::Store::default().corpus)
+    }
+
+    pub fn open_with(path: &Path, cache: usize) -> eyre::Result<Self> {
         Ok(Self {
-            db: crate::storage::File::read(path, PAGE_CACHE).wrap_err("open corpus")?,
+            db: crate::storage::File::read(path, cache).wrap_err("open corpus")?,
         })
     }
 

@@ -23,9 +23,6 @@ const NODES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("nodes");
 
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 
-/// Summaries load once. Later writes are single sightings.
-const PAGE_CACHE: usize = 16 * 1024 * 1024;
-
 const VERSION: u8 = 1;
 
 const HAS_EARLIEST: u8 = 1;
@@ -42,7 +39,11 @@ pub struct Peers {
 
 impl Peers {
     pub fn open(path: &Path) -> eyre::Result<Self> {
-        let db = Database::create(path, PAGE_CACHE)?;
+        Self::open_with(path, config::Store::default().peers)
+    }
+
+    pub fn open_with(path: &Path, cache: usize) -> eyre::Result<Self> {
+        let db = Database::create(path, cache)?;
         db.watch();
         let next_seq = meta_get(&db, "sighting_seq")?.unwrap_or(0);
         let summaries = load_summaries(&db)?;

@@ -15,6 +15,7 @@ store.workspace = true
 observability.workspace = true
 eyre.workspace = true
 rand.workspace = true
+config.workspace = true
 discover.workspace = true
 eth-p2p.workspace = true
 reth-network-peers.workspace = true

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/config",
     "crates/journal",
     "crates/discover",
     "crates/filter",
@@ -44,6 +45,7 @@ redb = { version = "4.6.0", features = ["cache_metrics"] }
 futures = "0.3"
 rand = "0.8"
 chain = { path = "crates/chain" }
+config = { path = "crates/config" }
 store-model = { path = "crates/store-model" }
 store = { path = "crates/store" }
 pipeline = { path = "crates/pipeline" }

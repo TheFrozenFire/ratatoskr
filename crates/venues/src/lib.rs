@@ -140,6 +140,7 @@ pub struct RunOpts {
     /// Leave the state loop once nothing is left to claim. A job that fails
     /// four times is dropped and recorded.
     pub until_idle: bool,
+    pub venues: config::Venues,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -272,7 +273,7 @@ where
             })
             .unwrap_or_default();
         if !logs_wanted.is_empty() {
-            match history::ingest_all(store, peer, &logs_wanted, &stop).await {
+            match history::ingest_all(store, peer, &logs_wanted, &stop, &opts.venues).await {
                 Ok(notes) => report.notes.extend(notes),
                 Err(err) => {
                     let note = format!("history: {err:#}");
@@ -323,13 +324,14 @@ pub async fn scan_blooms<S: ChainStore + DiscoveryStore>(
     store: &S,
     only: &Option<String>,
     stop: &tokio::sync::watch::Receiver<bool>,
+    limits: &config::Venues,
 ) -> eyre::Result<history::BloomScan> {
     let jobs = ingest::cached_logs(store)
         .await
         .into_iter()
         .filter(|job| job_wanted(only, &job.name))
         .collect::<Vec<_>>();
-    history::scan_blooms(store, &jobs, stop).await
+    history::scan_blooms(store, &jobs, stop, limits).await
 }
 
 async fn open_calls(opts: &RunOpts) -> eyre::Result<rpc::Rpc> {
@@ -350,12 +352,13 @@ pub async fn fetch_receipts<S, P>(
     peer: Option<&P>,
     scan: history::BloomScan,
     stop: &tokio::sync::watch::Receiver<bool>,
+    limits: &config::Venues,
 ) -> eyre::Result<Vec<String>>
 where
     S: CorpusStore + DiscoveryStore,
     P: HistoryPeer + Clone + 'static,
 {
-    history::fetch_receipts(store, peer, scan, stop).await
+    history::fetch_receipts(store, peer, scan, stop, limits).await
 }
 
 #[cfg(test)]

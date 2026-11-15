@@ -13,7 +13,7 @@ use tokio::time::sleep;
 #[derive(Debug, Parser)]
 pub struct PeerArgs {
     /// Directory whose `peer.sock` belongs to the running peer service.
-    /// Default is `~/.config/ratatoskr/peer.sock`.
+    /// Omitted uses the loaded data directory.
     #[arg(long)]
     pub data_dir: Option<PathBuf>,
     #[command(subcommand)]
@@ -34,8 +34,8 @@ pub enum PeerCommand {
     Census,
 }
 
-pub async fn run(args: PeerArgs) -> eyre::Result<()> {
-    let socket = socket_of(args.data_dir.as_deref())?;
+pub async fn run(args: PeerArgs, loaded: &config::Config) -> eyre::Result<()> {
+    let socket = socket_of(args.data_dir.as_deref(), loaded)?;
     match args.command {
         PeerCommand::Status => print_query(&socket, "status", None).await,
         PeerCommand::Fetch { block } => print_query(&socket, "fetch", block).await,
@@ -47,11 +47,12 @@ pub async fn run(args: PeerArgs) -> eyre::Result<()> {
     }
 }
 
-fn socket_of(data_dir: Option<&Path>) -> eyre::Result<PathBuf> {
-    match data_dir {
-        Some(dir) => Ok(dir.join("peer.sock")),
-        None => peer::socket_path(),
-    }
+fn socket_of(data_dir: Option<&Path>, loaded: &config::Config) -> eyre::Result<PathBuf> {
+    let dir = match data_dir {
+        Some(dir) => dir.to_path_buf(),
+        None => config::expand_home(&loaded.process.data_dir)?,
+    };
+    config::peer_socket(&dir, &loaded.peer.socket)
 }
 
 async fn print_query(socket: &Path, op: &str, block: Option<u64>) -> eyre::Result<()> {

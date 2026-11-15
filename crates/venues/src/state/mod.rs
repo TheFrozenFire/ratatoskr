@@ -56,9 +56,9 @@ pub use store_model::{
     STAGE_MUTABLE, STAGE_QUOTE, STAGE_TICKS, TICK_PAGE,
 };
 
-const DETAIL_BATCH: u32 = 16;
-const LEASE_SECS: u64 = 120;
-const RETRY_SECS: u64 = 30;
+pub(crate) fn limits() -> config::Venues {
+    config::Venues::default()
+}
 
 const TOPIC_V2_SYNC: B256 =
     alloy_primitives::b256!("1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1");
@@ -604,7 +604,7 @@ pub(crate) fn keep_or_drop(
         stage: job.stage,
         kind: job.kind,
         id: job.id,
-        not_before: unix_now().saturating_add(RETRY_SECS),
+        not_before: unix_now().saturating_add(limits().retry_secs),
         error,
     });
 }

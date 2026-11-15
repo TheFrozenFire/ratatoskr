@@ -4,10 +4,6 @@ use store_model::BlockRecord;
 
 use crate::{blocking, LocalStore};
 
-/// Block bytes copied out of one corpus read. The table is multiple gigabytes,
-/// so the next page is read only after this one has been visited.
-const BLOCK_PAGE: usize = 8 * 1024 * 1024;
-
 #[allow(async_fn_in_trait)]
 pub trait CorpusStore: Send + Sync {
     async fn read_block(&self, number: u64) -> eyre::Result<Option<BlockRecord>>;
@@ -66,7 +62,8 @@ impl CorpusStore for LocalStore {
         loop {
             let corpus = self.corpus_db()?;
             let start = from;
-            let page = blocking(move || corpus.read_block_page(start, BLOCK_PAGE)).await?;
+            let page_bytes = self.caches.block_page;
+            let page = blocking(move || corpus.read_block_page(start, page_bytes)).await?;
             let Some((last, _)) = page.last() else {
                 break;
             };

@@ -10,8 +10,9 @@ use crate::scan::Survey;
 use crate::scenario::Scenario;
 use crate::source::Source;
 use crate::token::{label, Known};
-use crate::{HUB_LIMITS, HUB_MINIMUM, QUERY_HUBS};
+use crate::HUB_LIMITS;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn push_header(
     out: &mut String,
     survey: &Survey,
@@ -20,9 +21,11 @@ pub(crate) fn push_header(
     selection: &Selection,
     census: &HubCensus,
     reach_rows: &[(usize, HubReach)],
+    hub_floor: usize,
+    hub_limit: usize,
 ) {
     out.push_str(&format!(
-        "conduits {}\ntokens with an outgoing curve {}\ntokens named by a conduit {}\nhub minimum {HUB_MINIMUM}\nquery hubs {QUERY_HUBS}\nneighbor limit {NEIGHBOR_LIMIT}\nwalk depth {WALK_DEPTH}\n",
+        "conduits {}\ntokens with an outgoing curve {}\ntokens named by a conduit {}\nhub minimum {hub_floor}\nquery hubs {hub_limit}\nneighbor limit {NEIGHBOR_LIMIT}\nwalk depth {WALK_DEPTH}\n",
         survey.conduits,
         survey.graph.out.len(),
         census.tokens
@@ -283,9 +286,9 @@ pub(crate) fn route_line(set: &RouteSet, route: &Route, known: &[Known]) -> Stri
     parts.join(" -> ")
 }
 
-pub(crate) fn note_hubs(census: &HubCensus, known: &[Known]) {
+pub(crate) fn note_hubs(census: &HubCensus, known: &[Known], hub_limit: usize) {
     eprint!("ranked");
-    for hub in census.ranked.iter().take(QUERY_HUBS) {
+    for hub in census.ranked.iter().take(hub_limit) {
         eprint!(" {}={}", label(hub.token, known), hub.conduits);
     }
     eprintln!();

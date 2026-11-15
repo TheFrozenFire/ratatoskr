@@ -3,7 +3,7 @@
 use alloy_primitives::{address, Address, I256, U256};
 use oracles::{
     decode_aggregate3, decode_bound, decode_proxy_head, proxy_heads, Configuration, Mismatch,
-    ProxyHead, Read, DIRECTORY_URL,
+    ProxyHead, Read,
 };
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -184,7 +184,7 @@ fn encode_results(items: &[(bool, Vec<u8>)]) -> Vec<u8> {
 #[test]
 fn the_directory_url_is_the_ethereum_mainnet_file() {
     assert_eq!(
-        DIRECTORY_URL,
+        config::Oracles::default().directory_url,
         "https://reference-data-directory.vercel.app/feeds-mainnet.json"
     );
 }

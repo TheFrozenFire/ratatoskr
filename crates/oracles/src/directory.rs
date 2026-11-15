@@ -7,7 +7,6 @@ use std::str::FromStr;
 pub use store_model::DirectoryRow;
 
 /// `rddUrl` for Ethereum mainnet.
-pub const DIRECTORY_URL: &str = "https://reference-data-directory.vercel.app/feeds-mainnet.json";
 
 #[derive(Debug, thiserror::Error)]
 pub enum DirectoryError {

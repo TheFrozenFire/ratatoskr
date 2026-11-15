@@ -12,7 +12,7 @@ pub use abi::{
 };
 pub use answer::{decode_answer_updated, ChainLog, ANSWER_UPDATED};
 pub use configure::proxy_heads;
-pub use directory::{parse_directory, DirectoryError, DIRECTORY_URL};
+pub use directory::{parse_directory, DirectoryError};
 pub use store_model::{
     Answer, Configuration, DirectoryRow, Feed, Gauges, HistoryJob, Listing, Mismatch,
     ObservedAnswer, Phase, ProxyHead, Read,
@@ -28,9 +28,10 @@ use eyre::WrapErr;
 pub async fn run(
     feeds: store::service::Feeds,
     rpcs: Vec<String>,
+    settings: config::Oracles,
     stop: tokio::sync::watch::Receiver<bool>,
 ) -> eyre::Result<()> {
-    tokio::task::spawn_blocking(move || pass(&feeds, rpcs, stop))
+    tokio::task::spawn_blocking(move || pass(&feeds, rpcs, settings, stop))
         .await
         .wrap_err("feed pass")??;
     Ok(())
@@ -39,15 +40,16 @@ pub async fn run(
 fn pass(
     feeds: &store::service::Feeds,
     rpcs: Vec<String>,
+    settings: config::Oracles,
     stop: tokio::sync::watch::Receiver<bool>,
 ) -> eyre::Result<Listing> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("ratatoskr-oracles/0.1")
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(settings.directory_timeout())
         .build()
         .wrap_err("directory client")?;
     let body = client
-        .get(DIRECTORY_URL)
+        .get(&settings.directory_url)
         .send()
         .wrap_err("feed directory")?
         .error_for_status()

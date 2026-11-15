@@ -1,7 +1,8 @@
 //! Hold a small set of outbound mainnet sessions and serve blocks on a local socket.
 //!
 //! The peer service keeps the peer directory. A client asks it for a block and exits.
-//! The node key in `~/.config/ratatoskr/node.key` stays the same across restarts.
+//! The node key path comes from configuration. The default is
+//! `~/.config/ratatoskr/node.key`, and that file stays the same across restarts.
 //! Peers we have dialed are remembered in the peer catalog: each status change and
 //! each newly covered block is a sighting, and the summary of that history picks
 //! the next dial.
@@ -45,28 +46,15 @@ use tokio::{
 
 const MAINNET: u64 = 1;
 
-pub const TARGET_PEERS: usize = 16;
-/// One pass over a few hundred DNS records takes minutes. Revisit an address
-/// only after that pass, and never inside 30 seconds.
-const REDIAL_GAP: Duration = Duration::from_secs(600);
-const DIAL_BUDGET: Duration = Duration::from_secs(12);
-/// Concurrent TCP dials. Each address is still cooled down for `REDIAL_GAP`.
-const IN_FLIGHT: usize = 16;
-/// New addresses per second while the table is short of `TARGET_PEERS`.
-const DIALS_PER_SEC: usize = 20;
-const DIRECTORY_SIZE: usize = 2500;
-/// Overlapping receipt batches on one socket. Headers for the next batch go
-/// out while the previous receipts are still arriving.
-const CHUNKS_PER_PEER: usize = 2;
-
 /// What the supervisor passes into [`serve`].
 pub struct PeerConfig {
-    /// How many outbound sessions to keep.
-    pub peers: usize,
     pub socket: PathBuf,
     /// `peers.redb`. Opened once. A held writer lock is returned, not retried.
     pub catalog: PathBuf,
     pub egress: Option<Egress>,
+    pub key: PathBuf,
+    pub peer: config::Peer,
+    pub network: config::Network,
 }
 
 /// Catalog owner. Dropping it releases the writer lock. The socket is not touched.
@@ -84,7 +72,12 @@ impl OpenedPeer {
 
 /// Open `peers.redb` and keep the writer lock. Does not unlink or bind a socket.
 pub fn open(path: &Path) -> eyre::Result<OpenedPeer> {
-    let catalog = catalog::Catalog::open(path)?;
+    open_with(path, config::Store::default().peers)
+}
+
+/// Open `peers.redb` with `cache` bytes of page cache.
+pub fn open_with(path: &Path, cache: usize) -> eyre::Result<OpenedPeer> {
+    let catalog = catalog::Catalog::open_with(path, cache)?;
     Ok(OpenedPeer {
         catalog,
         local: LocalPeer {
@@ -110,33 +103,35 @@ fn bind_socket(socket: &Path) -> eyre::Result<UnixListener> {
 /// Node key loaded and socket bound. [`run`] dials until the shutdown watch is set.
 pub struct PreparedPeer {
     key: SecretKey,
-    peers: usize,
     listener: UnixListener,
     egress: Option<Egress>,
     catalog_path: PathBuf,
     opened: OpenedPeer,
+    peer: config::Peer,
+    network: config::Network,
 }
 
 /// Load the node key and bind. `open` has already taken the catalog writer lock.
-pub fn prepare(opened: OpenedPeer, config: &PeerConfig) -> eyre::Result<PreparedPeer> {
-    let key = load_node_key()?;
+pub fn prepare(opened: OpenedPeer, settings: &PeerConfig) -> eyre::Result<PreparedPeer> {
+    let key = load_node_key(&settings.key)?;
     let id = pk2id(&key.public_key(SECP256K1));
     info!(
         %id,
-        peers = config.peers,
-        socket = %config.socket.display(),
-        catalog = %config.catalog.display(),
-        egress = ?config.egress,
+        peers = settings.peer.target,
+        socket = %settings.socket.display(),
+        catalog = %settings.catalog.display(),
+        egress = ?settings.egress,
         "peer service starting"
     );
-    let listener = bind_socket(&config.socket)?;
+    let listener = bind_socket(&settings.socket)?;
     Ok(PreparedPeer {
         key,
-        peers: config.peers,
         listener,
-        egress: config.egress,
-        catalog_path: config.catalog.clone(),
+        egress: settings.egress,
+        catalog_path: settings.catalog.clone(),
         opened,
+        peer: settings.peer.clone(),
+        network: settings.network.clone(),
     })
 }
 
@@ -158,11 +153,12 @@ pub async fn serve(config: PeerConfig) -> eyre::Result<()> {
 pub async fn run(prepared: PreparedPeer, mut stop: watch::Receiver<bool>) -> eyre::Result<()> {
     let PreparedPeer {
         key,
-        peers,
         listener,
         egress,
         catalog_path,
         opened,
+        peer,
+        network,
     } = prepared;
     let OpenedPeer { catalog, local } = opened;
     let (catalog_tx, catalog_rx) = mpsc::unbounded_channel();
@@ -171,7 +167,8 @@ pub async fn run(prepared: PreparedPeer, mut stop: watch::Receiver<bool>) -> eyr
     let maintain_stop = stop.clone();
     let mut maintain_task = tokio::spawn(maintain(
         key,
-        peers,
+        peer,
+        network.clone(),
         Arc::clone(&slots),
         Arc::clone(&wanted),
         egress,
@@ -203,9 +200,11 @@ pub async fn run(prepared: PreparedPeer, mut stop: watch::Receiver<bool>) -> eyr
                         let wanted = Arc::clone(&wanted);
                         let catalog_tx = catalog_tx.clone();
                         let catalog_path = Arc::clone(&catalog_path);
+                        let network = network.clone();
                         tokio::spawn(async move {
                             if let Err(err) =
-                                handle_conn(conn, slots, wanted, catalog_tx, catalog_path).await
+                                handle_conn(conn, slots, wanted, catalog_tx, catalog_path, network)
+                                    .await
                             {
                                 warn!(%err, "client request failed");
                             }
@@ -508,7 +507,8 @@ async fn pause(stop: &mut watch::Receiver<bool>, secs: u64) -> bool {
 #[allow(clippy::too_many_arguments)]
 async fn maintain(
     key: SecretKey,
-    target: usize,
+    settings: config::Peer,
+    network: config::Network,
     slots: Arc<Mutex<Table>>,
     wanted: Arc<AtomicU64>,
     egress: Option<Egress>,
@@ -548,7 +548,7 @@ async fn maintain(
         }
         while let Ok(ip) = dead_rx.try_recv() {
             held.remove(&ip);
-            cooldown.insert(ip, Instant::now() + REDIAL_GAP);
+            cooldown.insert(ip, Instant::now() + settings.redial_gap());
         }
         while let Ok(sighting) = sight_rx.try_recv() {
             catalog.record(sighting);
@@ -567,7 +567,7 @@ async fn maintain(
             catalog.summaries.len() as u64,
             catalog.next_seq,
         );
-        if live >= target && dials.is_empty() {
+        if live >= settings.target && dials.is_empty() {
             if pause(&mut stop, 5).await {
                 break 'run;
             }
@@ -575,9 +575,13 @@ async fn maintain(
         }
         if dns_task.is_none()
             && Instant::now() >= dns_not_before
-            && (directory.is_empty() || directory_at.elapsed() > Duration::from_secs(600))
+            && (directory.is_empty() || directory_at.elapsed() > settings.directory_refresh())
         {
-            dns_task = Some(tokio::spawn(async { dns_candidates(DIRECTORY_SIZE).await }));
+            let limit = settings.directory_size;
+            let discovery = network.clone();
+            dns_task = Some(tokio::spawn(async move {
+                dns_candidates(limit, &discovery).await
+            }));
         }
         if dns_task.as_ref().is_some_and(|task| task.is_finished()) {
             let task = dns_task.take().expect("dns task");
@@ -608,9 +612,12 @@ async fn maintain(
         // Keep probing until the table is full. The per-address cooldown stops
         // a redial; the per-second cap stops a single burst from walking the
         // whole DNS list.
-        let under_target = held.len() < target && live < target;
+        let under_target = held.len() < settings.target && live < settings.target;
         let wanted_block = wanted.load(Ordering::Relaxed);
-        while under_target && dials.len() < IN_FLIGHT && started_in_window < DIALS_PER_SEC {
+        while under_target
+            && dials.len() < settings.in_flight
+            && started_in_window < settings.dials_per_sec
+        {
             if *stop.borrow() {
                 break 'run;
             }
@@ -635,12 +642,21 @@ async fn maintain(
             };
             dial_n = dial_n.saturating_add(1);
             started_in_window = started_in_window.saturating_add(1);
-            cooldown.insert(peer.address, Instant::now() + REDIAL_GAP);
+            cooldown.insert(peer.address, Instant::now() + settings.redial_gap());
+            let budget = settings.dial_budget();
+            let dial_timeout = network.dial_timeout();
+            let request_timeout = network.request_timeout();
             dials.spawn(async move {
                 let dialed = peer;
                 let result = match timeout(
-                    DIAL_BUDGET,
-                    OutboundSession::connect_via(peer, &key, egress),
+                    budget,
+                    OutboundSession::connect_with_limits(
+                        peer,
+                        &key,
+                        egress,
+                        dial_timeout,
+                        request_timeout,
+                    ),
                 )
                 .await
                 {
@@ -734,12 +750,13 @@ async fn maintain(
             );
             continue;
         };
-        if held.len() >= target {
+        if held.len() >= settings.target {
             continue;
         }
         let remote = session.peer.address;
         held.insert(remote);
-        let (job_tx, job_rx) = mpsc::channel(CHUNKS_PER_PEER.saturating_mul(2));
+        let chunks = settings.chunks_per_peer;
+        let (job_tx, job_rx) = mpsc::channel(chunks.saturating_mul(2));
         let slots = Arc::clone(&slots);
         let dead_tx = dead_tx.clone();
         let sightings = sight_tx.clone();
@@ -783,7 +800,7 @@ async fn maintain(
                         jobs: job_tx,
                     };
                     if slots.lock().await.publish(slot) {
-                        run_peer(session, job_rx, sightings).await;
+                        run_peer(session, job_rx, sightings, chunks).await;
                     }
                 }
                 Ok(_) => {
@@ -828,6 +845,7 @@ async fn run_peer(
     session: OutboundSession,
     mut jobs: mpsc::Receiver<Job>,
     sightings: mpsc::UnboundedSender<catalog::Sighting>,
+    chunks_per_peer: usize,
 ) {
     let mut inflight: JoinSet<bool> = JoinSet::new();
     let mut jobs_open = true;
@@ -843,7 +861,7 @@ async fn run_peer(
                     _ => {}
                 }
             }
-            job = jobs.recv(), if jobs_open && inflight.len() < CHUNKS_PER_PEER => {
+            job = jobs.recv(), if jobs_open && inflight.len() < chunks_per_peer => {
                 match job {
                     Some(job) => {
                         let session = session.clone();
@@ -1017,8 +1035,9 @@ fn census_json(peers: &[DnsPeer], catalog_path: &Path) -> Value {
 async fn census_response(
     catalog_tx: &mpsc::UnboundedSender<CatalogCmd>,
     catalog_path: &Path,
+    network: &config::Network,
 ) -> Value {
-    let peers = match census_mainnet_dns().await {
+    let peers = match census_mainnet_dns(network).await {
         Ok(peers) => peers,
         Err(err) => return json!({"ok": false, "error": format!("{err:#}")}),
     };
@@ -1055,6 +1074,7 @@ async fn handle_conn(
     wanted: Arc<AtomicU64>,
     catalog_tx: mpsc::UnboundedSender<CatalogCmd>,
     catalog_path: Arc<PathBuf>,
+    network: config::Network,
 ) -> eyre::Result<()> {
     let (read, mut write) = conn.into_split();
     let mut lines = BufReader::new(read).lines();
@@ -1097,7 +1117,7 @@ async fn handle_conn(
     let response = match request.op.as_str() {
         "status" => status_response(&slots).await,
         "fetch" => fetch_response(&slots, request.block).await,
-        "census" => census_response(&catalog_tx, &catalog_path).await,
+        "census" => census_response(&catalog_tx, &catalog_path, &network).await,
         other => json!({"ok": false, "error": format!("unknown op {other}")}),
     };
     let mut bytes = serde_json::to_vec(&response)?;
@@ -1264,22 +1284,16 @@ async fn range_response(
     })
 }
 
-fn config_dir() -> eyre::Result<PathBuf> {
-    let home = std::env::var("HOME").wrap_err("HOME")?;
-    let dir = PathBuf::from(home).join(".config/ratatoskr");
-    fs::create_dir_all(&dir)?;
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
-    Ok(dir)
-}
-
-pub fn socket_path() -> eyre::Result<PathBuf> {
-    Ok(config_dir()?.join("peer.sock"))
-}
-
-fn load_node_key() -> eyre::Result<SecretKey> {
-    let path = config_dir()?.join("node.key");
+fn load_node_key(path: &Path) -> eyre::Result<SecretKey> {
+    if let Some(parent) = path.parent() {
+        let created = !parent.exists();
+        fs::create_dir_all(parent)?;
+        if created {
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+        }
+    }
     if path.exists() {
-        let text = fs::read_to_string(&path)?;
+        let text = fs::read_to_string(path)?;
         let bytes = hex_decode(text.trim()).wrap_err("node.key")?;
         return SecretKey::from_slice(&bytes).wrap_err("node.key");
     }
@@ -1288,8 +1302,8 @@ fn load_node_key() -> eyre::Result<SecretKey> {
     for byte in key.secret_bytes() {
         hex.push_str(&format!("{byte:02x}"));
     }
-    fs::write(&path, hex + "\n")?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    fs::write(path, hex + "\n")?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     let created = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
@@ -1485,6 +1499,7 @@ mod tests {
             wanted,
             catalog_tx,
             Arc::new(PathBuf::from("/tmp/ratatoskr-peer-test/peers.redb")),
+            config::Network::default(),
         ));
         let (read, mut write) = client.into_split();
         write
@@ -1552,10 +1567,15 @@ mod tests {
         let result = tokio::time::timeout(
             Duration::from_secs(2),
             serve(PeerConfig {
-                peers: 1,
                 socket: socket.clone(),
                 catalog: path,
                 egress: None,
+                key: dir.join("node.key"),
+                peer: config::Peer {
+                    target: 1,
+                    ..config::Peer::default()
+                },
+                network: config::Network::default(),
             }),
         )
         .await;

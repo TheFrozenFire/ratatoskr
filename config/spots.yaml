@@ -1,0 +1,4 @@
+spots:
+  hub_floor: 3
+  hub_limit: 32
+  pass_secs: 60

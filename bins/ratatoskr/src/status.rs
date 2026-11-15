@@ -21,8 +21,6 @@ use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
-const RATE_WINDOW: Duration = Duration::from_secs(10);
-
 struct Mark {
     at: Instant,
     jobs: Vec<u64>,
@@ -34,9 +32,10 @@ struct View {
     error: String,
     history: VecDeque<Mark>,
     rates: Vec<f64>,
+    rate_window: Duration,
 }
 
-pub fn run(base: &str) -> eyre::Result<()> {
+pub fn run(base: &str, rate_window: Duration) -> eyre::Result<()> {
     let url = status_url(base);
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -48,6 +47,7 @@ pub fn run(base: &str) -> eyre::Result<()> {
         error: String::new(),
         history: VecDeque::new(),
         rates: Vec::new(),
+        rate_window,
     };
     let result = loop {
         if event::poll(Duration::from_millis(200))? {
@@ -91,7 +91,7 @@ impl View {
         while self
             .history
             .front()
-            .is_some_and(|mark| now.duration_since(mark.at) > RATE_WINDOW)
+            .is_some_and(|mark| now.duration_since(mark.at) > self.rate_window)
         {
             self.history.pop_front();
         }

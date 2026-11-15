@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+config.workspace = true
 observability.workspace = true
 eyre.workspace = true
 peer.workspace = true

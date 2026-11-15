@@ -15,7 +15,7 @@ cargo run -p ratatoskr
 cargo run -p ratatoskr -- --data-dir data/ratatoskr --services db --pipeline state --until-idle
 ```
 
-The peer service is the only dialer. It answers on `peer.sock`. The node key is `~/.config/ratatoskr/node.key`. With no `--data-dir`, the socket is `~/.config/ratatoskr/peer.sock`.
+The peer service is the only dialer. It answers on `peer.sock` inside the data directory. The node key is `~/.config/ratatoskr/node.key`. Settings load from `config/` in the working directory. With no `--data-dir`, that directory is `data/ratatoskr`.
 
 ```
 cargo run -p ratatoskr -- peer status

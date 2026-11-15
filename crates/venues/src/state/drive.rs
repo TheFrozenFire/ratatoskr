@@ -92,7 +92,7 @@ where
             }
             tokio::select! {
                 _ = stop.changed() => {}
-                _ = tokio::time::sleep(Duration::from_secs(RETRY_SECS + 5)) => {}
+                _ = tokio::time::sleep(Duration::from_secs(limits().retry_secs + 5)) => {}
             }
             continue;
         }
@@ -143,7 +143,7 @@ where
     let mut claimed = Vec::new();
     for stage in [STAGE_IMMUTABLE, STAGE_MUTABLE, STAGE_TICKS, STAGE_CURVE] {
         let jobs = store
-            .claim_work(stage, DETAIL_BATCH, now, LEASE_SECS)
+            .claim_work(stage, limits().detail_batch, now, limits().lease_secs)
             .await?;
         if !jobs.is_empty() {
             claimed.push((stage, jobs));
@@ -202,7 +202,9 @@ async fn drive_conduits<S>(
 where
     S: ConduitStore,
 {
-    let jobs = store.claim_conduits(DETAIL_BATCH, now, LEASE_SECS).await?;
+    let jobs = store
+        .claim_conduits(limits().detail_batch, now, limits().lease_secs)
+        .await?;
     if jobs.is_empty() {
         return Ok(false);
     }
@@ -247,7 +249,7 @@ where
                     failed.push(crate::conduit::ConduitFail {
                         token_in: job.token_in,
                         token_out: job.token_out,
-                        not_before: unix_now().saturating_add(RETRY_SECS),
+                        not_before: unix_now().saturating_add(limits().retry_secs),
                         error,
                     });
                 }

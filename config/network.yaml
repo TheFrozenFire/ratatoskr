@@ -1,0 +1,9 @@
+network:
+  call_rpcs:
+    - https://ethereum-rpc.publicnode.com
+    - https://eth.drpc.org
+    - https://rpc.mevblocker.io
+    - https://rpc.flashbots.net
+  dns_all: enrtree://AKA3AM6LPBYEUDMVNU3BSVQJ5AD45Y7YPOHJLEF6W26QOE4VTUDPE@all.mainnet.ethdisco.net
+  dns_snap: enrtree://AKA3AM6LPBYEUDMVNU3BSVQJ5AD45Y7YPOHJLEF6W26QOE4VTUDPE@snap.mainnet.ethdisco.net
+  egress_ip_url: https://ipv4.icanhazip.com

@@ -11,9 +11,6 @@ use redb::{Durability, TableDefinition};
 use std::path::Path;
 use store_model::PoolRecord;
 
-/// The histogram write is one pass over the pools gathered in memory.
-const PAGE_CACHE: usize = 16 * 1024 * 1024;
-
 const POOLS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("pools");
 const RECORD_VERSION: u8 = 1;
 
@@ -30,7 +27,8 @@ impl Pools {
         if path.exists() {
             std::fs::remove_file(path).wrap_err("replace previous catalog")?;
         }
-        let out = Database::create(path, PAGE_CACHE).wrap_err("create pool catalog")?;
+        let out = Database::create(path, config::Store::default().pools)
+            .wrap_err("create pool catalog")?;
         out.watch();
         let mut write = out.begin_write()?;
         write.set_durability(Durability::Immediate)?;

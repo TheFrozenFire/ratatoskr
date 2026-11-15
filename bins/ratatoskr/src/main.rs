@@ -16,15 +16,15 @@ mod export;
 mod peer_cmd;
 mod status;
 
-const DEFAULT_LOG: &str =
-    "ratatoskr=info,store=info,pipeline=info,peer=info,eth_p2p=info,venues=info,headers=info,oracles=info,spots=info";
-
 #[derive(Debug, Parser)]
 #[command(
     name = "ratatoskr",
     about = "Own the selected files and run the pipelines in one process."
 )]
 struct Cli {
+    /// Directory of yaml files. Default is `config` in the working directory.
+    #[arg(long, global = true, default_value = "config")]
+    config_dir: PathBuf,
     #[command(subcommand)]
     command: Option<Command>,
     #[command(flatten)]
@@ -39,23 +39,23 @@ enum Command {
 
 #[derive(Debug, clap::Args)]
 struct Args {
-    /// Comma-separated file owners: `db`, `peer`. Default is `db,peer`.
-    #[arg(long, default_value = "db,peer")]
-    services: String,
+    /// Comma-separated file owners: `db`, `peer`. Omitted uses the loaded config.
+    #[arg(long)]
+    services: Option<String>,
     /// Comma-separated pipelines: `headers`, `venues`, `state`, `oracles`, `spots`.
-    /// Default is `headers,venues,state`. `oracles` writes `feeds.redb` and does not open the venue catalog.
+    /// Omitted uses the loaded config. `oracles` writes `feeds.redb` and does not open the venue catalog.
     /// `spots` reads that catalog and writes `spots.redb`.
-    #[arg(long, default_value = "headers,venues,state")]
-    pipeline: String,
+    #[arg(long)]
+    pipeline: Option<String>,
     /// Catalog directory for this process. Default is the live catalog.
     #[arg(long)]
     data_dir: Option<PathBuf>,
     /// Copy a stratified identity sample from this redb file into `--data-dir`.
     #[arg(long)]
     copy_from: Option<PathBuf>,
-    /// Identities to copy with `--copy-from`. Default is 10000.
-    #[arg(long, default_value_t = 10_000)]
-    sample_size: u64,
+    /// Identities to copy with `--copy-from`. Omitted uses the loaded config.
+    #[arg(long)]
+    sample_size: Option<u64>,
     /// Delete pools whose snapshot cannot price a positive input, then exit.
     /// A pool with no snapshot yet is kept. Combine with `--fill`.
     #[arg(long)]
@@ -77,15 +77,15 @@ struct Args {
     /// Print stored state counts for `--data-dir` and exit.
     #[arg(long)]
     summarize: bool,
-    /// Listen address for the status exporter.
-    #[arg(long, default_value = "127.0.0.1:9737")]
-    metrics: String,
+    /// Listen address for the status exporter. Omitted uses the loaded config.
+    #[arg(long)]
+    metrics: Option<String>,
     /// Draw the status TUI from the exporter and exit when it closes.
     #[arg(long)]
     status: bool,
-    /// Exporter base URL for `--status`.
-    #[arg(long, default_value = "http://127.0.0.1:9737")]
-    status_url: String,
+    /// Exporter base URL for `--status`. Omitted uses the loaded config.
+    #[arg(long)]
+    status_url: Option<String>,
     /// Rewrite every stored curve from the current fitter, then exit.
     /// Combine with `--export-fit` to write the extract after the rewrite.
     #[arg(long)]
@@ -118,9 +118,9 @@ struct Args {
     /// Bind IPv6 RLPx to this address.
     #[arg(long)]
     bind6: Option<Ipv6Addr>,
-    /// How many outbound sessions the peer service keeps.
-    #[arg(long, default_value_t = peer::TARGET_PEERS)]
-    peers: usize,
+    /// How many outbound sessions the peer service keeps. Omitted uses the loaded config.
+    #[arg(long)]
+    peers: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -159,25 +159,45 @@ struct Owned {
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
     venues::install_catalog_hooks();
-    observability::init(DEFAULT_LOG);
     let cli = Cli::parse();
+    let loaded = config::load(&cli.config_dir)?;
+    observability::init(&loaded.process.log);
     match cli.command {
-        Some(Command::Peer(cmd)) => peer_cmd::run(cmd).await,
-        None => supervise(cli.args).await,
+        Some(Command::Peer(cmd)) => peer_cmd::run(cmd, &loaded).await,
+        None => supervise(cli.args, loaded).await,
     }
 }
 
-async fn supervise(args: Args) -> eyre::Result<()> {
+async fn supervise(args: Args, loaded: config::Config) -> eyre::Result<()> {
     if args.status {
-        let url = args.status_url.clone();
-        return tokio::task::spawn_blocking(move || status::run(&url))
+        let url = args
+            .status_url
+            .clone()
+            .unwrap_or_else(|| loaded.process.status_url.clone());
+        let window = loaded.process.rate_window();
+        return tokio::task::spawn_blocking(move || status::run(&url, window))
             .await
             .wrap_err("status task")?;
     }
-    export::serve(&args.metrics)?;
-    let services = parse_services(&args.services)?;
-    let pipelines = parse_pipelines(&args.pipeline)?;
-    let egress = egress_from(args.bind4, args.bind6)?;
+    let metrics = args
+        .metrics
+        .clone()
+        .unwrap_or_else(|| loaded.process.metrics.clone());
+    export::serve(&metrics)?;
+    let services_text = match &args.services {
+        Some(text) => text.clone(),
+        None => loaded.process.services.join(","),
+    };
+    let pipeline_text = match &args.pipeline {
+        Some(text) => text.clone(),
+        None => loaded.process.pipelines.join(","),
+    };
+    let services = parse_services(&services_text)?;
+    let pipelines = parse_pipelines(&pipeline_text)?;
+    let egress = egress_from(
+        bind_addr(args.bind4, loaded.peer.bind4.as_deref())?,
+        bind_addr(args.bind6, loaded.peer.bind6.as_deref())?,
+    )?;
     if args.refit && args.data_dir.is_none() {
         return Err(eyre::eyre!("--refit needs --data-dir"));
     }
@@ -193,11 +213,17 @@ async fn supervise(args: Args) -> eyre::Result<()> {
     if args.drop_partial_quotes && args.data_dir.is_none() {
         return Err(eyre::eyre!("--drop-partial-quotes needs --data-dir"));
     }
-    let paths = paths_from(args.data_dir.as_deref())?;
+    let data_dir = match &args.data_dir {
+        Some(dir) => dir.clone(),
+        None => config::expand_home(&loaded.process.data_dir)?,
+    };
+    let paths = paths_from(&data_dir, &loaded.peer.socket)?;
+    let caches = loaded.store.clone();
     if args.drop_partial_quotes {
         let venues_path = paths.venues.clone();
+        let caches = caches.clone();
         let dropped = tokio::task::spawn_blocking(move || {
-            let catalog = store::service::Catalog::open(&venues_path)?;
+            let catalog = store::service::Catalog::open_with(&venues_path, &caches)?;
             venues::drop_partial_quotes(&catalog)
         })
         .await
@@ -207,8 +233,9 @@ async fn supervise(args: Args) -> eyre::Result<()> {
     }
     if let Some(path) = args.import_fit.clone() {
         let venues_path = paths.venues.clone();
+        let caches = caches.clone();
         let report = tokio::task::spawn_blocking(move || {
-            let catalog = store::service::Catalog::open(&venues_path)?;
+            let catalog = store::service::Catalog::open_with(&venues_path, &caches)?;
             venues::import_curve_fit(&catalog, &path)
         })
         .await
@@ -224,8 +251,9 @@ async fn supervise(args: Args) -> eyre::Result<()> {
     }
     if args.refit {
         let venues_path = paths.venues.clone();
+        let caches = caches.clone();
         let wrote = tokio::task::spawn_blocking(move || {
-            let catalog = store::service::Catalog::open(&venues_path)?;
+            let catalog = store::service::Catalog::open_with(&venues_path, &caches)?;
             venues::refit_curves(&catalog)
         })
         .await
@@ -237,10 +265,11 @@ async fn supervise(args: Args) -> eyre::Result<()> {
     }
     if let Some(spec) = args.refresh_kinds.clone() {
         let kinds = parse_kind_list(&spec)?;
-        let urls = resolve_rpcs(&args.rpc, true)?;
+        let urls = resolve_rpcs(&args.rpc, true, &loaded.network)?;
         let venues_path = paths.venues.clone();
+        let caches = caches.clone();
         let (report, built) = tokio::task::spawn_blocking(move || {
-            let catalog = store::service::Catalog::open(&venues_path)?;
+            let catalog = store::service::Catalog::open_with(&venues_path, &caches)?;
             let rpc = venues::Rpc::new(urls)?;
             let report = venues::refresh_kinds(&catalog, &rpc, &kinds)?;
             let built = catalog.drain_conduits()?;
@@ -256,8 +285,9 @@ async fn supervise(args: Args) -> eyre::Result<()> {
     }
     if let Some(out) = args.export_fit.clone() {
         let venues_path = paths.venues.clone();
+        let caches = caches.clone();
         let report = tokio::task::spawn_blocking(move || {
-            let catalog = store::service::Catalog::open(&venues_path)?;
+            let catalog = store::service::Catalog::open_with(&venues_path, &caches)?;
             venues::export_curve_fit(&catalog, &out)
         })
         .await
@@ -286,8 +316,9 @@ async fn supervise(args: Args) -> eyre::Result<()> {
             .to_path_buf();
         if args.drop_empty {
             let venues_path = paths.venues.clone();
+            let caches = caches.clone();
             let dropped = tokio::task::spawn_blocking(move || {
-                let catalog = store::service::Catalog::open(&venues_path)?;
+                let catalog = store::service::Catalog::open_with(&venues_path, &caches)?;
                 catalog.drop_empty_pools()
             })
             .await
@@ -298,8 +329,9 @@ async fn supervise(args: Args) -> eyre::Result<()> {
         if let Some(add) = args.fill {
             let src = args.copy_from.clone().expect("checked");
             let venues_path = paths.venues.clone();
+            let caches = caches.clone();
             let report = tokio::task::spawn_blocking(move || {
-                venues::fill_identities(&src, &venues_path, add)
+                venues::fill_identities(&src, &venues_path, add, &caches)
             })
             .await
             .wrap_err("fill identities")??;
@@ -312,8 +344,9 @@ async fn supervise(args: Args) -> eyre::Result<()> {
         if let Some(target) = args.trim_to {
             let venues_path = paths.venues.clone();
             let listed = venues::read_fill_ids(&sample_dir)?;
+            let caches = caches.clone();
             let (removed, left) = tokio::task::spawn_blocking(move || {
-                let catalog = store::service::Catalog::open(&venues_path)?;
+                let catalog = store::service::Catalog::open_with(&venues_path, &caches)?;
                 catalog.trim_listed(target, &listed)
             })
             .await
@@ -331,7 +364,8 @@ async fn supervise(args: Args) -> eyre::Result<()> {
         return Err(eyre::eyre!("--copy-from needs --data-dir"));
     }
     if let Some(src) = &args.copy_from {
-        let report = venues::sample_identities(src, &paths.venues, args.sample_size)?;
+        let sample_size = args.sample_size.unwrap_or(loaded.process.sample_size);
+        let report = venues::sample_identities(src, &paths.venues, sample_size, &caches)?;
         observability::info!(
             copied = report.copied,
             anchor = report.anchor,
@@ -345,7 +379,7 @@ async fn supervise(args: Args) -> eyre::Result<()> {
         }
     }
     if args.summarize {
-        let catalog = store::service::Catalog::open(&paths.venues)?;
+        let catalog = store::service::Catalog::open_with(&paths.venues, &caches)?;
         let summary = catalog.state_summary()?;
         println!("identities {}", summary.identities);
         println!("immutable {}", summary.immutable);
@@ -365,18 +399,24 @@ async fn supervise(args: Args) -> eyre::Result<()> {
         }
         return Ok(());
     }
-    let rpcs = resolve_rpcs(&args.rpc, pipelines.state)?;
+    let rpcs = resolve_rpcs(&args.rpc, pipelines.state, &loaded.network)?;
     let oracle_rpcs = rpcs.clone();
-    let mut owned = open_owned(&services, &pipelines, &paths)?;
+    let mut owned = open_owned(&services, &pipelines, &paths, &caches)?;
     let local = owned.peer.as_ref().map(peer::OpenedPeer::local);
+    let mut peer_settings = loaded.peer.clone();
+    if let Some(target) = args.peers {
+        peer_settings.target = target;
+    }
     let prepared = match owned.peer.take() {
         Some(opened) => Some(peer::prepare(
             opened,
             &peer::PeerConfig {
-                peers: args.peers,
                 socket: paths.peer_socket.clone(),
                 catalog: paths.peers.clone(),
                 egress,
+                key: config::expand_home(&peer_settings.key)?,
+                peer: peer_settings,
+                network: loaded.network.clone(),
             },
         )?),
         None => None,
@@ -407,10 +447,11 @@ async fn supervise(args: Args) -> eyre::Result<()> {
         phase: RunPhase::All,
         pin_block: args.pin_block,
         until_idle: args.until_idle,
+        venues: loaded.venues.clone(),
     };
     if pipelines.state {
         if let Some(store) = store.clone() {
-            spawn_sampler(store);
+            spawn_sampler(store, loaded.process.clone());
         }
     }
     let pipelines_started = pipelines.headers
@@ -431,6 +472,7 @@ async fn supervise(args: Args) -> eyre::Result<()> {
                 paths.feeds.clone(),
                 paths.spots.clone(),
                 oracle_rpcs,
+                &loaded,
             );
             wait_for_stop(
                 &mut tasks,
@@ -458,26 +500,28 @@ async fn supervise(args: Args) -> eyre::Result<()> {
     }
 }
 
-fn spawn_sampler(store: LocalStore) {
+fn spawn_sampler(store: LocalStore, process: config::Process) {
     let busy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let interval = process.sample_interval();
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+        let mut tick = tokio::time::interval(interval);
         loop {
             tick.tick().await;
             if busy.swap(true, std::sync::atomic::Ordering::AcqRel) {
                 continue;
             }
             let store = store.clone();
+            let process = process.clone();
             let busy = std::sync::Arc::clone(&busy);
             tokio::task::spawn_blocking(move || {
-                sample_store(&store);
+                sample_store(&store, &process);
                 busy.store(false, std::sync::atomic::Ordering::Release);
             });
         }
     });
 }
 
-fn sample_store(store: &LocalStore) {
+fn sample_store(store: &LocalStore, process: &config::Process) {
     observability::cache::publish(store.cache_readings());
     let summary_ms = millis(|| match store.state_summary() {
         Ok(summary) => observability::publish_summary(&summary),
@@ -496,7 +540,7 @@ fn sample_store(store: &LocalStore) {
         }
     });
     observability::cache::record_probe("corpus", corpus_ms);
-    log_sample(summary_ms, header_ms, corpus_ms);
+    log_sample(summary_ms, header_ms, corpus_ms, process);
 }
 
 fn millis(sample: impl FnOnce()) -> u64 {
@@ -505,22 +549,23 @@ fn millis(sample: impl FnOnce()) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-fn log_sample(summary_ms: u64, header_ms: u64, corpus_ms: u64) {
-    const SLOW_MS: u64 = 50;
-    const MISS_WARN: u64 = 4_096;
-    if summary_ms >= SLOW_MS && warn_due("summary") {
+fn log_sample(summary_ms: u64, header_ms: u64, corpus_ms: u64, process: &config::Process) {
+    let slow = process.slow_sample_ms;
+    let gap = process.warn_gap();
+    if summary_ms >= slow && warn_due("summary", gap) {
         observability::warn!(ms = summary_ms, "catalog summary");
     }
-    if header_ms >= SLOW_MS && warn_due("headers") {
+    if header_ms >= slow && warn_due("headers", gap) {
         observability::warn!(ms = header_ms, "header cursor read");
     }
-    if corpus_ms >= SLOW_MS && warn_due("corpus") {
+    if corpus_ms >= slow && warn_due("corpus", gap) {
         observability::warn!(ms = corpus_ms, "corpus gauge read");
     }
-    let info = info_due();
+    let info = info_due(process.cache_log_secs);
     for pace in observability::cache::pace() {
-        let hot = pace.read_misses_delta >= MISS_WARN || pace.write_misses_delta >= MISS_WARN;
-        if hot && warn_due(&pace.name) {
+        let hot = pace.read_misses_delta >= process.miss_warn
+            || pace.write_misses_delta >= process.miss_warn;
+        if hot && warn_due(&pace.name, gap) {
             observability::warn!(
                 db = %pace.name,
                 read_misses = pace.read_misses_delta,
@@ -547,7 +592,7 @@ fn log_sample(summary_ms: u64, header_ms: u64, corpus_ms: u64) {
     }
 }
 
-fn info_due() -> bool {
+fn info_due(cache_log_secs: u64) -> bool {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let now = std::time::SystemTime::now()
@@ -558,20 +603,20 @@ fn info_due() -> bool {
     if now < next {
         return false;
     }
-    NEXT.store(now.saturating_add(60), Ordering::Relaxed);
+    NEXT.store(now.saturating_add(cache_log_secs), Ordering::Relaxed);
     true
 }
 
-fn warn_due(name: &str) -> bool {
+fn warn_due(name: &str, gap: std::time::Duration) -> bool {
     use std::collections::HashMap;
     use std::sync::Mutex;
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
     static LAST: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
     let mut slot = LAST.lock().unwrap_or_else(|err| err.into_inner());
     let seen = slot.get_or_insert_with(HashMap::new);
     let now = Instant::now();
     if let Some(then) = seen.get(name) {
-        if now.duration_since(*then) < Duration::from_secs(10) {
+        if now.duration_since(*then) < gap {
             return false;
         }
     }
@@ -602,15 +647,19 @@ fn spawn_pipelines(
     feeds: PathBuf,
     spots_path: PathBuf,
     rpcs: Vec<String>,
+    loaded: &config::Config,
 ) -> JoinSet<eyre::Result<()>> {
     let mut tasks = JoinSet::new();
     if pipelines.headers {
         let peer = local.clone().expect("headers needs both db and peer");
         let store = store.clone().expect("headers needs both db and peer");
         let stop = stop.clone();
+        let sync = loaded.pipeline.clone();
         tasks.spawn_local(async move {
             let mut sink = StoreSink::new(store.clone());
-            HeaderSource::new(peer, store).run(&mut sink, stop).await
+            HeaderSource::with(peer, store, sync)
+                .run(&mut sink, stop)
+                .await
         });
     }
     if pipelines.venues {
@@ -618,9 +667,10 @@ fn spawn_pipelines(
         let venue_peer = local.clone();
         let venue_opts = opts.clone();
         let stop = stop.clone();
+        let follow = loaded.pipeline.follow();
         tasks.spawn_local(async move {
             let mut sink = StoreSink::new(store.clone());
-            VenueSource::new(store, venue_peer, venue_opts)
+            VenueSource::with(store, venue_peer, venue_opts, follow)
                 .run(&mut sink, stop)
                 .await
         });
@@ -628,13 +678,16 @@ fn spawn_pipelines(
     if pipelines.spots {
         let store = store.clone().expect("spots needs db");
         let stop = stop.clone();
+        let spot_cache = loaded.store.spots;
+        let spot_settings = loaded.spots.clone();
         tasks.spawn_local(async move {
             let (native, wrapped) = venues::custodial_wrap();
-            let book = store::service::Spots::open(&spots_path)?;
+            let book = store::service::Spots::open_with(&spots_path, spot_cache)?;
             spots::run(
                 book,
                 stop,
                 Some(spots::CustodialWrap { native, wrapped }),
+                spot_settings,
                 move || conduit_edges(&store),
             )
             .await
@@ -645,18 +698,21 @@ fn spawn_pipelines(
         let stop = stop.clone();
         let mut opts = opts;
         opts.phase = RunPhase::State;
+        let follow = loaded.pipeline.follow();
         tasks.spawn_local(async move {
             let mut sink = StoreSink::new(store.clone());
-            VenueSource::new(store, local, opts)
+            VenueSource::with(store, local, opts, follow)
                 .run(&mut sink, stop)
                 .await
         });
     }
     if pipelines.oracles {
         let stop = stop.clone();
+        let feed_cache = loaded.store.feeds;
+        let oracle_settings = loaded.oracles.clone();
         tasks.spawn_local(async move {
-            let book = store::service::Feeds::open(&feeds)?;
-            oracles::run(book, rpcs, stop).await
+            let book = store::service::Feeds::open_with(&feeds, feed_cache)?;
+            oracles::run(book, rpcs, oracle_settings, stop).await
         });
     }
     tasks
@@ -772,6 +828,22 @@ async fn pause_signal() -> eyre::Result<()> {
     }
 }
 
+fn bind_addr<T>(cli: Option<T>, configured: Option<&str>) -> eyre::Result<Option<T>>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    if let Some(addr) = cli {
+        return Ok(Some(addr));
+    }
+    let Some(text) = configured else {
+        return Ok(None);
+    };
+    text.parse()
+        .map(Some)
+        .map_err(|err| eyre::eyre!("bind address {text}: {err}"))
+}
+
 fn egress_from(bind4: Option<Ipv4Addr>, bind6: Option<Ipv6Addr>) -> eyre::Result<Option<Egress>> {
     match (bind4, bind6) {
         (Some(v4), Some(v6)) => Ok(Some(Egress { v4, v6 })),
@@ -854,17 +926,22 @@ fn check_combination(services: &Services, pipelines: &Pipelines) -> eyre::Result
 }
 
 /// Open the selected files. `peers.redb` is first. A bad combination opens nothing.
-fn open_owned(services: &Services, pipelines: &Pipelines, paths: &Paths) -> eyre::Result<Owned> {
+fn open_owned(
+    services: &Services,
+    pipelines: &Pipelines,
+    paths: &Paths,
+    caches: &config::Store,
+) -> eyre::Result<Owned> {
     check_combination(services, pipelines)?;
     let peer_owner = if services.peer {
-        Some(peer::open(&paths.peers)?)
+        Some(peer::open_with(&paths.peers, caches.peers)?)
     } else {
         None
     };
     let catalog = services.db
         && (pipelines.headers || pipelines.venues || pipelines.state || pipelines.spots);
     let store = if catalog {
-        match LocalStore::open(&paths.headers, &paths.corpus, &paths.venues) {
+        match LocalStore::open_with(&paths.headers, &paths.corpus, &paths.venues, caches) {
             Ok(store) => Some(store),
             Err(err) => {
                 drop(peer_owner);
@@ -880,28 +957,13 @@ fn open_owned(services: &Services, pipelines: &Pipelines, paths: &Paths) -> eyre
     })
 }
 
-fn default_paths() -> eyre::Result<Paths> {
-    Ok(Paths {
-        peers: store::service::Peers::default_path(),
-        headers: store::service::HeaderChain::default_path(),
-        corpus: store::service::Corpus::default_path(),
-        venues: store::service::Catalog::default_path(),
-        peer_socket: peer::socket_path()?,
-        feeds: store::service::Feeds::default_path(),
-        spots: store::service::Spots::default_path(),
-    })
-}
-
-fn paths_from(data_dir: Option<&Path>) -> eyre::Result<Paths> {
-    let Some(dir) = data_dir else {
-        return default_paths();
-    };
+fn paths_from(dir: &Path, socket: &Option<String>) -> eyre::Result<Paths> {
     Ok(Paths {
         peers: dir.join("peers.redb"),
         headers: dir.join("headers.redb"),
         corpus: dir.join("corpus.redb"),
         venues: dir.join("entities.redb"),
-        peer_socket: dir.join("peer.sock"),
+        peer_socket: config::peer_socket(dir, socket)?,
         feeds: dir.join("feeds.redb"),
         spots: dir.join("spots.redb"),
     })
@@ -925,18 +987,22 @@ fn refuse_live(dir: &Path) -> eyre::Result<()> {
     Ok(())
 }
 
-fn resolve_rpcs(given: &[String], state: bool) -> eyre::Result<Vec<String>> {
+fn resolve_rpcs(
+    given: &[String],
+    state: bool,
+    network: &config::Network,
+) -> eyre::Result<Vec<String>> {
     if !given.is_empty() {
         return Ok(given.to_vec());
     }
-    if !state {
-        return Ok(Vec::new());
+    if state {
+        let Some(key) = alchemy_key() else {
+            return Err(eyre::eyre!("state needs --rpc or ALCHEMY_API_KEY"));
+        };
+        observability::info!("state rpc is the alchemy endpoint");
+        return Ok(vec![format!("https://eth-mainnet.g.alchemy.com/v2/{key}")]);
     }
-    let Some(key) = alchemy_key() else {
-        return Err(eyre::eyre!("state needs --rpc or ALCHEMY_API_KEY"));
-    };
-    observability::info!("state rpc is the alchemy endpoint");
-    Ok(vec![format!("https://eth-mainnet.g.alchemy.com/v2/{key}")])
+    Ok(network.call_rpcs.clone())
 }
 
 fn alchemy_key() -> Option<String> {
@@ -965,6 +1031,14 @@ mod tests {
     use clap::CommandFactory;
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn open_default(
+        services: &Services,
+        pipelines: &Pipelines,
+        paths: &Paths,
+    ) -> eyre::Result<Owned> {
+        open_owned(services, pipelines, paths, &config::Store::default())
+    }
 
     fn must_err(result: eyre::Result<Owned>) -> eyre::Report {
         match result {
@@ -1041,14 +1115,27 @@ mod tests {
     #[test]
     fn default_services_are_db_and_peer() {
         let args = Cli::try_parse_from(["ratatoskr"]).unwrap().args;
-        assert_eq!(parse_services(&args.services).unwrap(), both());
-        assert_eq!(args.peers, peer::TARGET_PEERS);
+        assert!(args.services.is_none());
+        assert!(args.peers.is_none());
+        let loaded =
+            config::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config")).unwrap();
+        assert_eq!(
+            parse_services(&loaded.process.services.join(",")).unwrap(),
+            both()
+        );
+        assert_eq!(loaded.peer.target, config::Peer::default().target);
     }
 
     #[test]
     fn default_pipelines_are_header_sync_discovery_and_state() {
         let args = Cli::try_parse_from(["ratatoskr"]).unwrap().args;
-        assert_eq!(parse_pipelines(&args.pipeline).unwrap(), every_pipeline());
+        assert!(args.pipeline.is_none());
+        let loaded =
+            config::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config")).unwrap();
+        assert_eq!(
+            parse_pipelines(&loaded.process.pipelines.join(",")).unwrap(),
+            every_pipeline()
+        );
     }
 
     #[test]
@@ -1081,7 +1168,7 @@ mod tests {
     fn oracles_with_db_does_not_open_the_venue_catalog() {
         let dir = TempDir::new();
         let paths = paths_in(&dir.0);
-        let owned = open_owned(
+        let owned = open_default(
             &Services {
                 db: true,
                 peer: false,
@@ -1103,7 +1190,7 @@ mod tests {
     #[test]
     fn data_dir_paths_stay_inside_that_directory() {
         let dir = TempDir::new();
-        let paths = paths_from(Some(&dir.0)).unwrap();
+        let paths = paths_from(&dir.0, &None).unwrap();
         assert_eq!(paths.venues, dir.0.join("entities.redb"));
         assert_eq!(paths.headers, dir.0.join("headers.redb"));
         assert_eq!(paths.feeds, dir.0.join("feeds.redb"));
@@ -1115,7 +1202,7 @@ mod tests {
     fn spots_with_db_opens_the_venue_catalog_and_leaves_the_feed_file_closed() {
         let dir = TempDir::new();
         let paths = paths_in(&dir.0);
-        let owned = open_owned(
+        let owned = open_default(
             &Services {
                 db: true,
                 peer: false,
@@ -1141,7 +1228,7 @@ mod tests {
     fn spots_without_db_opens_nothing() {
         let dir = TempDir::new();
         let paths = paths_in(&dir.0);
-        let err = must_err(open_owned(
+        let err = must_err(open_default(
             &Services {
                 db: false,
                 peer: true,
@@ -1163,7 +1250,7 @@ mod tests {
     fn state_without_db_opens_nothing() {
         let dir = TempDir::new();
         let paths = paths_in(&dir.0);
-        let err = must_err(open_owned(
+        let err = must_err(open_default(
             &Services {
                 db: false,
                 peer: true,
@@ -1196,8 +1283,8 @@ mod tests {
         .unwrap();
         assert!(cli.command.is_none());
         assert!(cli.args.until_idle);
-        assert_eq!(cli.args.services, "db");
-        assert_eq!(cli.args.pipeline, "state");
+        assert_eq!(cli.args.services.as_deref(), Some("db"));
+        assert_eq!(cli.args.pipeline.as_deref(), Some("state"));
     }
 
     #[test]
@@ -1217,7 +1304,7 @@ mod tests {
     fn a_pipeline_missing_its_service_opens_nothing() {
         let dir = TempDir::new();
         let paths = paths_in(&dir.0);
-        let headers = must_err(open_owned(
+        let headers = must_err(open_default(
             &Services {
                 db: true,
                 peer: false,
@@ -1233,7 +1320,7 @@ mod tests {
         ));
         assert!(headers.to_string().contains("headers"), "{headers}");
         assert_no_databases(&paths);
-        let venues = must_err(open_owned(
+        let venues = must_err(open_default(
             &Services {
                 db: false,
                 peer: true,
@@ -1255,7 +1342,7 @@ mod tests {
     fn peer_service_opens_only_the_catalog() {
         let dir = TempDir::new();
         let paths = paths_in(&dir.0);
-        let owned = open_owned(
+        let owned = open_default(
             &Services {
                 db: false,
                 peer: true,
@@ -1275,7 +1362,7 @@ mod tests {
     fn db_service_does_not_create_the_peer_catalog() {
         let dir = TempDir::new();
         let paths = paths_in(&dir.0);
-        let owned = open_owned(
+        let owned = open_default(
             &Services {
                 db: true,
                 peer: false,
@@ -1306,7 +1393,7 @@ mod tests {
         let paths = paths_in(&dir.0);
         std::fs::write(&paths.peer_socket, b"stale-peer").unwrap();
         let held = peer::open(&paths.peers).unwrap();
-        let err = must_err(open_owned(&both(), &every_pipeline(), &paths));
+        let err = must_err(open_default(&both(), &every_pipeline(), &paths));
         let text = format!("{err:#}");
         assert!(text.contains("already open"), "{text}");
         assert!(!paths.headers.exists());
@@ -1322,7 +1409,7 @@ mod tests {
         let paths = paths_in(&dir.0);
         std::fs::write(&paths.peer_socket, b"stale-peer").unwrap();
         let held = LocalStore::open_headers(&paths.headers).unwrap();
-        let err = must_err(open_owned(&both(), &every_pipeline(), &paths));
+        let err = must_err(open_default(&both(), &every_pipeline(), &paths));
         let text = format!("{err:#}");
         assert!(text.contains("already open"), "{text}");
         assert!(!paths.corpus.exists());

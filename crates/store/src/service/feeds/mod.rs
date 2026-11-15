@@ -23,9 +23,6 @@ pub enum Error {
     Store(String),
 }
 
-/// Feed rows are small. The cache holds the directory and the latest answers.
-const PAGE_CACHE: usize = 8 * 1024 * 1024;
-
 const IDENTITY: TableDefinition<&[u8], &[u8]> = TableDefinition::new("identity");
 
 const CONFIG: TableDefinition<&[u8], &[u8]> = TableDefinition::new("config");
@@ -87,7 +84,11 @@ impl Feeds {
     }
 
     pub fn open(path: &Path) -> Result<Self, Error> {
-        let db = Database::open_or_create(path, PAGE_CACHE).map_err(db_err)?;
+        Self::open_with(path, config::Store::default().feeds)
+    }
+
+    pub fn open_with(path: &Path, cache: usize) -> Result<Self, Error> {
+        let db = Database::open_or_create(path, cache).map_err(db_err)?;
         db.watch();
         Ok(Self { db })
     }

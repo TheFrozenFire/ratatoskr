@@ -6,8 +6,6 @@ use store_model::HeaderRecord;
 
 use crate::{blocking, LocalStore};
 
-const HEADER_BATCH: u64 = 8192;
-
 #[allow(async_fn_in_trait)]
 pub trait ChainStore: Send + Sync {
     async fn header_cursor(&self) -> eyre::Result<u64>;
@@ -55,8 +53,9 @@ impl ChainStore for LocalStore {
         }
         let mut seen = 0_u64;
         let mut at = from;
+        let batch = self.caches.header_batch;
         while at < to {
-            let end = at.saturating_add(HEADER_BATCH).min(to);
+            let end = at.saturating_add(batch).min(to);
             let chain = self.chain_db()?;
             let batch = blocking(move || chain.read_range(at, end)).await?;
             let rows = batch.len() as u64;

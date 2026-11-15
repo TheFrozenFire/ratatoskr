@@ -20,14 +20,6 @@ use crate::decode::rows_from_log;
 use crate::logs::{job_filter, LogJob, Walk, MERGE_BLOCK};
 use crate::{ChainStore, CorpusStore, DiscoveryStore};
 
-const CHUNK_MAX: u64 = 64;
-const RECEIPT_PIPELINE: usize = 8;
-const ERA_INFLIGHT: usize = 32;
-const ERA_BATCH: usize = 128;
-const COMMIT_SPANS: usize = 32;
-const SCAN_FLUSH: u64 = 1_000_000;
-const MIRROR: &str = "https://data.ethpandaops.io/era1/mainnet/";
-
 #[derive(Debug)]
 enum AskFail {
     Unavailable(String),
@@ -55,6 +47,8 @@ trait EraFetch {
 
 struct LiveEra {
     http: Option<era::EraHttp>,
+    mirror: String,
+    inflight: usize,
 }
 
 impl EraFetch for LiveEra {
@@ -64,10 +58,18 @@ impl EraFetch for LiveEra {
         filter: &filter::LogFilter,
     ) -> eyre::Result<Vec<era::EraBlock>> {
         if self.http.is_none() {
-            self.http = Some(era::EraHttp::new(ERA_INFLIGHT)?);
+            self.http = Some(era::EraHttp::new(self.inflight)?);
         }
         let client = self.http.as_ref().expect("http client");
-        era::receipts_for_blocks(client, MIRROR, "mainnet", missing, filter, ERA_INFLIGHT).await
+        era::receipts_for_blocks(
+            client,
+            &self.mirror,
+            "mainnet",
+            missing,
+            filter,
+            self.inflight,
+        )
+        .await
     }
 }
 
@@ -76,19 +78,21 @@ pub async fn ingest_all<S, P>(
     peer: Option<&P>,
     jobs: &[LogJob],
     stop: &tokio::sync::watch::Receiver<bool>,
+    limits: &config::Venues,
 ) -> eyre::Result<Vec<String>>
 where
     S: ChainStore + CorpusStore + DiscoveryStore,
     P: HistoryPeer + Clone + 'static,
 {
-    let scan = scan_blooms(store, jobs, stop).await?;
-    fetch_receipts(store, peer, scan, stop).await
+    let scan = scan_blooms(store, jobs, stop, limits).await?;
+    fetch_receipts(store, peer, scan, stop, limits).await
 }
 
 async fn load_and_scan<S: ChainStore + DiscoveryStore>(
     store: &S,
     jobs: &[LogJob],
     stop: &tokio::sync::watch::Receiver<bool>,
+    limits: &config::Venues,
 ) -> eyre::Result<BloomScan> {
     let mut pending = Vec::new();
     for job in jobs {
@@ -142,7 +146,7 @@ async fn load_and_scan<S: ChainStore + DiscoveryStore>(
                 stopped: true,
             });
         }
-        let to = at.saturating_add(SCAN_FLUSH).min(end);
+        let to = at.saturating_add(limits.scan_flush).min(end);
         let window = store
             .for_each_header(at, to, &mut |batch| {
                 for header in batch {
@@ -162,7 +166,7 @@ async fn load_and_scan<S: ChainStore + DiscoveryStore>(
             .await?;
         seen += window;
         flush_hits(store, &mut pending, to).await?;
-        if to - at == SCAN_FLUSH {
+        if to - at == limits.scan_flush {
             observability::info!(block = to.saturating_sub(1), scanned, "bloom scan");
         }
         at = to;
@@ -203,8 +207,9 @@ pub(crate) async fn scan_blooms<S: ChainStore + DiscoveryStore>(
     store: &S,
     jobs: &[LogJob],
     stop: &tokio::sync::watch::Receiver<bool>,
+    limits: &config::Venues,
 ) -> eyre::Result<BloomScan> {
-    load_and_scan(store, jobs, stop).await
+    load_and_scan(store, jobs, stop, limits).await
 }
 
 pub(crate) async fn fetch_receipts<S, P>(
@@ -212,6 +217,7 @@ pub(crate) async fn fetch_receipts<S, P>(
     peer: Option<&P>,
     scan: BloomScan,
     stop: &tokio::sync::watch::Receiver<bool>,
+    limits: &config::Venues,
 ) -> eyre::Result<Vec<String>>
 where
     S: CorpusStore + DiscoveryStore,
@@ -225,7 +231,11 @@ where
     let Some(peer) = peer else {
         return Err(eyre!("peer socket"));
     };
-    let mut era = LiveEra { http: None };
+    let mut era = LiveEra {
+        http: None,
+        mirror: limits.era_mirror.clone(),
+        inflight: limits.era_inflight,
+    };
     let mut notes = Vec::new();
     for job in pending {
         if crate::hold_for_pause(stop).await {
@@ -235,7 +245,7 @@ where
             observability::info!(job = %job.job.name, at = job.at, end, "history caught up");
             continue;
         }
-        match fetch_job(store, peer, &mut era, &job, end, stop).await {
+        match fetch_job(store, peer, &mut era, &job, end, stop, limits).await {
             Ok(Walk::Done) => observability::info!(job = %job.job.name, "history finished"),
             Ok(Walk::Stopped { at, reason }) => {
                 let note = format!("{} stopped at {at}: {reason}", job.job.name);
@@ -290,6 +300,7 @@ async fn fetch_job<S, P, E>(
     job: &PendingJob,
     end: u64,
     stop: &tokio::sync::watch::Receiver<bool>,
+    limits: &config::Venues,
 ) -> eyre::Result<Walk>
 where
     S: CorpusStore + DiscoveryStore,
@@ -309,7 +320,7 @@ where
         .filter(|block| *block >= MERGE_BLOCK)
         .collect();
     if job.at < MERGE_BLOCK {
-        if let Some(stopped) = fetch_era(store, era, job, &pre, stop).await? {
+        if let Some(stopped) = fetch_era(store, era, job, &pre, stop, limits).await? {
             return Ok(stopped);
         }
         store
@@ -319,7 +330,7 @@ where
     if end <= MERGE_BLOCK {
         return Ok(Walk::Done);
     }
-    fetch_peer(store, peer, job, &post, end, stop).await
+    fetch_peer(store, peer, job, &post, end, stop, limits).await
 }
 
 async fn fetch_era<S, E>(
@@ -328,6 +339,7 @@ async fn fetch_era<S, E>(
     job: &PendingJob,
     hits: &[u64],
     stop: &tokio::sync::watch::Receiver<bool>,
+    limits: &config::Venues,
 ) -> eyre::Result<Option<Walk>>
 where
     S: DiscoveryStore,
@@ -337,7 +349,7 @@ where
         return Ok(None);
     }
     let mut done_through = job.at;
-    for chunk in hits.chunks(ERA_BATCH) {
+    for chunk in hits.chunks(limits.era_batch) {
         if crate::hold_for_pause(stop).await {
             return Ok(Some(Walk::Stopped {
                 at: done_through,
@@ -427,12 +439,13 @@ async fn fetch_peer<S, P>(
     hits: &[u64],
     end: u64,
     stop: &tokio::sync::watch::Receiver<bool>,
+    limits: &config::Venues,
 ) -> eyre::Result<Walk>
 where
     S: CorpusStore + DiscoveryStore,
     P: HistoryPeer + Clone + 'static,
 {
-    let spans = hit_spans(hits);
+    let spans = hit_spans(hits, limits.chunk_max);
     let mut next_span = 0_usize;
     let mut pending: BTreeMap<u64, tokio::task::JoinHandle<Result<SpanOut, AskFail>>> =
         BTreeMap::new();
@@ -451,7 +464,7 @@ where
                 reason: "stop".into(),
             });
         }
-        while pending.len() < RECEIPT_PIPELINE {
+        while pending.len() < limits.receipt_pipeline {
             let Some((start, count)) = spans.get(next_span).copied() else {
                 break;
             };
@@ -511,7 +524,7 @@ where
         fetched += span.got;
         cursor = start + span.got;
         since_commit += 1;
-        if span.got < span.asked || since_commit >= COMMIT_SPANS {
+        if span.got < span.asked || since_commit >= limits.commit_spans {
             let wrote = commit_rows(store, &job.job.name, cursor, &rows).await?;
             rows.clear();
             since_commit = 0;
@@ -680,18 +693,18 @@ fn record_prefix(records: &[BlockRecord], start: u64) -> usize {
         .count()
 }
 
-/// Ranges of at most [`CHUNK_MAX`] blocks that cover every hit.
+/// Ranges of at most `chunk_max` blocks that cover every hit.
 ///
-/// Hits inside that window share one receipt request. A hit 64 or more
-/// blocks later starts a new request, so an isolated hit stays one block.
-fn hit_spans(numbers: &[u64]) -> Vec<(u64, u64)> {
+/// Hits inside that window share one receipt request. A hit `chunk_max` or
+/// more blocks later starts a new request, so an isolated hit stays one block.
+fn hit_spans(numbers: &[u64], chunk_max: u64) -> Vec<(u64, u64)> {
     let mut spans = Vec::new();
     let mut index = 0;
     while index < numbers.len() {
         let start = numbers[index];
         let mut end = start;
         index += 1;
-        while index < numbers.len() && numbers[index] < start + CHUNK_MAX {
+        while index < numbers.len() && numbers[index] < start + chunk_max {
             end = numbers[index];
             index += 1;
         }
@@ -781,12 +794,13 @@ mod tests {
     #[test]
     fn hit_spans_split_a_long_run_and_a_gap() {
         let hits: Vec<u64> = (10..75).collect();
-        assert_eq!(hit_spans(&hits), vec![(10, 64), (74, 1)]);
-        assert_eq!(hit_spans(&[1, 2, 4]), vec![(1, 4)]);
-        assert_eq!(hit_spans(&[1, 63]), vec![(1, 63)]);
-        assert_eq!(hit_spans(&[1, 64, 65]), vec![(1, 64), (65, 1)]);
-        assert_eq!(hit_spans(&[1, 65]), vec![(1, 1), (65, 1)]);
-        assert!(hit_spans(&[]).is_empty());
+        let chunk = config::Venues::default().chunk_max;
+        assert_eq!(hit_spans(&hits, chunk), vec![(10, 64), (74, 1)]);
+        assert_eq!(hit_spans(&[1, 2, 4], chunk), vec![(1, 4)]);
+        assert_eq!(hit_spans(&[1, 63], chunk), vec![(1, 63)]);
+        assert_eq!(hit_spans(&[1, 64, 65], chunk), vec![(1, 64), (65, 1)]);
+        assert_eq!(hit_spans(&[1, 65], chunk), vec![(1, 1), (65, 1)]);
+        assert!(hit_spans(&[], chunk).is_empty());
     }
 
     struct TempDir(PathBuf);
@@ -944,7 +958,8 @@ mod tests {
         assert!(store.cursor(&era_job.job.name).await.unwrap().is_none());
         assert!(store.cursor(&peer_job.job.name).await.unwrap().is_none());
 
-        fetch_era(&store, &mut era, &era_job, &[cached_era], &stop())
+        let limits = config::Venues::default();
+        fetch_era(&store, &mut era, &era_job, &[cached_era], &stop(), &limits)
             .await
             .unwrap();
         fetch_peer(
@@ -954,6 +969,7 @@ mod tests {
             &[cached_block],
             cached_block + 1,
             &stop(),
+            &limits,
         )
         .await
         .unwrap();
@@ -967,6 +983,7 @@ mod tests {
             &pending("era-miss", missed),
             &[missed],
             &stop(),
+            &limits,
         )
         .await
         .unwrap();
@@ -977,6 +994,7 @@ mod tests {
             &[cached_block + 2],
             cached_block + 3,
             &stop(),
+            &limits,
         )
         .await
         .unwrap();

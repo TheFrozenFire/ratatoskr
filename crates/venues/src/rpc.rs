@@ -10,16 +10,8 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-/// Suggested cap from the `eth_getStorageValues` execution-api draft.
-const STORAGE_CHUNK: usize = 1024;
-
 pub fn default_call_rpcs() -> Vec<String> {
-    vec![
-        "https://ethereum-rpc.publicnode.com".into(),
-        "https://eth.drpc.org".into(),
-        "https://rpc.mevblocker.io".into(),
-        "https://rpc.flashbots.net".into(),
-    ]
+    config::Network::default().call_rpcs
 }
 
 #[derive(Debug, Clone)]
@@ -117,7 +109,7 @@ impl Rpc {
             return Err(StorageError::Unsupported);
         }
         let mut out = Vec::with_capacity(reads.len());
-        for chunk in reads.chunks(STORAGE_CHUNK) {
+        for chunk in reads.chunks(config::Venues::default().storage_chunk) {
             match self.storage_values_call(chunk, block) {
                 Ok(words) => out.extend(words),
                 Err(StorageError::Unsupported) => {

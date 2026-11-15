@@ -25,19 +25,15 @@ use std::{
 };
 use tokio::time::{sleep, timeout};
 
-const DNS_BUDGET: Duration = Duration::from_secs(75);
-const DISCV4_BUDGET: Duration = Duration::from_secs(12);
-const WANTED_PEERS: usize = 600;
-
 /// Peers with a TCP port, distinct by IP.
 ///
 /// DNS is enough on its own. discv4 runs beside it and is dropped once DNS has
 /// filled the list, because a lookup that nobody can ping back just waits out
 /// its budget.
-pub async fn find_mainnet_peers() -> eyre::Result<Vec<NodeRecord>> {
-    let dns = dns_peers();
+pub async fn find_mainnet_peers(network: &config::Network) -> eyre::Result<Vec<NodeRecord>> {
+    let dns = dns_peers(network);
     tokio::pin!(dns);
-    let udp = discv4_peers();
+    let udp = discv4_peers(network);
     tokio::pin!(udp);
     let mut dns_result = None;
     let mut udp_result = None;
@@ -49,7 +45,7 @@ pub async fn find_mainnet_peers() -> eyre::Result<Vec<NodeRecord>> {
         let dns_ready = dns_result
             .as_ref()
             .and_then(|result| result.as_ref().ok())
-            .is_some_and(|peers| peers.len() >= WANTED_PEERS);
+            .is_some_and(|peers| peers.len() >= network.wanted_peers);
         if dns_ready || (dns_result.is_some() && udp_result.is_some()) {
             break;
         }
@@ -71,7 +67,7 @@ pub async fn find_mainnet_peers() -> eyre::Result<Vec<NodeRecord>> {
             None => info!(source = name, "peer source cancelled"),
         }
     }
-    found.truncate(WANTED_PEERS);
+    found.truncate(network.wanted_peers);
     use rand::seq::SliceRandom;
     found.shuffle(&mut rand::thread_rng());
     if found.is_empty() {
@@ -82,10 +78,10 @@ pub async fn find_mainnet_peers() -> eyre::Result<Vec<NodeRecord>> {
     Ok(found)
 }
 
-async fn discv4_peers() -> eyre::Result<Vec<NodeRecord>> {
+async fn discv4_peers(network: &config::Network) -> eyre::Result<Vec<NodeRecord>> {
     // Bootnodes are IPv4. `external_ip()` often returns the host's IPv6 address,
     // which those bootnodes will not ping. Ask for an IPv4 address explicitly.
-    let Some(external) = public_ipv4().await else {
+    let Some(external) = public_ipv4(&network.egress_ip_url).await else {
         return Err(eyre::eyre!("could not resolve a public IPv4 address"));
     };
     let secret = SecretKey::new(&mut rand::thread_rng());
@@ -114,8 +110,8 @@ async fn discv4_peers() -> eyre::Result<Vec<NodeRecord>> {
     let mut found = Vec::new();
     let mut seen_ips = HashSet::new();
     let started = tokio::time::Instant::now();
-    while started.elapsed() < DISCV4_BUDGET && found.len() < WANTED_PEERS {
-        let remaining = DISCV4_BUDGET.saturating_sub(started.elapsed());
+    while started.elapsed() < network.discv4_budget() && found.len() < network.wanted_peers {
+        let remaining = network.discv4_budget().saturating_sub(started.elapsed());
         let batch = match timeout(remaining, discv4.lookup_random()).await {
             Ok(Ok(nodes)) => nodes,
             Ok(Err(err)) => return Err(err).wrap_err("discv4 lookup"),
@@ -128,11 +124,11 @@ async fn discv4_peers() -> eyre::Result<Vec<NodeRecord>> {
                 continue;
             }
             found.push(node);
-            if found.len() == WANTED_PEERS {
+            if found.len() == network.wanted_peers {
                 break;
             }
         }
-        if found.len() < WANTED_PEERS {
+        if found.len() < network.wanted_peers {
             sleep(Duration::from_millis(400)).await;
         }
     }
@@ -152,19 +148,14 @@ pub const DNS_ALL: u8 = 1;
 /// `snap.mainnet.ethdisco.net`. Nodes that advertise the snap ENR entry to the crawler.
 pub const DNS_SNAP: u8 = 2;
 
-const ALL_LINK: &str =
-    "enrtree://AKA3AM6LPBYEUDMVNU3BSVQJ5AD45Y7YPOHJLEF6W26QOE4VTUDPE@all.mainnet.ethdisco.net";
-const SNAP_LINK: &str =
-    "enrtree://AKA3AM6LPBYEUDMVNU3BSVQJ5AD45Y7YPOHJLEF6W26QOE4VTUDPE@snap.mainnet.ethdisco.net";
-
 /// Walk the published mainnet trees to completion.
 ///
 /// Reth's chainspec only bootstraps `all.mainnet`. The crawler also publishes
 /// `snap.mainnet` from the same discv4 crawl. Neither tree carries a history
 /// window. That arrives later, in the eth/69 Status message.
-pub async fn census_mainnet_dns() -> eyre::Result<Vec<DnsPeer>> {
+pub async fn census_mainnet_dns(network: &config::Network) -> eyre::Result<Vec<DnsPeer>> {
     let mut by_id = std::collections::HashMap::<reth_network_peers::PeerId, DnsPeer>::new();
-    for (link, bit) in [(ALL_LINK, DNS_ALL), (SNAP_LINK, DNS_SNAP)] {
+    for (link, bit) in [(&network.dns_all, DNS_ALL), (&network.dns_snap, DNS_SNAP)] {
         let peers = walk_dns_tree(link).await?;
         info!(link, peers = peers.len(), "dns tree walked");
         for record in peers {
@@ -225,10 +216,14 @@ async fn walk_dns_tree(link: &str) -> eyre::Result<Vec<NodeRecord>> {
 }
 
 /// A short DNS walk for the peer service.
-pub async fn dns_candidates(limit: usize) -> eyre::Result<Vec<NodeRecord>> {
+pub async fn dns_candidates(
+    limit: usize,
+    network: &config::Network,
+) -> eyre::Result<Vec<NodeRecord>> {
     // A few hundred records takes longer than a short walk. Cap the
     // wait so a stalled resolver cannot sit on the dial loop.
-    let budget = Duration::from_secs(u64::try_from(12 + limit / 10).unwrap_or(75).min(75));
+    let cap = network.dns_budget_secs;
+    let budget = Duration::from_secs(u64::try_from(12 + limit / 10).unwrap_or(cap).min(cap));
     let mut found = collect_dns(limit, budget).await?;
     use rand::seq::SliceRandom;
     found.shuffle(&mut rand::thread_rng());
@@ -238,8 +233,8 @@ pub async fn dns_candidates(limit: usize) -> eyre::Result<Vec<NodeRecord>> {
     Ok(found)
 }
 
-async fn dns_peers() -> eyre::Result<Vec<NodeRecord>> {
-    collect_dns(WANTED_PEERS, DNS_BUDGET).await
+async fn dns_peers(network: &config::Network) -> eyre::Result<Vec<NodeRecord>> {
+    collect_dns(network.wanted_peers, network.dns_budget()).await
 }
 
 async fn collect_dns(limit: usize, budget: Duration) -> eyre::Result<Vec<NodeRecord>> {
@@ -279,15 +274,9 @@ async fn collect_dns(limit: usize, budget: Duration) -> eyre::Result<Vec<NodeRec
     Ok(found)
 }
 
-async fn public_ipv4() -> Option<std::net::IpAddr> {
+async fn public_ipv4(url: &str) -> Option<std::net::IpAddr> {
     let output = std::process::Command::new("curl")
-        .args([
-            "-4",
-            "-fsS",
-            "--max-time",
-            "5",
-            "https://ipv4.icanhazip.com",
-        ])
+        .args(["-4", "-fsS", "--max-time", "5", url])
         .output()
         .ok()?;
     if !output.status.success() {

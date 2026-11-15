@@ -13,13 +13,6 @@ use tokio::time::sleep;
 
 use crate::{RecordBatch, Sink, SinkReply, Source};
 
-/// One `GetBlockHeaders` round. Peers cap this near 1024.
-const CHUNK: u64 = 512;
-const PIPELINE: usize = 16;
-const CHUNKS_PER_PEER: usize = 2;
-/// Stay behind the peer's head so a reorg does not rewrite the chain tip.
-const TIP_LAG: u64 = 32;
-
 /// Fetches header batches and submits only the next cursor, in order.
 ///
 /// `Rejected` retries that same `next`. Stop finishes the push already in
@@ -27,11 +20,16 @@ const TIP_LAG: u64 = 32;
 pub struct HeaderSource<P, S> {
     peer: P,
     store: S,
+    sync: config::Pipeline,
 }
 
 impl<P, S> HeaderSource<P, S> {
     pub fn new(peer: P, store: S) -> Self {
-        Self { peer, store }
+        Self::with(peer, store, config::Pipeline::default())
+    }
+
+    pub fn with(peer: P, store: S, sync: config::Pipeline) -> Self {
+        Self { peer, store, sync }
     }
 }
 
@@ -65,9 +63,9 @@ where
             };
             // Announcements from eth/69+ arrive about once per 32 blocks.
             // A header that far ahead of the cursor means the cursor is safe.
-            if next > head.saturating_sub(TIP_LAG) {
-                let probe = next.saturating_add(TIP_LAG);
-                match self.peer.headers(probe, CHUNK).await {
+            if next > head.saturating_sub(self.sync.tip_lag) {
+                let probe = next.saturating_add(self.sync.tip_lag);
+                match self.peer.headers(probe, self.sync.chunk).await {
                     Ok(records) => {
                         if let Some(number) = records.iter().map(|record| record.number).max() {
                             if number > head {
@@ -90,7 +88,7 @@ where
                 }
             }
             observability::note_headers(next, head);
-            let tip = head.saturating_sub(TIP_LAG);
+            let tip = head.saturating_sub(self.sync.tip_lag);
             if next > tip {
                 info!(target: "headers", next, head, "caught up");
                 if wait_or_stop(&mut stop, 15).await {
@@ -102,15 +100,15 @@ where
                 Ok(sessions) => serving(&sessions, next),
                 Err(_) => 1,
             }
-            .saturating_mul(CHUNKS_PER_PEER)
-            .clamp(1, PIPELINE);
+            .saturating_mul(self.sync.chunks_per_peer)
+            .clamp(1, self.sync.width);
             let mut plan = Vec::new();
             let mut issue = next;
             for _ in 0..depth {
                 if issue > tip {
                     break;
                 }
-                let width = (tip - issue + 1).min(CHUNK);
+                let width = (tip - issue + 1).min(self.sync.chunk);
                 plan.push((issue, width));
                 issue += width;
             }

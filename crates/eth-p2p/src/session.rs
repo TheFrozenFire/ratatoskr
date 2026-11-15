@@ -42,7 +42,11 @@ pub struct Egress {
     pub v6: Ipv6Addr,
 }
 
-async fn dial(addr: SocketAddr, egress: Option<Egress>) -> eyre::Result<TcpStream> {
+async fn dial(
+    addr: SocketAddr,
+    egress: Option<Egress>,
+    dial_timeout: Duration,
+) -> eyre::Result<TcpStream> {
     let socket = match addr {
         SocketAddr::V4(_) => {
             let socket = TcpSocket::new_v4().wrap_err("tcp v4")?;
@@ -63,7 +67,7 @@ async fn dial(addr: SocketAddr, egress: Option<Egress>) -> eyre::Result<TcpStrea
             socket
         }
     };
-    timeout(DIAL_TIMEOUT, socket.connect(addr))
+    timeout(dial_timeout, socket.connect(addr))
         .await
         .wrap_err("dial timed out")?
         .wrap_err("dial failed")
@@ -77,11 +81,6 @@ const OFFERED_ETH: [EthVersion; 5] = [
     EthVersion::Eth69,
     EthVersion::Eth68,
 ];
-
-const DIAL_TIMEOUT: Duration = Duration::from_secs(5);
-/// A receipt batch is several megabytes. Fifteen seconds was dropping sessions
-/// that were still sending.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
 
 type EthIo = EthStream<reth_eth_wire::P2PStream<ECIESStream<TcpStream>>, EthNetworkPrimitives>;
 
@@ -110,6 +109,7 @@ pub struct OutboundSession {
     pub latest_block: Option<u64>,
     /// First block the peer says it can serve. Absent on eth/68.
     pub earliest_block: Option<u64>,
+    request_timeout: Duration,
 }
 
 impl OutboundSession {
@@ -127,7 +127,7 @@ impl OutboundSession {
             }
         }
 
-        let peers = find_mainnet_peers().await?;
+        let peers = find_mainnet_peers(&config::Network::default()).await?;
         for peer in peers {
             let label = peer.to_string();
             match Self::connect_record(peer).await {
@@ -166,11 +166,30 @@ impl OutboundSession {
         secret: &SecretKey,
         egress: Option<Egress>,
     ) -> eyre::Result<Self> {
+        let network = config::Network::default();
+        Self::connect_with_limits(
+            peer,
+            secret,
+            egress,
+            network.dial_timeout(),
+            network.request_timeout(),
+        )
+        .await
+    }
+
+    /// [`Self::connect_via`] with the dial and request timeouts from configuration.
+    pub async fn connect_with_limits(
+        peer: NodeRecord,
+        secret: &SecretKey,
+        egress: Option<Egress>,
+        dial_timeout: Duration,
+        request_timeout: Duration,
+    ) -> eyre::Result<Self> {
         if peer.tcp_port == 0 {
             return Err(eyre!("peer advertises no TCP port"));
         }
         let addr = SocketAddr::new(peer.address, peer.tcp_port);
-        let tcp = dial(addr, egress).await?;
+        let tcp = dial(addr, egress, dial_timeout).await?;
         let local = tcp.local_addr().ok();
 
         let local_id = pk2id(&secret.public_key(SECP256K1));
@@ -217,7 +236,12 @@ impl OutboundSession {
         );
         let (commands, incoming) = mpsc::channel(16);
         let head = Arc::new(AtomicU64::new(their_status.latest_block.unwrap_or(0)));
-        tokio::spawn(drive_session(stream, incoming, Arc::clone(&head)));
+        tokio::spawn(drive_session(
+            stream,
+            incoming,
+            Arc::clone(&head),
+            request_timeout,
+        ));
         Ok(Self {
             commands,
             next_request_id: Arc::new(AtomicU64::new(1)),
@@ -226,6 +250,7 @@ impl OutboundSession {
             head,
             latest_block: their_status.latest_block,
             earliest_block: their_status.earliest_block,
+            request_timeout,
         })
     }
 
@@ -235,7 +260,7 @@ impl OutboundSession {
             .send(PendingRequest { message, reply })
             .await
             .map_err(|_| eyre!("peer closed the session"))?;
-        match timeout(REQUEST_TIMEOUT, response).await {
+        match timeout(self.request_timeout, response).await {
             Ok(Ok(Ok(message))) => Ok(message),
             Ok(Ok(Err(err))) => Err(eyre!(err)),
             Ok(Err(_)) => Err(eyre!("peer closed the session")),
@@ -260,10 +285,11 @@ async fn drive_session(
     mut stream: EthIo,
     mut commands: mpsc::Receiver<PendingRequest>,
     head: Arc<AtomicU64>,
+    request_timeout: Duration,
 ) {
     let mut waiters: HashMap<u64, Waiter> = HashMap::new();
     loop {
-        sweep_waiters(&mut waiters);
+        sweep_waiters(&mut waiters, request_timeout);
         tokio::select! {
             biased;
             incoming = stream.next() => {
@@ -327,10 +353,10 @@ async fn drive_session(
     }
 }
 
-fn sweep_waiters(waiters: &mut HashMap<u64, Waiter>) {
+fn sweep_waiters(waiters: &mut HashMap<u64, Waiter>, request_timeout: Duration) {
     let expired: Vec<u64> = waiters
         .iter()
-        .filter(|(_, waiter)| waiter.started.elapsed() > REQUEST_TIMEOUT)
+        .filter(|(_, waiter)| waiter.started.elapsed() > request_timeout)
         .map(|(id, _)| *id)
         .collect();
     for id in expired {

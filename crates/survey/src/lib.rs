@@ -34,29 +34,33 @@ use store::service::Catalog;
 use crate::reader::Reader;
 use crate::source::Source;
 
-pub(crate) const HUB_MINIMUM: usize = 3;
-pub(crate) const QUERY_HUBS: usize = 32;
 pub(crate) const HUB_LIMITS: [usize; 4] = [8, 16, 32, 64];
 
 /// Open the entity catalog at `data_dir` and print the search.
-pub fn run(data_dir: &Path) -> eyre::Result<()> {
+pub fn run(data_dir: &Path, spots: &config::Spots, caches: &config::Store) -> eyre::Result<()> {
     eprintln!("opening {}", data_dir.display());
-    let catalog = Catalog::open(data_dir).wrap_err("open catalog")?;
-    print_search(&catalog)
+    let catalog = Catalog::open_with(data_dir, caches).wrap_err("open catalog")?;
+    print_search(&catalog, spots)
 }
 
 /// Open the entity file read-only, allocate the trades, and print each score.
 ///
 /// `limit` keeps the first trades in scenario order. `None` runs all of them.
-pub fn measure(data_dir: &Path, limit: Option<usize>) -> eyre::Result<()> {
+pub fn measure(
+    data_dir: &Path,
+    limit: Option<usize>,
+    spots: &config::Spots,
+    caches: &config::Store,
+) -> eyre::Result<()> {
     eprintln!("opening {} read-only", data_dir.display());
-    let catalog = store::service::EntityRead::open(data_dir).wrap_err("open catalog")?;
-    let mut stage = stage::load(&catalog)?;
+    let catalog =
+        store::service::EntityRead::open_with(data_dir, caches.read).wrap_err("open catalog")?;
+    let mut stage = stage::load(&catalog, spots)?;
     measure::run(&catalog, &mut stage, limit)
 }
 
-fn print_search(catalog: &impl Source) -> eyre::Result<()> {
-    let mut stage = stage::load(catalog)?;
+fn print_search(catalog: &impl Source, spots: &config::Spots) -> eyre::Result<()> {
+    let mut stage = stage::load(catalog, spots)?;
     let reader = Reader {
         source: catalog,
         cache: RefCell::new(std::mem::take(&mut stage.cache)),
@@ -72,6 +76,8 @@ fn print_search(catalog: &impl Source) -> eyre::Result<()> {
         &stage.selection,
         &stage.census,
         &stage.reach_rows,
+        spots.hub_floor,
+        spots.hub_limit,
     );
     let mut checks = check::Checks {
         failures: Vec::new(),

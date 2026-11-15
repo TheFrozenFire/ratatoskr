@@ -1,0 +1,11 @@
+[package]
+name = "config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+eyre.workspace = true
+figment = { version = "0.10", features = ["yaml"] }
+serde.workspace = true

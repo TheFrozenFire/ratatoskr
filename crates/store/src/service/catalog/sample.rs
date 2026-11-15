@@ -10,7 +10,7 @@ use std::str::FromStr;
 use store_model::{decode_row, entity_key, kind_name, Put, VenueRow, UNI_V3};
 
 use super::identity::{count_identities, identity_keys, write_identities};
-use super::{catalog_dir, Catalog, ENTITIES_CACHE, VENUES};
+use super::{catalog_dir, Catalog, VENUES};
 use crate::storage::Database;
 
 /// How many identities a sample copied, by kind.
@@ -26,7 +26,12 @@ pub struct SampleReport {
 ///
 /// `src` is opened as a plain redb file. The live `venues.redb` and the live
 /// catalog directory are refused.
-pub fn sample_identities(src: &Path, dest: &Path, target: u64) -> eyre::Result<SampleReport> {
+pub fn sample_identities(
+    src: &Path,
+    dest: &Path,
+    target: u64,
+    caches: &config::Store,
+) -> eyre::Result<SampleReport> {
     if target == 0 {
         return Err(eyre::eyre!("sample target is 0"));
     }
@@ -40,10 +45,10 @@ pub fn sample_identities(src: &Path, dest: &Path, target: u64) -> eyre::Result<S
         ));
     }
     refuse_live_dir(&dest_dir)?;
-    let source = Database::open(src, ENTITIES_CACHE).wrap_err("open identity source")?;
+    let source = Database::open(src, caches.entities).wrap_err("open identity source")?;
     let counts = count_identities(&source)?;
     let plan = allocate_sample(&counts, target);
-    let catalog = Catalog::open(&dest_dir)?;
+    let catalog = Catalog::open_with(&dest_dir, caches)?;
     let anchor = anchor_id();
     let read = source.begin_read()?;
     let table = read.open_table(VENUES).wrap_err("identity table")?;
@@ -128,7 +133,12 @@ pub struct FillReport {
 ///
 /// `src` is opened as a plain redb file. Kinds that are already fully copied
 /// contribute nothing. The live `venues.redb` is refused.
-pub fn fill_identities(src: &Path, dest: &Path, add: u64) -> eyre::Result<FillReport> {
+pub fn fill_identities(
+    src: &Path,
+    dest: &Path,
+    add: u64,
+    caches: &config::Store,
+) -> eyre::Result<FillReport> {
     if add == 0 {
         return Err(eyre::eyre!("fill target is 0"));
     }
@@ -142,9 +152,9 @@ pub fn fill_identities(src: &Path, dest: &Path, add: u64) -> eyre::Result<FillRe
         ));
     }
     refuse_live_dir(&dest_dir)?;
-    let source = Database::open(src, ENTITIES_CACHE).wrap_err("open identity source")?;
+    let source = Database::open(src, caches.entities).wrap_err("open identity source")?;
     let source_counts = count_identities(&source)?;
-    let catalog = Catalog::open(&dest_dir)?;
+    let catalog = Catalog::open_with(&dest_dir, caches)?;
     let mut present = identity_keys(&catalog)?;
     drop(catalog);
     remember_dropped(&dest_dir, &mut present)?;
@@ -157,7 +167,7 @@ pub fn fill_identities(src: &Path, dest: &Path, add: u64) -> eyre::Result<FillRe
         }
     }
     let plan = allocate_sample(&remaining, add);
-    let catalog = Catalog::open(&dest_dir)?;
+    let catalog = Catalog::open_with(&dest_dir, caches)?;
     let read = source.begin_read()?;
     let table = read.open_table(VENUES).wrap_err("identity table")?;
     let mut copied = 0_u64;

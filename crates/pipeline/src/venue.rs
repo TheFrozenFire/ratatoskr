@@ -12,22 +12,25 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use venues::{execute, RunOpts, RunPhase, RunReport};
 
-/// Idle time between discovery passes once the current headers are read.
-const FOLLOW: Duration = Duration::from_secs(60);
-
 pub struct VenueSource<S, P> {
     store: S,
     peer: Option<P>,
     opts: RunOpts,
+    follow: Duration,
     shared: Arc<Mutex<RunReport>>,
 }
 
 impl<S, P> VenueSource<S, P> {
     pub fn new(store: S, peer: Option<P>, opts: RunOpts) -> Self {
+        Self::with(store, peer, opts, config::Pipeline::default().follow())
+    }
+
+    pub fn with(store: S, peer: Option<P>, opts: RunOpts, follow: Duration) -> Self {
         Self {
             store,
             peer,
             opts,
+            follow,
             shared: Arc::new(Mutex::new(RunReport::default())),
         }
     }
@@ -89,7 +92,7 @@ where
                         return Ok(());
                     }
                 }
-                _ = tokio::time::sleep(FOLLOW) => {}
+                _ = tokio::time::sleep(self.follow) => {}
             }
         }
     }

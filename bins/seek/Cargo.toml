@@ -10,5 +10,6 @@ name = "seek"
 path = "src/main.rs"
 
 [dependencies]
+config.workspace = true
 eyre.workspace = true
 survey.workspace = true

@@ -14,17 +14,18 @@ use std::path::Path;
 const HEADERS: TableDefinition<u64, &[u8]> = TableDefinition::new("headers");
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 
-/// A header window is a few megabytes, and the next append reads one parent.
-const PAGE_CACHE: usize = 64 * 1024 * 1024;
-
 pub struct HeaderChain {
     db: crate::storage::File,
 }
 
 impl HeaderChain {
     pub fn create(path: &Path) -> eyre::Result<Self> {
+        Self::create_with(path, config::Store::default().headers)
+    }
+
+    pub fn create_with(path: &Path, cache: usize) -> eyre::Result<Self> {
         Ok(Self {
-            db: crate::storage::File::create(path, PAGE_CACHE).wrap_err("create header db")?,
+            db: crate::storage::File::create(path, cache).wrap_err("create header db")?,
         })
     }
 
@@ -39,8 +40,12 @@ impl HeaderChain {
 
     /// Open a chain another process may be appending to. Callers only read.
     pub fn open(path: &Path) -> eyre::Result<Self> {
+        Self::open_with(path, config::Store::default().headers)
+    }
+
+    pub fn open_with(path: &Path, cache: usize) -> eyre::Result<Self> {
         Ok(Self {
-            db: crate::storage::File::read(path, PAGE_CACHE).wrap_err("open header chain")?,
+            db: crate::storage::File::read(path, cache).wrap_err("open header chain")?,
         })
     }
 }

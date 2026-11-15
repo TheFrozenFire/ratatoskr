@@ -12,15 +12,6 @@ use num_bigint::BigInt;
 use routing::SlopeSegment;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-/// Tokens a conduit must name before it can be a hub, and how many hubs a pass keeps.
-///
-/// The floor matches the survey hub census. The limit matches the hubs a search keeps.
-pub const HUB_FLOOR: usize = 3;
-pub const HUB_LIMIT: usize = 32;
-
-/// How long a pass waits before reading the conduits again. Discovery waits the same.
-const PASS: std::time::Duration = std::time::Duration::from_secs(60);
-
 /// Wrapped ETH. The numeraire for the ether sizes. Not a feed answer.
 pub const WETH: Address = address!("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
 
@@ -380,6 +371,7 @@ pub async fn run<F>(
     book: store::service::Spots,
     mut stop: tokio::sync::watch::Receiver<bool>,
     wrap: Option<CustodialWrap>,
+    settings: config::Spots,
     gather: F,
 ) -> eyre::Result<()>
 where
@@ -391,15 +383,11 @@ where
             return Ok(());
         }
         let gather = std::sync::Arc::clone(&gather);
+        let floor = settings.hub_floor;
+        let limit = settings.hub_limit;
         let found = tokio::task::spawn_blocking(move || -> eyre::Result<Vec<Spot>> {
             let edges = gather()?;
-            Ok(price(
-                &edges,
-                HUB_FLOOR,
-                HUB_LIMIT,
-                &mainnet_numeraires(),
-                wrap,
-            ))
+            Ok(price(&edges, floor, limit, &mainnet_numeraires(), wrap))
         })
         .await
         .map_err(|err| eyre::eyre!("spot pass: {err}"))?;
@@ -425,7 +413,7 @@ where
                     return Ok(());
                 }
             }
-            _ = tokio::time::sleep(PASS) => {}
+            _ = tokio::time::sleep(settings.pass()) => {}
         }
     }
 }

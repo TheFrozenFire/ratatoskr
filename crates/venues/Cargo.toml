@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+config.workspace = true
 observability.workspace = true
 alloy-primitives.workspace = true
 bigdecimal = "0.4"
