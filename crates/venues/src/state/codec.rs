@@ -1,7 +1,11 @@
-//! Row bytes for a pool detail.
+//! Row bytes for a pool detail, and the split and join of those rows.
 
-use alloy_primitives::{Address, B256, U256};
-use chain::detail::{BitmapWord, Concentrated, CurveCoin, CurvePool, MetricBin, MetricPool};
+use super::{MutableWrite, CLASS_NONE};
+use alloy_primitives::{keccak256, Address, B256, U256};
+use chain::detail::{
+    BitmapWord, Concentrated, CurveCoin, CurvePool, MetricBin, MetricPool, PoolDetail, TickWord,
+    FLAG_FAILED, FLAG_TRUNCATED,
+};
 
 struct Reader<'a> {
     bytes: &'a [u8],
@@ -586,4 +590,134 @@ pub(super) fn decode_metric(immutable: &[u8], body: &[u8]) -> Result<MetricPool,
         bins,
         flags,
     })
+}
+
+pub(super) fn detail_flags(detail: &PoolDetail) -> u64 {
+    match detail {
+        PoolDetail::ConstantProduct(pool) => pool.flags,
+        PoolDetail::Concentrated(pool) => pool.flags,
+        PoolDetail::Balancer(pool) => pool.flags,
+        PoolDetail::Curve(pool) => pool.flags,
+        PoolDetail::Metric(pool) => pool.flags,
+        PoolDetail::Failed(pool) => pool.flags,
+    }
+}
+
+fn bitmap_fingerprint(bitmaps: &[BitmapWord]) -> B256 {
+    let mut bytes = Vec::with_capacity(bitmaps.len() * 34);
+    for word in bitmaps {
+        bytes.extend_from_slice(&word.word_pos.to_be_bytes());
+        bytes.extend_from_slice(&word.bits.to_be_bytes::<32>());
+    }
+    keccak256(bytes)
+}
+
+pub fn split_detail(detail: &PoolDetail) -> Result<(Vec<u8>, MutableWrite), String> {
+    if detail_flags(detail) & FLAG_FAILED != 0 {
+        return Err("pool read failed".into());
+    }
+    let (kind, id, bitmap, tick_count, truncated, next_scan, immutable, body) = match detail {
+        PoolDetail::ConstantProduct(pool) => (
+            pool.kind,
+            pool.id,
+            B256::ZERO,
+            0,
+            false,
+            None,
+            encode_product_immutable(pool),
+            encode_product_mutable(pool),
+        ),
+        PoolDetail::Concentrated(pool) => (
+            pool.kind,
+            pool.id,
+            bitmap_fingerprint(&pool.bitmaps),
+            u32::try_from(pool.initialized_ticks().len()).unwrap_or(u32::MAX),
+            pool.flags & FLAG_TRUNCATED != 0,
+            pool.next_scan,
+            encode_concentrated_immutable(pool),
+            encode_concentrated_mutable(pool),
+        ),
+        PoolDetail::Balancer(pool) => (
+            pool.kind,
+            pool.id,
+            B256::ZERO,
+            0,
+            false,
+            None,
+            encode_balancer_immutable(pool),
+            encode_balancer_mutable(pool),
+        ),
+        PoolDetail::Curve(pool) => (
+            pool.kind,
+            pool.id,
+            B256::ZERO,
+            0,
+            false,
+            None,
+            encode_curve_immutable(pool),
+            encode_curve_mutable(pool),
+        ),
+        PoolDetail::Metric(pool) => (
+            pool.kind,
+            pool.id,
+            B256::ZERO,
+            0,
+            pool.flags & FLAG_TRUNCATED != 0,
+            pool.next_scan,
+            encode_metric_immutable(pool),
+            encode_metric_mutable(pool),
+        ),
+        PoolDetail::Failed(_) => return Err("pool read failed".into()),
+    };
+    Ok((
+        immutable,
+        MutableWrite {
+            kind,
+            id,
+            block: 0,
+            class: CLASS_NONE,
+            bitmap,
+            tick_count,
+            truncated,
+            next_scan,
+            body,
+        },
+    ))
+}
+
+/// Rebuild a pool from stored rows.
+///
+/// Product immutables do not carry kind or id. `kind` and `id` are the entity
+/// key, and they are stamped onto the product so quotes and curves use it.
+pub fn join_detail(
+    immutable: &[u8],
+    mutable_body: &[u8],
+    ticks: &[TickWord],
+    kind: u8,
+    id: B256,
+) -> Result<PoolDetail, String> {
+    if immutable.is_empty() {
+        return Err("immutable".into());
+    }
+    match immutable[0] {
+        1 => {
+            let mut pool = decode_product(immutable, mutable_body)?;
+            pool.kind = kind;
+            pool.id = id;
+            Ok(PoolDetail::ConstantProduct(pool))
+        }
+        2 => {
+            let mut pool = decode_concentrated(immutable, mutable_body)?;
+            pool.ticks = ticks.to_vec();
+            pool.ticks.sort_by_key(|tick| tick.tick);
+            Ok(PoolDetail::Concentrated(pool))
+        }
+        3 => Ok(PoolDetail::Balancer(decode_balancer(
+            immutable,
+            mutable_body,
+        )?)),
+        4 => Ok(PoolDetail::Curve(decode_curve(immutable, mutable_body)?)),
+        5 => Ok(PoolDetail::Metric(decode_metric(immutable, mutable_body)?)),
+        _ => Err("detail tag".into()),
+    }
 }

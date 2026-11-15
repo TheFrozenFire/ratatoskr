@@ -16,29 +16,44 @@
 //! A curve write queues a pair conduit for each priced direction. That stage
 //! merges after the curve batch, and it does not hold a curve lease.
 
-use crate::catalog::{AERO, BALANCER_V2, BALANCER_V3, CURVE, METRIC, UNI_V4};
+use crate::catalog::{AERO, UNI_V4};
 use crate::{
     Catalog, ChainStore, ConduitStore, RunOpts, RunReport, VenueRow, VenueStore, PANCAKE_V3,
     SUSHI_V3, UNI_V3, V3_FORK,
 };
-use alloy_primitives::{keccak256, Address, B256, U256};
-use chain::detail::{tick_request, BitmapWord, PoolDetail, TickWord, FLAG_FAILED, FLAG_TRUNCATED};
+#[cfg(test)]
+use alloy_primitives::Address;
+use alloy_primitives::{B256, U256};
+#[cfg(test)]
+use chain::detail::BitmapWord;
+use chain::detail::{tick_request, PoolDetail, TickWord, FLAG_FAILED};
 use chain::rpc::Rpc;
 use chain::tick::{self, TickWordRead};
 use eyre::WrapErr;
+#[cfg(test)]
 use journal::Log;
 use peer::HistoryPeer;
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use store_model::BlockRecord;
 
 mod codec;
 mod drive;
+mod follow;
+mod refresh;
+mod watch;
 
-use self::codec::*;
+use self::codec::detail_flags;
+pub use self::codec::{join_detail, split_detail};
+#[cfg(test)]
+use self::codec::{push_i32, push_u32, push_u64, push_u8};
 pub use self::drive::run;
+use self::follow::{after_book, follow_for_detail, FollowInput};
+pub(crate) use self::follow::{curve_for_snapshot, keep_or_drop};
+pub use self::follow::{plan_follow_up, Plan};
+pub use self::refresh::{refresh_kinds, RefreshReport};
+pub use self::watch::classify_log;
+use self::watch::watch_once;
 
-pub use crate::fit::estimate;
 #[cfg(test)]
 pub(crate) use store_model::decode_job;
 pub(crate) use store_model::{priority_of, DIRTY_BAND};
@@ -77,157 +92,10 @@ const TOPIC_PANCAKE_SWAP: B256 =
 const TOPIC_CURVE_EXCHANGE: B256 =
     alloy_primitives::b256!("8b3e96f2b889fa771c53c981b40daf005f63f637f1869f707052d15a3dd97140");
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Plan {
-    pub retry_mutable: bool,
-    pub stage: Option<u8>,
-}
-
-/// What to enqueue after a mutable snapshot commits.
-///
-/// A head refresh with the same bitmap keeps tick pages and derives a curve.
-/// A mint or a changed bitmap has to read ticks again. A truncated bitmap
-/// stays on the mutable stage.
-pub fn plan_follow_up(
-    class: u8,
-    bitmap_changed: bool,
-    truncated: bool,
-    tick_count: u32,
-    _canonical: bool,
-) -> Plan {
-    if truncated {
-        return Plan {
-            retry_mutable: true,
-            stage: None,
-        };
-    }
-    let reread = tick_count > 0 && (bitmap_changed || class == CLASS_TICKS || class == CLASS_NONE);
-    if reread {
-        return Plan {
-            retry_mutable: false,
-            stage: Some(STAGE_TICKS),
-        };
-    }
-    Plan {
-        retry_mutable: false,
-        stage: Some(STAGE_CURVE),
-    }
-}
-
 pub(crate) fn curve_is_current(curve: Option<&CurveRecord>, generation: u64) -> bool {
     match curve {
         Some(curve) => curve.generation == generation && curve.version == CURVE_VERSION,
         None => false,
-    }
-}
-
-pub fn split_detail(detail: &PoolDetail) -> Result<(Vec<u8>, MutableWrite), String> {
-    if detail_flags(detail) & FLAG_FAILED != 0 {
-        return Err("pool read failed".into());
-    }
-    let (kind, id, bitmap, tick_count, truncated, next_scan, immutable, body) = match detail {
-        PoolDetail::ConstantProduct(pool) => (
-            pool.kind,
-            pool.id,
-            B256::ZERO,
-            0,
-            false,
-            None,
-            encode_product_immutable(pool),
-            encode_product_mutable(pool),
-        ),
-        PoolDetail::Concentrated(pool) => (
-            pool.kind,
-            pool.id,
-            bitmap_fingerprint(&pool.bitmaps),
-            u32::try_from(pool.initialized_ticks().len()).unwrap_or(u32::MAX),
-            pool.flags & FLAG_TRUNCATED != 0,
-            pool.next_scan,
-            encode_concentrated_immutable(pool),
-            encode_concentrated_mutable(pool),
-        ),
-        PoolDetail::Balancer(pool) => (
-            pool.kind,
-            pool.id,
-            B256::ZERO,
-            0,
-            false,
-            None,
-            encode_balancer_immutable(pool),
-            encode_balancer_mutable(pool),
-        ),
-        PoolDetail::Curve(pool) => (
-            pool.kind,
-            pool.id,
-            B256::ZERO,
-            0,
-            false,
-            None,
-            encode_curve_immutable(pool),
-            encode_curve_mutable(pool),
-        ),
-        PoolDetail::Metric(pool) => (
-            pool.kind,
-            pool.id,
-            B256::ZERO,
-            0,
-            pool.flags & FLAG_TRUNCATED != 0,
-            pool.next_scan,
-            encode_metric_immutable(pool),
-            encode_metric_mutable(pool),
-        ),
-        PoolDetail::Failed(_) => return Err("pool read failed".into()),
-    };
-    Ok((
-        immutable,
-        MutableWrite {
-            kind,
-            id,
-            block: 0,
-            class: CLASS_NONE,
-            bitmap,
-            tick_count,
-            truncated,
-            next_scan,
-            body,
-        },
-    ))
-}
-
-/// Rebuild a pool from stored rows.
-///
-/// Product immutables do not carry kind or id. `kind` and `id` are the entity
-/// key, and they are stamped onto the product so quotes and curves use it.
-pub fn join_detail(
-    immutable: &[u8],
-    mutable_body: &[u8],
-    ticks: &[TickWord],
-    kind: u8,
-    id: B256,
-) -> Result<PoolDetail, String> {
-    if immutable.is_empty() {
-        return Err("immutable".into());
-    }
-    match immutable[0] {
-        1 => {
-            let mut pool = decode_product(immutable, mutable_body)?;
-            pool.kind = kind;
-            pool.id = id;
-            Ok(PoolDetail::ConstantProduct(pool))
-        }
-        2 => {
-            let mut pool = decode_concentrated(immutable, mutable_body)?;
-            pool.ticks = ticks.to_vec();
-            pool.ticks.sort_by_key(|tick| tick.tick);
-            Ok(PoolDetail::Concentrated(pool))
-        }
-        3 => Ok(PoolDetail::Balancer(decode_balancer(
-            immutable,
-            mutable_body,
-        )?)),
-        4 => Ok(PoolDetail::Curve(decode_curve(immutable, mutable_body)?)),
-        5 => Ok(PoolDetail::Metric(decode_metric(immutable, mutable_body)?)),
-        _ => Err("detail tag".into()),
     }
 }
 
@@ -240,177 +108,6 @@ pub fn derive_curve(detail: &PoolDetail, generation: u64) -> Result<CurveRecord,
         version: CURVE_VERSION,
         payload: crate::fit::curve_payload(detail),
     })
-}
-
-/// Classify one log into a dirty hint. Factory creation logs are ignored.
-/// The caller resolves identities. A singleton pool id comes from the event.
-pub fn classify_log(
-    log: &Log,
-    mut has_id: impl FnMut(u8, B256) -> bool,
-    mut by_address: impl FnMut(Address) -> Option<(u8, B256)>,
-) -> Option<WatchHit> {
-    let topic = log.topics.first().copied()?;
-    let known = chain::decode::known();
-    if log.address == known.pool_manager {
-        return singleton_hit(
-            log,
-            topic,
-            UNI_V4,
-            TOPIC_V4_SWAP,
-            TOPIC_V4_LIQUIDITY,
-            CLASS_TICKS,
-            &mut has_id,
-        );
-    }
-    if log.address == known.bal_v2 {
-        return singleton_hit(
-            log,
-            topic,
-            BALANCER_V2,
-            TOPIC_BAL_SWAP,
-            TOPIC_BAL_BALANCE,
-            CLASS_HEAD,
-            &mut has_id,
-        );
-    }
-    if log.address == known.bal_v3 && topic == TOPIC_BAL3_SWAP {
-        let id = topic_id(log)?;
-        if !has_id(BALANCER_V3, id) {
-            return None;
-        }
-        return Some(WatchHit {
-            kind: BALANCER_V3,
-            id,
-            block: log.block_number,
-            class: CLASS_HEAD,
-        });
-    }
-    let (kind, id) = by_address(log.address)?;
-    let class = if matches!(topic, TOPIC_V3_MINT | TOPIC_V3_BURN | TOPIC_V4_LIQUIDITY) {
-        CLASS_TICKS
-    } else if matches!(
-        topic,
-        TOPIC_V2_SYNC
-            | TOPIC_V2_SWAP
-            | TOPIC_V3_SWAP
-            | TOPIC_PANCAKE_SWAP
-            | TOPIC_V4_SWAP
-            | TOPIC_BAL_SWAP
-            | TOPIC_BAL3_SWAP
-            | TOPIC_BAL_BALANCE
-            | TOPIC_CURVE_EXCHANGE
-    ) {
-        CLASS_HEAD
-    } else if concentrated_kind(kind) || kind == METRIC {
-        CLASS_TICKS
-    } else {
-        CLASS_HEAD
-    };
-    Some(WatchHit {
-        kind,
-        id,
-        block: log.block_number,
-        class,
-    })
-}
-
-/// Pools re-read through the detail lens, and curves written from those snapshots.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RefreshReport {
-    pub read: u64,
-    pub failed: u64,
-    pub curves: u64,
-}
-
-/// Re-read `kinds` through the detail lens and store a curve from each snapshot.
-///
-/// The read uses one chain head. A failed read leaves the stored snapshot alone.
-/// A concentrated pool whose tick book is not kept is counted in `failed` and
-/// stores no curve. A snapshot whose quote has no positive output stores an
-/// empty curve, and the old conduit members drop.
-pub fn refresh_kinds(catalog: &Catalog, rpc: &Rpc, kinds: &[u8]) -> eyre::Result<RefreshReport> {
-    let block = rpc.block_number()?;
-    if block == 0 {
-        return Err(eyre::eyre!("snapshot block is 0"));
-    }
-    let mut report = RefreshReport {
-        read: 0,
-        failed: 0,
-        curves: 0,
-    };
-    for &kind in kinds {
-        let mut after = None;
-        loop {
-            let page = catalog.page_venues(kind, after, 16)?;
-            if page.is_empty() {
-                break;
-            }
-            let full = page.len() == 16;
-            after = page.last().map(|row| row.id);
-            let details = chain::detail::load_details_at(rpc, &page, Some(block))?;
-            if details.len() != page.len() {
-                return Err(eyre::eyre!("detail lens row count"));
-            }
-            for (row, detail) in page.iter().zip(details) {
-                if detail_flags(&detail) & FLAG_FAILED != 0 {
-                    report.failed += 1;
-                    continue;
-                }
-                let (immutable, mut mutable) =
-                    split_detail(&detail).map_err(|err| eyre::eyre!(err))?;
-                mutable.block = block;
-                mutable.class = CLASS_HEAD;
-                let state = catalog.read_state(row.kind, row.id)?;
-                if state.immutable.is_none() {
-                    catalog.put_immutable(&[ImmutableRow {
-                        kind: row.kind,
-                        id: row.id,
-                        body: immutable,
-                    }])?;
-                }
-                let stored = catalog.put_mutable(&mutable)?;
-                let mut detail = detail;
-                if stored.kept_ticks {
-                    let fresh = catalog.read_state(row.kind, row.id)?;
-                    if let PoolDetail::Concentrated(pool) = &mut detail {
-                        pool.ticks = fresh.ticks;
-                    }
-                }
-                let needs_book =
-                    concentrated_kind(row.kind) && mutable.tick_count > 0 && !stored.kept_ticks;
-                if needs_book {
-                    report.failed += 1;
-                    continue;
-                }
-                let curve = curve_for_snapshot(&detail, stored.generation)
-                    .map_err(|err| eyre::eyre!(err))?;
-                catalog.put_curve(&curve)?;
-                report.read += 1;
-                report.curves += 1;
-            }
-            observability::info!(
-                kind = crate::kind_name(kind),
-                read = report.read,
-                failed = report.failed,
-                curves = report.curves,
-                "refresh"
-            );
-            if !full {
-                break;
-            }
-        }
-    }
-    Ok(report)
-}
-
-/// Choose a curve from local quotes of `detail`.
-pub(crate) fn curve_for_snapshot(
-    detail: &PoolDetail,
-    generation: u64,
-) -> Result<CurveRecord, String> {
-    let mut curve = derive_curve(detail, generation)?;
-    curve.payload = crate::fit::local_curve_payload(detail)?;
-    Ok(curve)
 }
 
 fn concentrated_kind(kind: u8) -> bool {
@@ -442,46 +139,6 @@ pub(crate) fn curve_job(kind: u8, id: B256, generation: u64) -> WorkJob {
     job
 }
 
-pub(crate) fn keep_or_drop(
-    job: &WorkJob,
-    error: String,
-    give_up_after: u32,
-    done: &mut Vec<(u8, u8, B256)>,
-    failed: &mut Vec<WorkFail>,
-    notes: &mut Vec<String>,
-) {
-    let error = chain::rpc::redact_secret(&error);
-    let kind = crate::catalog::kind_name(job.kind);
-    if give_up_after > 0 && job.attempt >= give_up_after {
-        observability::error!(
-            stage = job.stage,
-            kind,
-            id = %job.id,
-            attempt = job.attempt,
-            %error,
-            "state gave up"
-        );
-        notes.push(format!("gave up {kind} {}: {error}", job.id));
-        done.push((job.stage, job.kind, job.id));
-        return;
-    }
-    observability::warn!(
-        stage = job.stage,
-        kind,
-        id = %job.id,
-        attempt = job.attempt,
-        %error,
-        "state job failed"
-    );
-    failed.push(WorkFail {
-        stage: job.stage,
-        kind: job.kind,
-        id: job.id,
-        not_before: unix_now().saturating_add(limits().retry_secs),
-        error,
-    });
-}
-
 fn job_for(jobs: &[WorkJob], kind: u8, id: B256) -> Option<&WorkJob> {
     jobs.iter().find(|job| job.kind == kind && job.id == id)
 }
@@ -493,181 +150,11 @@ pub(crate) fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-struct FollowPlan {
-    job: Option<WorkJob>,
-    derive: bool,
-    priority: u64,
-}
-
-struct FollowInput<'a> {
-    kind: u8,
-    id: B256,
-    detail: &'a PoolDetail,
-    class: u8,
-    bitmap_changed: bool,
-    truncated: bool,
-    tick_count: u32,
-    generation: u64,
-    watched: bool,
-    book_ready: bool,
-}
-
-/// What to enqueue after the detail lens returns.
-///
-/// Outstanding tick pages are still walked. `max_in` for a concentrated book
-/// is the ladder, and that ladder needs the tick words the bitmap only names.
-fn follow_for_detail(input: &FollowInput<'_>) -> FollowPlan {
-    let cap = crate::fit::trade_capacity(input.detail);
-    let priority = priority_of(input.watched, cap.top);
-    if input.truncated {
-        let mut job = blank_job(STAGE_MUTABLE, input.kind, input.id);
-        job.priority = priority;
-        job.class = input.class;
-        return FollowPlan {
-            job: Some(job),
-            derive: false,
-            priority,
-        };
-    }
-    let outstanding = !input.book_ready && concentrated_kind(input.kind) && input.tick_count > 0;
-    if outstanding {
-        let plan = plan_follow_up(
-            input.class,
-            input.bitmap_changed,
-            false,
-            input.tick_count,
-            true,
-        );
-        let Some(stage) = plan.stage.filter(|stage| *stage == STAGE_TICKS) else {
-            return FollowPlan {
-                job: None,
-                derive: cap.any_positive,
-                priority,
-            };
-        };
-        let mut job = blank_job(stage, input.kind, input.id);
-        job.generation = input.generation;
-        job.priority = priority;
-        job.class = input.class;
-        return FollowPlan {
-            job: Some(job),
-            derive: false,
-            priority,
-        };
-    }
-    if !cap.any_positive {
-        return FollowPlan {
-            job: None,
-            derive: false,
-            priority,
-        };
-    }
-    FollowPlan {
-        job: None,
-        derive: true,
-        priority,
-    }
-}
-
-/// Local curve once the tick words for this generation are stored.
-async fn after_book<S: VenueStore>(store: &S, job: &WorkJob) -> eyre::Result<Option<WorkJob>> {
-    let state = store.read_state(job.kind, job.id).await?;
-    let Some(mutable) = state.mutable else {
-        return Ok(Some(blank_job(STAGE_MUTABLE, job.kind, job.id)));
-    };
-    let Some(immutable) = state.immutable else {
-        return Ok(None);
-    };
-    let detail = match join_detail(&immutable, &mutable.body, &state.ticks, job.kind, job.id) {
-        Ok(detail) => detail,
-        Err(_) => {
-            if curve_is_current(state.curve.as_ref(), mutable.generation) {
-                return Ok(None);
-            }
-            let mut next = curve_job(job.kind, job.id, mutable.generation);
-            next.priority = job.priority;
-            return Ok(Some(next));
-        }
-    };
-    let cap = crate::fit::trade_capacity(&detail);
-    if !cap.any_positive || curve_is_current(state.curve.as_ref(), mutable.generation) {
-        return Ok(None);
-    }
-    let priority = priority_of((job.priority & DIRTY_BAND) != 0, cap.top);
-    match curve_for_snapshot(&detail, mutable.generation) {
-        Ok(curve) => {
-            if store.put_curve(&curve).await.is_err() {
-                let mut next = curve_job(job.kind, job.id, mutable.generation);
-                next.priority = priority;
-                return Ok(Some(next));
-            }
-            Ok(None)
-        }
-        Err(_) => {
-            let mut next = curve_job(job.kind, job.id, mutable.generation);
-            next.priority = priority;
-            Ok(Some(next))
-        }
-    }
-}
-
-fn bitmap_fingerprint(bitmaps: &[BitmapWord]) -> B256 {
-    let mut bytes = Vec::with_capacity(bitmaps.len() * 34);
-    for word in bitmaps {
-        bytes.extend_from_slice(&word.word_pos.to_be_bytes());
-        bytes.extend_from_slice(&word.bits.to_be_bytes::<32>());
-    }
-    keccak256(bytes)
-}
-
 fn unpack_stored(word: U256) -> (u128, i128) {
     let gross = (word & U256::from(u128::MAX)).to::<u128>();
     let high: U256 = word >> 128;
     let net = high.to::<u128>() as i128;
     (gross, net)
-}
-
-fn singleton_hit(
-    log: &Log,
-    topic: B256,
-    kind: u8,
-    head: B256,
-    other: B256,
-    other_class: u8,
-    has_id: &mut impl FnMut(u8, B256) -> bool,
-) -> Option<WatchHit> {
-    if topic != head && topic != other {
-        return None;
-    }
-    let id = topic_id(log)?;
-    if !has_id(kind, id) {
-        return None;
-    }
-    Some(WatchHit {
-        kind,
-        id,
-        block: log.block_number,
-        class: if topic == other {
-            other_class
-        } else {
-            CLASS_HEAD
-        },
-    })
-}
-
-fn topic_id(log: &Log) -> Option<B256> {
-    log.topics.get(1).copied()
-}
-
-fn detail_flags(detail: &PoolDetail) -> u64 {
-    match detail {
-        PoolDetail::ConstantProduct(pool) => pool.flags,
-        PoolDetail::Concentrated(pool) => pool.flags,
-        PoolDetail::Balancer(pool) => pool.flags,
-        PoolDetail::Curve(pool) => pool.flags,
-        PoolDetail::Metric(pool) => pool.flags,
-        PoolDetail::Failed(pool) => pool.flags,
-    }
 }
 
 fn detail_id(detail: &PoolDetail) -> Result<(u8, B256), String> {
@@ -1042,7 +529,7 @@ mod tests {
         assert!(catalog.put_curve(&curve).is_err());
         curve.generation = stored.generation;
         catalog.put_curve(&curve).unwrap();
-        let quote = estimate(
+        let quote = crate::estimate(
             &curve,
             stored.generation,
             address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
@@ -1160,7 +647,8 @@ mod tests {
         let amount = U256::from(10_000_000u64);
         let token_in = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         let token_out = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
-        let quoted = estimate(&curve, stored.generation, token_in, token_out, amount).unwrap();
+        let quoted =
+            crate::estimate(&curve, stored.generation, token_in, token_out, amount).unwrap();
         let direct = joined.quote(token_in, token_out, amount).unwrap();
         assert_eq!(quoted, direct);
         let mut unstamped = pancake;
@@ -1174,7 +662,7 @@ mod tests {
 
     #[test]
     fn plan_isolates_head_from_ticks() {
-        let head = plan_follow_up(CLASS_HEAD, false, false, 10, true);
+        let head: Plan = plan_follow_up(CLASS_HEAD, false, false, 10, true);
         assert_eq!(head.stage, Some(STAGE_CURVE));
         let changed = plan_follow_up(CLASS_HEAD, true, false, 10, true);
         assert_eq!(changed.stage, Some(STAGE_TICKS));

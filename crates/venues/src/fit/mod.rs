@@ -11,11 +11,10 @@ mod estimate;
 mod formula;
 mod plan;
 
-pub use curve::is_canonical;
 pub use curve::refit_curves;
 pub use estimate::estimate;
 
-pub(crate) use curve::{curve_payload, local_curve_payload, skip_reason};
+pub(crate) use curve::{curve_payload, local_curve_payload};
 pub(crate) use plan::{direction_knots, has_trade_size, trade_capacity};
 
 #[cfg(test)]

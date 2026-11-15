@@ -4,10 +4,11 @@ pub use store_model::{ConduitFail, ConduitJob};
 
 #[cfg(test)]
 mod tests {
+    use crate::estimate;
     use crate::fit::direction_knots;
     use crate::install_catalog_hooks;
     use crate::state::CurveRecord;
-    use crate::state::{derive_curve, estimate, split_detail, ImmutableRow, CURVE_VERSION};
+    use crate::state::{derive_curve, split_detail, ImmutableRow, CURVE_VERSION};
     use crate::Catalog;
     use alloy_primitives::{address, U256};
     use alloy_primitives::{Address, B256};
