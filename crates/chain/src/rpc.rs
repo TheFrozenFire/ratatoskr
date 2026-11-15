@@ -252,6 +252,45 @@ impl Rpc {
         parse_logs(result)
     }
 
+    /// Number and hash from `eth_getBlockByNumber("latest", false)`.
+    ///
+    /// Each URL is tried once, with an eight-second limit. A miss is `None`.
+    pub fn latest_header(&self) -> Option<(u64, B256)> {
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "eth_getBlockByNumber",
+            "params": ["latest", false],
+        });
+        for url in &self.urls {
+            let Ok(response) = self
+                .client
+                .post(url)
+                .timeout(Duration::from_secs(8))
+                .json(&body)
+                .send()
+            else {
+                continue;
+            };
+            if !response.status().is_success() {
+                continue;
+            }
+            let Ok(text) = response.text() else {
+                continue;
+            };
+            let Ok(parsed) = parse_response(200, &text) else {
+                continue;
+            };
+            let Some(result) = parsed.result.as_ref() else {
+                continue;
+            };
+            if let Some(tip) = header_tip(result) {
+                return Some(tip);
+            }
+        }
+        None
+    }
+
     pub fn block_number(&self) -> eyre::Result<u64> {
         let response = self.exchange("eth_blockNumber", json!([]))?;
         let Some(text) = response.result.as_ref().and_then(Value::as_str) else {
@@ -427,6 +466,14 @@ impl Rpc {
 pub enum StorageError {
     Unsupported,
     Failed(eyre::Report),
+}
+
+fn header_tip(value: &Value) -> Option<(u64, B256)> {
+    let number = value.get("number")?.as_str()?;
+    let hash = value.get("hash")?.as_str()?;
+    let number = u64::from_str_radix(number.trim_start_matches("0x"), 16).ok()?;
+    let hash = hash.parse().ok()?;
+    Some((number, hash))
 }
 
 fn parse_logs(result: &Value) -> eyre::Result<Vec<RpcLog>> {
@@ -737,6 +784,20 @@ mod tests {
         let body: Value = serde_json::from_str(text).unwrap();
         let flags = code_flags(&body, &[1, 2]).unwrap();
         assert_eq!(flags, vec![true, false]);
+    }
+
+    #[test]
+    fn block_header_hash_is_not_a_longer_key() {
+        let body = r#"{"parentHash":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","hash":"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","number":"0x10"}"#;
+        let value: Value = serde_json::from_str(body).unwrap();
+        let (number, hash) = header_tip(&value).unwrap();
+        assert_eq!(number, 0x10);
+        assert_eq!(
+            hash,
+            "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .parse::<B256>()
+                .unwrap()
+        );
     }
 
     #[test]

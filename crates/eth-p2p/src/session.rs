@@ -422,58 +422,15 @@ fn tip_from_public_rpc() -> Option<(u64, B256)> {
         "https://ethereum-rpc.publicnode.com",
         "https://eth.drpc.org",
     ];
-    for endpoint in ENDPOINTS {
-        let Ok(output) = std::process::Command::new("curl")
-            .args([
-                "-fsS",
-                "--max-time",
-                "8",
-                "-H",
-                "content-type: application/json",
-                "-d",
-                r#"{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["latest",false]}"#,
-                endpoint,
-            ])
-            .output()
-        else {
-            continue;
-        };
-        if !output.status.success() {
-            continue;
-        }
-        let Ok(body) = String::from_utf8(output.stdout) else {
-            continue;
-        };
-        let Some(number) = json_string_field(&body, "number") else {
-            continue;
-        };
-        let Some(hash) = json_string_field(&body, "hash") else {
-            continue;
-        };
-        let Ok(number) = u64::from_str_radix(number.trim_start_matches("0x"), 16) else {
-            continue;
-        };
-        let Ok(hash) = hash.parse() else {
-            continue;
-        };
-        return Some((number, hash));
-    }
-    None
-}
-
-fn json_string_field<'a>(body: &'a str, key: &str) -> Option<&'a str> {
-    let pattern = format!("\"{key}\":\"");
-    let mut rest = body;
-    while let Some(pos) = rest.find(&pattern) {
-        let at_boundary = pos == 0 || !rest.as_bytes()[pos - 1].is_ascii_alphanumeric();
-        if at_boundary {
-            let tail = rest.get(pos + pattern.len()..)?;
-            let end = tail.find('"')?;
-            return Some(&tail[..end]);
-        }
-        rest = rest.get(pos + 1..)?;
-    }
-    None
+    let urls = ENDPOINTS.map(str::to_string).to_vec();
+    // The blocking client builds its own runtime. The handshake runs on a
+    // worker, so the lookup has to leave that worker.
+    std::thread::spawn(move || -> Option<(u64, B256)> {
+        chain::Rpc::new(urls).ok()?.latest_header()
+    })
+    .join()
+    .ok()
+    .flatten()
 }
 
 fn mainnet_status(version: EthVersion) -> UnifiedStatus {
@@ -609,12 +566,5 @@ mod tests {
         assert_eq!(announced_block(&block), Some(0));
         raise_head(&head, 0);
         assert_eq!(head.load(Ordering::Relaxed), 40);
-    }
-
-    #[test]
-    fn json_field_does_not_match_a_longer_key() {
-        let body = r#"{"parentHash":"0xabc","hash":"0xdef","number":"0x10"}"#;
-        assert_eq!(json_string_field(body, "hash"), Some("0xdef"));
-        assert_eq!(json_string_field(body, "number"), Some("0x10"));
     }
 }

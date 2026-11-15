@@ -1999,6 +1999,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
+ "chain",
  "config",
  "eyre",
  "futures",
