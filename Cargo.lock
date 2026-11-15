@@ -2857,16 +2857,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ipc"
-version = "0.1.0"
-dependencies = [
- "eyre",
- "serde_json",
- "store-model",
- "tokio",
-]
-
-[[package]]
 name = "ipconfig"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3631,7 +3621,6 @@ dependencies = [
  "discover",
  "eth-p2p",
  "eyre",
- "ipc",
  "observability",
  "rand 0.8.8",
  "reth-network-peers",
@@ -3745,8 +3734,8 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "eyre",
- "ipc",
  "observability",
+ "peer",
  "store",
  "store-model",
  "tokio",
@@ -4123,7 +4112,6 @@ dependencies = [
  "crossterm",
  "eth-p2p",
  "eyre",
- "ipc",
  "observability",
  "oracles",
  "peer",
@@ -6068,13 +6056,13 @@ dependencies = [
  "era",
  "eyre",
  "filter",
- "ipc",
  "journal",
  "num-bigint",
  "num-integer",
  "num-rational",
  "num-traits",
  "observability",
+ "peer",
  "reqwest 0.12.28",
  "routing",
  "serde_json",

@@ -7,7 +7,7 @@
 //! repeated here.
 
 use crate::{Sink, Source};
-use ipc::HistoryPeer;
+use peer::HistoryPeer;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use venues::{execute, RunOpts, RunPhase, RunReport};

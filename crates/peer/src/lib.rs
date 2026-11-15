@@ -7,6 +7,9 @@
 //! the next dial.
 
 mod catalog;
+mod history;
+
+pub use history::{clamp_count, json_call, max_head, serving, BatchKind, HistoryPeer, SessionInfo};
 
 use discover::{classify, DiscoveryHit};
 use eth_p2p::{
@@ -14,7 +17,6 @@ use eth_p2p::{
     fetch_header_range, DnsPeer, Egress, OutboundSession, DNS_ALL, DNS_SNAP,
 };
 use eyre::WrapErr;
-use ipc::{BatchKind, HistoryPeer, SessionInfo};
 use observability::{debug, info, note_peers, warn};
 use reth_network_peers::{pk2id, NodeRecord, PeerId};
 use secp256k1::{SecretKey, SECP256K1};
@@ -266,7 +268,7 @@ impl HistoryPeer for LocalPeer {
     }
 
     async fn headers(&self, start: u64, count: u64) -> eyre::Result<Vec<HeaderRecord>> {
-        let count = ipc::clamp_count(BatchKind::Headers, Some(count));
+        let count = clamp_count(BatchKind::Headers, Some(count));
         match range_response(&self.slots, &self.wanted, start, count, BatchKind::Headers).await {
             Ok(RangeRecords::Headers(records)) => Ok(records),
             Ok(RangeRecords::Blocks(_)) => Err(eyre::eyre!("header request returned blocks")),
@@ -275,7 +277,7 @@ impl HistoryPeer for LocalPeer {
     }
 
     async fn chunk(&self, start: u64, count: u64) -> eyre::Result<Vec<BlockRecord>> {
-        let count = ipc::clamp_count(BatchKind::Chunk, Some(count));
+        let count = clamp_count(BatchKind::Chunk, Some(count));
         match range_response(&self.slots, &self.wanted, start, count, BatchKind::Chunk).await {
             Ok(RangeRecords::Blocks(records)) => Ok(records),
             Ok(RangeRecords::Headers(_)) => Err(eyre::eyre!("chunk request returned headers")),
@@ -1069,7 +1071,7 @@ async fn handle_conn(
         } else {
             BatchKind::Chunk
         };
-        let count = ipc::clamp_count(kind, request.count);
+        let count = clamp_count(kind, request.count);
         match range_response(&slots, &wanted, start, count, kind).await {
             Ok(records) => {
                 let body = match records {

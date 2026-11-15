@@ -40,7 +40,7 @@ pub async fn run(args: PeerArgs) -> eyre::Result<()> {
         PeerCommand::Status => print_query(&socket, "status", None).await,
         PeerCommand::Fetch { block } => print_query(&socket, "fetch", block).await,
         PeerCommand::Census => {
-            let value = ipc::json_call(&socket, &serde_json::json!({"op": "census"})).await?;
+            let value = peer::json_call(&socket, &serde_json::json!({"op": "census"})).await?;
             println!("{}", census_line(&value)?);
             Ok(())
         }
@@ -50,7 +50,7 @@ pub async fn run(args: PeerArgs) -> eyre::Result<()> {
 fn socket_of(data_dir: Option<&Path>) -> eyre::Result<PathBuf> {
     match data_dir {
         Some(dir) => Ok(dir.join("peer.sock")),
-        None => ipc::socket_path(),
+        None => peer::socket_path(),
     }
 }
 
@@ -76,7 +76,7 @@ async fn ask(socket: &Path, op: &str, block: Option<u64>) -> eyre::Result<Value>
     let started = Instant::now();
     let request = serde_json::json!({"op": op, "block": block});
     loop {
-        match ipc::json_call(socket, &request).await {
+        match peer::json_call(socket, &request).await {
             Ok(value) => return Ok(value),
             Err(err) if connect_failed(&err) && started.elapsed() < Duration::from_secs(5) => {
                 sleep(Duration::from_millis(200)).await;

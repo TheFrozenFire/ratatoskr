@@ -10,9 +10,9 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use alloy_primitives::Bloom;
-use eyre::{eyre, WrapErr};
-use ipc::{socket_path, HistoryPeer};
+use eyre::eyre;
 use journal::logs_in_block;
+use peer::HistoryPeer;
 use store_model::BlockRecord;
 
 use crate::catalog::{Put, ReceiptBody};
@@ -223,7 +223,6 @@ where
     let end = scan.end;
     let pending = scan.jobs;
     let Some(peer) = peer else {
-        socket_path().wrap_err("peer socket")?;
         return Err(eyre!("peer socket"));
     };
     let mut era = LiveEra { http: None };
@@ -854,7 +853,7 @@ mod tests {
     }
 
     impl HistoryPeer for FakePeer {
-        async fn status(&self) -> eyre::Result<Vec<ipc::SessionInfo>> {
+        async fn status(&self) -> eyre::Result<Vec<peer::SessionInfo>> {
             Ok(Vec::new())
         }
 

@@ -1,8 +1,8 @@
 //! Header sync. Chunk, tip lag, and in-flight cap are the existing loop.
 
 use eyre::WrapErr;
-use ipc::{max_head, serving, HistoryPeer};
 use observability::{info, warn};
+use peer::{max_head, serving, HistoryPeer};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -218,7 +218,7 @@ mod tests {
     use super::HeaderSource;
     use crate::{RecordBatch, Sink, SinkReply, Source, StoreSink};
     use alloy_primitives::{b256, B256};
-    use ipc::{HistoryPeer, SessionInfo};
+    use peer::{HistoryPeer, SessionInfo};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};

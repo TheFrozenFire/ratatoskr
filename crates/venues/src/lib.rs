@@ -52,7 +52,7 @@ pub use state::{
 };
 pub use store::{ChainStore, ConduitStore, CorpusStore, DiscoveryStore, TokenStore, VenueStore};
 
-use ipc::HistoryPeer;
+use peer::HistoryPeer;
 use std::sync::OnceLock;
 use tokio::sync::watch;
 

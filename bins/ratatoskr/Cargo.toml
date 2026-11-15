@@ -16,7 +16,6 @@ clap.workspace = true
 crossterm = "0.28"
 eth-p2p.workspace = true
 eyre.workspace = true
-ipc.workspace = true
 peer.workspace = true
 pipeline.workspace = true
 ratatui = "0.29"

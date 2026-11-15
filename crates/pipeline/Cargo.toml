@@ -8,7 +8,7 @@ publish.workspace = true
 [dependencies]
 observability.workspace = true
 eyre.workspace = true
-ipc.workspace = true
+peer.workspace = true
 store-model.workspace = true
 store.workspace = true
 tokio.workspace = true

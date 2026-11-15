@@ -32,10 +32,10 @@ use crate::{
 };
 use alloy_primitives::{keccak256, Address, B256, U256};
 use eyre::WrapErr;
-use ipc::HistoryPeer;
 use journal::Log;
 use num_bigint::{BigInt, Sign};
 use num_traits::Zero;
+use peer::HistoryPeer;
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use store_model::BlockRecord;

@@ -17,7 +17,6 @@ eyre.workspace = true
 rand.workspace = true
 discover.workspace = true
 eth-p2p.workspace = true
-ipc.workspace = true
 reth-network-peers.workspace = true
 secp256k1.workspace = true
 serde.workspace = true

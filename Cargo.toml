@@ -11,7 +11,6 @@ members = [
     "crates/store",
     "crates/pipeline",
     "crates/observability",
-    "crates/ipc",
     "crates/univ3",
     "crates/venues",
     "crates/routing",
@@ -53,7 +52,6 @@ observability = { path = "crates/observability" }
 era = { path = "crates/era" }
 eth-p2p = { path = "crates/eth-p2p" }
 filter = { path = "crates/filter" }
-ipc = { path = "crates/ipc" }
 journal = { path = "crates/journal" }
 peer = { path = "crates/peer" }
 routing = { path = "crates/routing" }
