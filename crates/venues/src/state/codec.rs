@@ -1,7 +1,7 @@
 //! Row bytes for a pool detail.
 
-use crate::detail::{BitmapWord, Concentrated, CurveCoin, CurvePool, MetricBin, MetricPool};
 use alloy_primitives::{Address, B256, U256};
+use chain::detail::{BitmapWord, Concentrated, CurveCoin, CurvePool, MetricBin, MetricPool};
 
 struct Reader<'a> {
     bytes: &'a [u8],
@@ -115,7 +115,7 @@ pub(super) fn push_option_word(out: &mut Vec<u8>, value: Option<U256>) {
     }
 }
 
-pub(super) fn encode_product_immutable(pool: &crate::detail::ConstantProduct) -> Vec<u8> {
+pub(super) fn encode_product_immutable(pool: &chain::detail::ConstantProduct) -> Vec<u8> {
     let mut out = vec![1];
     push_addr(&mut out, pool.pair);
     push_addr(&mut out, pool.token0);
@@ -123,7 +123,7 @@ pub(super) fn encode_product_immutable(pool: &crate::detail::ConstantProduct) ->
     out
 }
 
-pub(super) fn encode_product_mutable(pool: &crate::detail::ConstantProduct) -> Vec<u8> {
+pub(super) fn encode_product_mutable(pool: &chain::detail::ConstantProduct) -> Vec<u8> {
     let mut out = Vec::new();
     push_word(&mut out, pool.reserve0);
     push_word(&mut out, pool.reserve1);
@@ -136,7 +136,7 @@ pub(super) fn encode_product_mutable(pool: &crate::detail::ConstantProduct) -> V
 pub(super) fn decode_product(
     immutable: &[u8],
     body: &[u8],
-) -> Result<crate::detail::ConstantProduct, String> {
+) -> Result<chain::detail::ConstantProduct, String> {
     let mut header = Reader::new(immutable);
     if header.u8()? != 1 {
         return Err("product".into());
@@ -146,7 +146,7 @@ pub(super) fn decode_product(
     let token1 = header.addr()?;
     header.finish()?;
     let mut body = Reader::new(body);
-    let pool = crate::detail::ConstantProduct {
+    let pool = chain::detail::ConstantProduct {
         kind: 0,
         id: B256::ZERO,
         pair,
@@ -264,7 +264,7 @@ pub(super) fn decode_concentrated(immutable: &[u8], body: &[u8]) -> Result<Conce
     })
 }
 
-pub(super) fn encode_balancer_immutable(pool: &crate::detail::BalancerPool) -> Vec<u8> {
+pub(super) fn encode_balancer_immutable(pool: &chain::detail::BalancerPool) -> Vec<u8> {
     let mut out = vec![3];
     push_u8(&mut out, pool.kind);
     out.extend_from_slice(pool.id.as_slice());
@@ -277,7 +277,7 @@ pub(super) fn encode_balancer_immutable(pool: &crate::detail::BalancerPool) -> V
     out
 }
 
-pub(super) fn encode_balancer_mutable(pool: &crate::detail::BalancerPool) -> Vec<u8> {
+pub(super) fn encode_balancer_mutable(pool: &chain::detail::BalancerPool) -> Vec<u8> {
     let mut out = Vec::new();
     push_option_word(&mut out, pool.fee);
     push_word(&mut out, pool.amp);
@@ -308,7 +308,7 @@ pub(super) fn encode_balancer_mutable(pool: &crate::detail::BalancerPool) -> Vec
 pub(super) fn decode_balancer(
     immutable: &[u8],
     body: &[u8],
-) -> Result<crate::detail::BalancerPool, String> {
+) -> Result<chain::detail::BalancerPool, String> {
     let mut header = Reader::new(immutable);
     if header.u8()? != 3 {
         return Err("balancer".into());
@@ -358,7 +358,7 @@ pub(super) fn decode_balancer(
         return Err("trailing".into());
     };
     body.finish()?;
-    Ok(crate::detail::BalancerPool {
+    Ok(chain::detail::BalancerPool {
         kind,
         id,
         vault,

@@ -653,7 +653,7 @@ pub fn hex_0x(bytes: &[u8]) -> String {
     format!("0x{}", alloy_primitives::hex::encode(bytes))
 }
 
-pub(crate) fn redact_secret(text: &str) -> String {
+pub fn redact_secret(text: &str) -> String {
     let marker = "eth-mainnet.g.alchemy.com/v2/";
     let mut out = text.to_string();
     let mut search = 0;

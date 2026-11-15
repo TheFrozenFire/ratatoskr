@@ -20,17 +20,17 @@
 //! merges after the curve batch, and it does not hold a curve lease.
 
 use crate::catalog::{AERO, BALANCER_V2, BALANCER_V3, CURVE, METRIC, UNI_V4};
-use crate::detail::{
-    tick_request, BitmapWord, PoolDetail, Quote, TickWord, FLAG_CRYPTO, FLAG_FAILED, FLAG_STABLE,
-    FLAG_TRUNCATED,
-};
-use crate::rpc::Rpc;
-use crate::tick::{self, TickWordRead};
 use crate::{
     Catalog, ChainStore, ConduitStore, RunOpts, RunReport, VenueRow, VenueStore, PANCAKE_V3,
     SUSHI_V3, UNI_V3, V3_FORK,
 };
 use alloy_primitives::{keccak256, Address, B256, U256};
+use chain::detail::{
+    tick_request, BitmapWord, PoolDetail, Quote, TickWord, FLAG_CRYPTO, FLAG_FAILED, FLAG_STABLE,
+    FLAG_TRUNCATED,
+};
+use chain::rpc::Rpc;
+use chain::tick::{self, TickWordRead};
 use eyre::WrapErr;
 use journal::Log;
 use num_bigint::{BigInt, Sign};
@@ -367,7 +367,7 @@ pub fn classify_log(
     mut by_address: impl FnMut(Address) -> Option<(u8, B256)>,
 ) -> Option<WatchHit> {
     let topic = log.topics.first().copied()?;
-    let known = crate::decode::known();
+    let known = chain::decode::known();
     if log.address == known.pool_manager {
         return singleton_hit(
             log,
@@ -464,7 +464,7 @@ pub fn refresh_kinds(catalog: &Catalog, rpc: &Rpc, kinds: &[u8]) -> eyre::Result
             }
             let full = page.len() == 16;
             after = page.last().map(|row| row.id);
-            let details = crate::detail::load_details_at(rpc, &page, Some(block))?;
+            let details = chain::detail::load_details_at(rpc, &page, Some(block))?;
             if details.len() != page.len() {
                 return Err(eyre::eyre!("detail lens row count"));
             }
@@ -575,7 +575,7 @@ pub(crate) fn keep_or_drop(
     failed: &mut Vec<WorkFail>,
     notes: &mut Vec<String>,
 ) {
-    let error = crate::rpc::redact_secret(&error);
+    let error = chain::rpc::redact_secret(&error);
     let kind = crate::catalog::kind_name(job.kind);
     if give_up_after > 0 && job.attempt >= give_up_after {
         observability::error!(
@@ -818,11 +818,11 @@ pub(crate) fn skip_reason(detail: &PoolDetail) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::UNI_V2;
     use crate::Put;
     use alloy_primitives::address;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use store_model::UNI_V2;
 
     struct TempDir(PathBuf);
 
@@ -892,7 +892,7 @@ mod tests {
     }
 
     fn product() -> PoolDetail {
-        PoolDetail::ConstantProduct(crate::detail::ConstantProduct {
+        PoolDetail::ConstantProduct(chain::detail::ConstantProduct {
             kind: UNI_V2,
             id: row(1).id,
             pair: address!("1111111111111111111111111111111111111111"),
@@ -1283,7 +1283,7 @@ mod tests {
         let PoolDetail::ConstantProduct(pool) = &mut pancake else {
             panic!("product");
         };
-        pool.kind = crate::catalog::PANCAKE_V2;
+        pool.kind = store_model::PANCAKE_V2;
         pool.id = sample.id;
         pool.fee_pips = None;
         let (immutable, mut mutable) = split_detail(&pancake).unwrap();
@@ -1292,12 +1292,12 @@ mod tests {
             .any(|word| word == sample.id.as_slice()));
         catalog
             .put_immutable(&[ImmutableRow {
-                kind: crate::catalog::PANCAKE_V2,
+                kind: store_model::PANCAKE_V2,
                 id: sample.id,
                 body: immutable.clone(),
             }])
             .unwrap();
-        mutable.kind = crate::catalog::PANCAKE_V2;
+        mutable.kind = store_model::PANCAKE_V2;
         mutable.id = sample.id;
         mutable.block = 8;
         let stored = catalog.put_mutable(&mutable).unwrap();
@@ -1305,10 +1305,10 @@ mod tests {
         let PoolDetail::ConstantProduct(read) = &joined else {
             panic!("joined");
         };
-        assert_eq!(read.kind, crate::catalog::PANCAKE_V2);
+        assert_eq!(read.kind, store_model::PANCAKE_V2);
         assert_eq!(read.id, sample.id);
         let curve = derive_curve(&joined, stored.generation).unwrap();
-        assert_eq!(curve.kind, crate::catalog::PANCAKE_V2);
+        assert_eq!(curve.kind, store_model::PANCAKE_V2);
         assert_eq!(curve.id, sample.id);
         catalog.put_curve(&curve).unwrap();
         let amount = U256::from(10_000_000u64);
@@ -1365,7 +1365,7 @@ mod tests {
         assert_eq!(hit.class, CLASS_TICKS);
         assert_eq!(hit.id, id);
         let factory = Log {
-            address: crate::decode::known().uni_v3,
+            address: chain::decode::known().uni_v3,
             topics: vec![TOPIC_V3_SWAP],
             ..mint.clone()
         };
@@ -1374,7 +1374,7 @@ mod tests {
 
     #[test]
     fn an_uninitialized_pool_stores_a_skipped_curve() {
-        let detail = PoolDetail::Concentrated(crate::detail::Concentrated {
+        let detail = PoolDetail::Concentrated(chain::detail::Concentrated {
             kind: UNI_V3,
             id: row(1).id,
             home: Address::ZERO,
@@ -1579,7 +1579,7 @@ mod tests {
         let (_dir, catalog) = open();
         let mut venue = row(4);
         venue.kind = UNI_V3;
-        let detail = PoolDetail::Concentrated(crate::detail::Concentrated {
+        let detail = PoolDetail::Concentrated(chain::detail::Concentrated {
             kind: UNI_V3,
             id: venue.id,
             home: Address::ZERO,

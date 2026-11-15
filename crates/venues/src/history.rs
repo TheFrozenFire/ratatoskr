@@ -16,9 +16,9 @@ use peer::HistoryPeer;
 use store_model::BlockRecord;
 
 use crate::catalog::{Put, ReceiptBody};
-use crate::decode::rows_from_log;
 use crate::logs::{job_filter, LogJob, Walk, MERGE_BLOCK};
 use crate::{ChainStore, CorpusStore, DiscoveryStore};
+use chain::decode::rows_from_log;
 
 #[derive(Debug)]
 enum AskFail {

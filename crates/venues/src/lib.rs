@@ -1,31 +1,21 @@
-//! Venue identities for the mainnet pools people trade.
+//! Venue catalog for the mainnet pools people trade.
 //!
-//! A list view (`allPairs`, `allPools`, `pool_list`, `idxToPool`) is read by
-//! `eth_call`ing the creation code in `contracts/lens/IndexLens.sol` with no
-//! `to`. The constructor reverts the rows. Any client that runs a creation
-//! `eth_call` can serve it. After identities are written,
-//! `contracts/lens/TokenLens.sol` reads `symbol()` and `decimals()` for the
-//! wrapper and for the tokens those pools name. Factories with no list are
-//! found in the local header blooms. Hits stay in the venue catalog. Receipts come from era1
-//! before the merge and from the peer daemon after it, and those payloads
-//! stay in redb.
+//! List walks, bloom hits, token rows, and pool state are written here.
+//! Reading the chain — JSON-RPC, the creation-code lenses, and creation logs —
+//! is [`chain`]. Factories with no list are found in the local header blooms.
+//! Hits stay in the venue catalog. Receipts come from era1 before the merge
+//! and from the peer daemon after it, and those payloads stay in redb.
 
 mod catalog;
 mod conduit;
-mod decode;
-mod detail;
 mod fit;
 mod history;
 mod hooks;
 mod import;
 mod ingest;
-mod lens;
 mod lists;
 mod logs;
-mod rpc;
-mod seeds;
 mod state;
-mod tick;
 mod tokens;
 
 pub use catalog::{
@@ -34,14 +24,13 @@ pub use catalog::{
     EntityRead, FillReport, Put, ReceiptBody, SampleReport, TokenRecord, VenueRow, BALANCER_V2,
     BALANCER_V3, PANCAKE_V3, SUSHI_V3, UNI_V3, UNI_V4, V3_FORK,
 };
+pub use chain::detail::{load_details, DetailQuery, PoolDetail, Quote};
+pub use chain::{custodial_wrap, default_call_rpcs, root_address, Rpc, RpcLog};
 pub use conduit::{ConduitFail, ConduitJob};
-pub use detail::{load_details, DetailQuery, PoolDetail, Quote};
 pub use fit::{drop_partial_quotes, export_curve_fit, import_curve_fit, refit_curves, FitReport};
 pub use history::BloomScan;
 pub use hooks::install_catalog_hooks;
 pub use logs::Walk;
-pub use rpc::{default_call_rpcs, Rpc, RpcLog};
-pub use seeds::{custodial_wrap, root_address};
 pub use state::{
     estimate, refresh_kinds, CurveRecord, ImmutablePut, ImmutableRow, MutableStored, MutableWrite,
     PoolState, QuoteRecord, RefreshReport, StateSummary, TickPage, WatchHit, WorkFail, WorkJob,
@@ -153,7 +142,7 @@ pub fn job_wanted(only: &Option<String>, name: &str) -> bool {
 }
 
 pub fn history_selected(only: &Option<String>) -> bool {
-    seeds::document()
+    chain::seeds::document()
         .roots
         .iter()
         .filter(|root| root.logs())
@@ -330,13 +319,13 @@ pub async fn scan_blooms<S: ChainStore + DiscoveryStore>(
     history::scan_blooms(store, &jobs, stop, limits).await
 }
 
-async fn open_calls(opts: &RunOpts) -> eyre::Result<rpc::Rpc> {
+async fn open_calls(opts: &RunOpts) -> eyre::Result<Rpc> {
     let call_urls = if opts.rpcs.is_empty() {
-        rpc::default_call_rpcs()
+        default_call_rpcs()
     } else {
         opts.rpcs.clone()
     };
-    tokio::task::spawn_blocking(move || rpc::Rpc::new(call_urls))
+    tokio::task::spawn_blocking(move || Rpc::new(call_urls))
         .await
         .map_err(|err| eyre::eyre!("rpc client task: {err}"))?
 }

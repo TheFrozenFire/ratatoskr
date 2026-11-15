@@ -5,8 +5,8 @@
 use eyre::eyre;
 
 use crate::catalog::Put;
-use crate::decode::rows_from_log;
 use crate::{CorpusStore, DiscoveryStore};
+use chain::decode::rows_from_log;
 use journal::logs_in_block;
 use store_model::decode_block_record;
 

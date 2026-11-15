@@ -270,7 +270,7 @@ async fn supervise(args: Args, loaded: config::Config) -> eyre::Result<()> {
         let caches = caches.clone();
         let (report, built) = tokio::task::spawn_blocking(move || {
             let catalog = store::service::Catalog::open_with(&venues_path, &caches)?;
-            let rpc = venues::Rpc::new(urls)?;
+            let rpc = chain::Rpc::new(urls)?;
             let report = venues::refresh_kinds(&catalog, &rpc, &kinds)?;
             let built = catalog.drain_conduits()?;
             Ok::<_, eyre::Report>((report, built))

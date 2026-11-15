@@ -8,8 +8,8 @@ use crate::abi::{
     proxy_calls, CallResult, ProxyHead, CALL_GAS, FEEDS_PER_CALL, MULTICALL,
 };
 use alloy_primitives::{Address, I256};
+use chain::Rpc;
 use store_model::Read;
-use venues::Rpc;
 
 pub fn configure(feeds: &store::service::Feeds, rpc: &Rpc) -> eyre::Result<()> {
     let proxies = feeds.proxies()?;

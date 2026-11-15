@@ -30,7 +30,7 @@ pub(super) fn quote_product(
     )
 }
 
-pub(crate) fn product_fee_pips(kind: u8, raw: Option<u32>) -> u32 {
+pub fn product_fee_pips(kind: u8, raw: Option<u32>) -> u32 {
     match raw {
         Some(fee) if fee <= 100 => fee.saturating_mul(100),
         Some(fee) if fee <= 1_000_000 => fee,
@@ -480,7 +480,7 @@ fn balancer_space(
 }
 
 /// Live v3 balance back to raw token units. Other kinds already store raw balances.
-pub(crate) fn v3_raw_balance(pool: &BalancerPool, index: usize) -> Result<U256, String> {
+pub fn v3_raw_balance(pool: &BalancerPool, index: usize) -> Result<U256, String> {
     if pool.kind != BALANCER_V3 || pool.scaling.len() != pool.tokens.len() {
         return Ok(pool.balances[index]);
     }
@@ -1031,7 +1031,7 @@ pub(super) fn ordered(left: U256, right: U256) -> (U256, U256) {
 /// One priced span of a concentrated pool, with the cumulative input that
 /// reaches its end. The partial span uses the same `swap_step` as `quote`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LadderStep {
+pub struct LadderStep {
     pub liquidity: u128,
     pub sqrt_start: U256,
     pub sqrt_end: U256,
@@ -1042,12 +1042,12 @@ pub(crate) struct LadderStep {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ConcentratedLadder {
+pub struct ConcentratedLadder {
     pub zero_for_one: Vec<LadderStep>,
     pub one_for_zero: Vec<LadderStep>,
 }
 
-pub(crate) fn concentrated_ladder(pool: &Concentrated) -> Result<ConcentratedLadder, String> {
+pub fn concentrated_ladder(pool: &Concentrated) -> Result<ConcentratedLadder, String> {
     Ok(ConcentratedLadder {
         zero_for_one: walk_ladder(pool, true)?,
         one_for_zero: walk_ladder(pool, false)?,

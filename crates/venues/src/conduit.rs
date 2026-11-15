@@ -4,8 +4,6 @@ pub use store_model::{ConduitFail, ConduitJob};
 
 #[cfg(test)]
 mod tests {
-    use crate::catalog::UNI_V2;
-    use crate::detail::{ConstantProduct, PoolDetail};
     use crate::fit::direction_knots;
     use crate::install_catalog_hooks;
     use crate::state::CurveRecord;
@@ -13,12 +11,14 @@ mod tests {
     use crate::Catalog;
     use alloy_primitives::{address, U256};
     use alloy_primitives::{Address, B256};
+    use chain::detail::{ConstantProduct, PoolDetail};
     use num_bigint::{BigInt, Sign};
     use routing::quote;
     use routing::{segments_from_knots, Action, SlopeSegment};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use store_model::UNI_V2;
 
     struct TempDir(PathBuf);
 

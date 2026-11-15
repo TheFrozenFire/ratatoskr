@@ -29,7 +29,7 @@ const FLAG_TRUNCATED: u64 = 1;
 const FLAG_FAILED: u64 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PoolTicks {
+pub struct PoolTicks {
     pub kind: u8,
     pub id: B256,
     pub home: Address,
@@ -38,13 +38,13 @@ pub(crate) struct PoolTicks {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TickWordRead {
+pub struct TickWordRead {
     pub tick: i32,
     pub word: U256,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TickLoad {
+pub struct TickLoad {
     pub ticks: Vec<Vec<TickWordRead>>,
     /// A `ticks()` or `extsload` staticcall failed in this pool.
     pub failed: Vec<bool>,
@@ -66,11 +66,7 @@ struct Decoded {
     failed: bool,
 }
 
-pub(crate) fn load_ticks(
-    rpc: &Rpc,
-    pools: &[PoolTicks],
-    block: Option<u64>,
-) -> eyre::Result<TickLoad> {
+pub fn load_ticks(rpc: &Rpc, pools: &[PoolTicks], block: Option<u64>) -> eyre::Result<TickLoad> {
     let mut ticks = vec![Vec::new(); pools.len()];
     let mut failed = vec![false; pools.len()];
     let pending = pools

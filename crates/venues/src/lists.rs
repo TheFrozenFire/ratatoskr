@@ -8,9 +8,9 @@ use alloy_primitives::{Address, U256};
 use eyre::eyre;
 
 use crate::catalog::{Put, VenueRow};
-use crate::lens::{self, LensHit, CALL_GAS};
-use crate::rpc::Rpc;
 use crate::DiscoveryStore;
+use chain::lens::{self, LensHit, CALL_GAS};
+use chain::rpc::Rpc;
 
 const ALL_PAIRS_LEN: [u8; 4] = [0x57, 0x4f, 0x2b, 0xa3];
 const ALL_PAIRS: [u8; 4] = [0x1e, 0x3d, 0xd1, 0x8b];

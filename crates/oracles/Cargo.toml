@@ -10,13 +10,13 @@ config.workspace = true
 observability.workspace = true
 alloy-primitives.workspace = true
 eyre.workspace = true
+chain.workspace = true
 store.workspace = true
 store-model.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "native-tls"] }
 serde_json.workspace = true
 thiserror = "2"
 tokio.workspace = true
-venues.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

@@ -1127,7 +1127,19 @@ dependencies = [
 name = "chain"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
+ "config",
+ "discover",
+ "eyre",
+ "fitter",
+ "journal",
+ "num-bigint",
+ "observability",
+ "reqwest 0.12.28",
+ "serde_json",
  "store",
+ "store-model",
+ "tokio",
 ]
 
 [[package]]
@@ -3597,6 +3609,7 @@ name = "oracles"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "chain",
  "config",
  "eyre",
  "observability",
@@ -3606,7 +3619,6 @@ dependencies = [
  "store-model",
  "thiserror",
  "tokio",
- "venues",
 ]
 
 [[package]]
@@ -6138,8 +6150,8 @@ name = "venues"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "chain",
  "config",
- "discover",
  "era",
  "eyre",
  "filter",
@@ -6150,7 +6162,6 @@ dependencies = [
  "num-traits",
  "observability",
  "peer",
- "reqwest 0.12.28",
  "routing",
  "serde_json",
  "store",

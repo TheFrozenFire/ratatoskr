@@ -22,7 +22,7 @@ use eyre::WrapErr;
 
 /// Fetch the directory, read proxy configuration, then follow answer logs.
 ///
-/// An empty `rpcs` list uses [`venues::default_call_rpcs`]. The venue catalog
+/// An empty `rpcs` list uses [`chain::default_call_rpcs`]. The venue catalog
 /// stays closed. History jobs are not claimed. A follow error is logged and
 /// the next pass resumes from the stored cursor. The caller opens the feed file.
 pub async fn run(
@@ -64,11 +64,11 @@ fn pass(
         "feeds"
     );
     let rpcs = if rpcs.is_empty() {
-        venues::default_call_rpcs()
+        chain::default_call_rpcs()
     } else {
         rpcs
     };
-    let rpc = venues::Rpc::new(rpcs)?;
+    let rpc = chain::Rpc::new(rpcs)?;
     configure::configure(feeds, &rpc)?;
     let _ = feeds.remember_answers();
     if let Ok(gauges) = feeds.gauges() {

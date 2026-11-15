@@ -26,7 +26,6 @@ use crate::catalog::{
     kind_name, AERO, BALANCER_V2, BALANCER_V3, METRIC, PANCAKE_V3, SUSHI_V3, UNI_V3, UNI_V4,
     V3_FORK,
 };
-use crate::detail::{product_fee_pips, PoolDetail, Quote};
 use crate::state::{
     curve_is_current, curve_job, is_canonical, join_detail, keep_or_drop, quote_is_current,
     unix_now, CurveRecord, PoolState, QuoteRecord, WorkJob, CURVE_VERSION, QUOTE_VERSION,
@@ -35,6 +34,7 @@ use crate::Catalog;
 use crate::Rpc;
 use crate::VenueStore;
 use alloy_primitives::{Address, B256, U256};
+use chain::detail::{product_fee_pips, PoolDetail, Quote};
 use fitter::{choose, decode_fit, encode_fit, labels_of, Formula, StoredFit};
 use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
@@ -58,7 +58,7 @@ const QUOTE_LENS: Address = alloy_primitives::address!("000000000000000000000000
 const LENS_RUNTIME: &str = include_str!("../../../contracts/lens/QuoteLens.bin");
 
 fn multicall() -> Address {
-    crate::seeds::document().multicall
+    chain::seeds::document().multicall
 }
 
 const SEL_AGGREGATE3: [u8; 4] = [0x82, 0xad, 0x56, 0xcb];
@@ -436,7 +436,7 @@ pub(crate) async fn drive_quotes<S: VenueStore>(
         {
             Ok(Ok(quoted)) => plans = quoted,
             Ok(Err(err)) => {
-                let error = crate::rpc::redact_secret(&format!("{err:#}"));
+                let error = chain::rpc::redact_secret(&format!("{err:#}"));
                 for (index, _, _) in &picked {
                     keep_or_drop(
                         &jobs[*index],
@@ -845,7 +845,7 @@ fn domain_max(detail: &PoolDetail, token_in: Address, token_out: Address) -> (U2
 }
 
 fn cp_max(
-    pool: &crate::detail::ConstantProduct,
+    pool: &chain::detail::ConstantProduct,
     token_in: Address,
     token_out: Address,
 ) -> (U256, &'static str) {
@@ -874,13 +874,13 @@ fn cp_max(
 }
 
 fn concentrated_max(
-    pool: &crate::detail::Concentrated,
+    pool: &chain::detail::Concentrated,
     zero_for_one: bool,
 ) -> (U256, &'static str) {
     if pool.sqrt_price_x96.is_zero() {
         return (U256::ZERO, "uninitialized");
     }
-    let Ok(ladder) = crate::detail::concentrated_ladder(pool) else {
+    let Ok(ladder) = chain::detail::concentrated_ladder(pool) else {
         return (U256::ZERO, "uninitialized");
     };
     let steps = if zero_for_one {
@@ -900,8 +900,8 @@ fn balances(detail: &PoolDetail, token_in: Address, token_out: Address) -> Optio
             let input = pool.tokens.iter().position(|token| *token == token_in)?;
             let output = pool.tokens.iter().position(|token| *token == token_out)?;
             Some((
-                crate::detail::v3_raw_balance(pool, input).ok()?,
-                crate::detail::v3_raw_balance(pool, output).ok()?,
+                chain::detail::v3_raw_balance(pool, input).ok()?,
+                chain::detail::v3_raw_balance(pool, output).ok()?,
             ))
         }
         PoolDetail::Curve(pool) => {
@@ -939,7 +939,7 @@ fn search_output(
 
 fn metric_max(
     detail: &PoolDetail,
-    pool: &crate::detail::MetricPool,
+    pool: &chain::detail::MetricPool,
     token_in: Address,
     token_out: Address,
 ) -> (U256, &'static str) {
@@ -1358,7 +1358,7 @@ fn prepare(
 }
 
 fn prepare_product(
-    pool: &crate::detail::ConstantProduct,
+    pool: &chain::detail::ConstantProduct,
     token_in: Address,
     token_out: Address,
     amount: U256,
@@ -1378,7 +1378,7 @@ fn prepare_product(
 }
 
 fn prepare_concentrated(
-    pool: &crate::detail::Concentrated,
+    pool: &chain::detail::Concentrated,
     token_in: Address,
     token_out: Address,
     amount: U256,
@@ -1430,7 +1430,7 @@ fn prepare_concentrated(
 }
 
 fn prepare_metric(
-    pool: &crate::detail::MetricPool,
+    pool: &chain::detail::MetricPool,
     token_in: Address,
     token_out: Address,
     amount: U256,
@@ -1456,7 +1456,7 @@ fn prepare_metric(
 }
 
 fn prepare_balancer(
-    pool: &crate::detail::BalancerPool,
+    pool: &chain::detail::BalancerPool,
     token_in: Address,
     token_out: Address,
     amount: U256,
@@ -1488,7 +1488,7 @@ fn prepare_balancer(
 }
 
 fn prepare_curve(
-    pool: &crate::detail::CurvePool,
+    pool: &chain::detail::CurvePool,
     token_in: Address,
     token_out: Address,
     amount: U256,
@@ -2741,7 +2741,7 @@ fn state_json(detail: &PoolDetail) -> Value {
             "weights": pool.weights.iter().map(|value| value.to_string()).collect::<Vec<_>>(),
             "scaling": pool.scaling.iter().map(|value| value.to_string()).collect::<Vec<_>>(),
             "rates": pool.rates.iter().map(|value| value.to_string()).collect::<Vec<_>>(),
-            "stable": pool.flags & crate::detail::FLAG_STABLE != 0,
+            "stable": pool.flags & chain::detail::FLAG_STABLE != 0,
             "flags": pool.flags,
         }),
         PoolDetail::Curve(pool) => json!({
@@ -2755,7 +2755,7 @@ fn state_json(detail: &PoolDetail) -> Value {
             "out_fee": pool.out_fee.to_string(),
             "fee_gamma": pool.fee_gamma.to_string(),
             "coins_indexed_by_uint": pool.coins_indexed_by_uint,
-            "crypto": pool.flags & crate::detail::FLAG_CRYPTO != 0,
+            "crypto": pool.flags & chain::detail::FLAG_CRYPTO != 0,
             "flags": pool.flags,
             "coins": pool.coins.iter().map(|coin| json!({
                 "token": addr(coin.token),
@@ -3101,9 +3101,9 @@ fn hex_prefix(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::UNI_V2;
-    use crate::detail::ConstantProduct;
     use alloy_primitives::address;
+    use chain::detail::ConstantProduct;
+    use store_model::UNI_V2;
 
     fn hex_of(bytes: &[u8]) -> String {
         hex_prefix(bytes)
@@ -3180,7 +3180,7 @@ mod tests {
         let token0 = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         let token1 = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
         let liquidity = 1_000_000_i128;
-        let detail = PoolDetail::Concentrated(crate::detail::Concentrated {
+        let detail = PoolDetail::Concentrated(chain::detail::Concentrated {
             kind: UNI_V3,
             id: B256::ZERO,
             home: Address::ZERO,
@@ -3196,12 +3196,12 @@ mod tests {
             next_scan: None,
             bitmaps: Vec::new(),
             ticks: vec![
-                crate::detail::TickWord {
+                chain::detail::TickWord {
                     tick: -60,
                     liquidity_gross: liquidity as u128,
                     liquidity_net: liquidity,
                 },
-                crate::detail::TickWord {
+                chain::detail::TickWord {
                     tick: 60,
                     liquidity_gross: liquidity as u128,
                     liquidity_net: -liquidity,
@@ -3355,7 +3355,7 @@ mod tests {
     }
 
     fn concentrated(kind: u8, home: Address, fee: u32) -> PoolDetail {
-        PoolDetail::Concentrated(crate::detail::Concentrated {
+        PoolDetail::Concentrated(chain::detail::Concentrated {
             kind,
             id: B256::ZERO,
             home,
@@ -3376,7 +3376,7 @@ mod tests {
     }
 
     fn metric_pool() -> PoolDetail {
-        PoolDetail::Metric(crate::detail::MetricPool {
+        PoolDetail::Metric(chain::detail::MetricPool {
             kind: crate::catalog::METRIC,
             id: B256::ZERO,
             pool: address!("aef2ad7aBB651945e6D24276715f25BDED0ad41e"),
@@ -3415,7 +3415,7 @@ mod tests {
         let pair = address!("00000000000000000000000000000000000000aa");
         let amount = U256::from(1_000_000u64);
         let dx = ready_of(prepare(
-            &product(crate::catalog::V2_FORK, pair),
+            &product(store_model::V2_FORK, pair),
             token_in,
             token_out,
             amount,
@@ -3432,7 +3432,7 @@ mod tests {
         // fee_pips 25 is 25 bps, stored as 2500 pips.
         assert_eq!(word_at(&dx.data[4..], 4), Some(U256::from(2500u32)));
         match prepare(
-            &product(crate::catalog::V2_FORK, Address::ZERO),
+            &product(store_model::V2_FORK, Address::ZERO),
             token_in,
             token_out,
             amount,
@@ -3442,7 +3442,7 @@ mod tests {
             Prep::Ready(_) => panic!("pair is unset"),
         }
         match prepare(
-            &product(crate::catalog::V2_FORK, pair),
+            &product(store_model::V2_FORK, pair),
             token_in,
             token_out,
             amount,

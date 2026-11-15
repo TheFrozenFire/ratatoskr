@@ -30,7 +30,7 @@ where
     report.notes.push(format!("conduit fill {queued}"));
     observability::info!(queued, "conduit fill");
     let urls = if opts.rpcs.is_empty() {
-        crate::rpc::default_call_rpcs()
+        chain::rpc::default_call_rpcs()
     } else {
         opts.rpcs.clone()
     };
@@ -222,7 +222,7 @@ where
             }
             Ok(false) => done.push((job.token_in, job.token_out)),
             Err(err) => {
-                let error = crate::rpc::redact_secret(&err.to_string());
+                let error = chain::rpc::redact_secret(&err.to_string());
                 if give_up_after > 0 && job.attempt >= give_up_after {
                     observability::error!(
                         stage = STAGE_CONDUIT,
@@ -320,13 +320,13 @@ async fn drive_details<S: VenueStore>(
     let rpc = rpc.clone();
     let queries = rows.clone();
     let loaded = match tokio::task::spawn_blocking(move || {
-        crate::detail::load_details_at(&rpc, &queries, Some(block))
+        chain::detail::load_details_at(&rpc, &queries, Some(block))
     })
     .await
     {
         Ok(Ok(loaded)) => loaded,
         Ok(Err(err)) => {
-            let error = crate::rpc::redact_secret(&format!("{err:#}"));
+            let error = chain::rpc::redact_secret(&format!("{err:#}"));
             for row in &rows {
                 let fallback = blank_job(stage, row.kind, row.id);
                 let job = job_for(jobs, row.kind, row.id).unwrap_or(&fallback);
@@ -518,7 +518,7 @@ async fn drive_ticks<S: VenueStore>(
             {
                 Ok(Ok(loaded)) => loaded,
                 Ok(Err(err)) => {
-                    let error = crate::rpc::redact_secret(&format!("{err:#}"));
+                    let error = chain::rpc::redact_secret(&format!("{err:#}"));
                     for index in &indexes {
                         errors_by_index[*index] = Some(error.clone());
                     }
@@ -690,7 +690,7 @@ async fn watch_hit<S: VenueStore>(store: &S, log: &Log) -> eyre::Result<Option<W
     let Some(&topic) = log.topics.first() else {
         return Ok(None);
     };
-    let known = crate::decode::known();
+    let known = chain::decode::known();
     if log.address == known.pool_manager || log.address == known.bal_v2 {
         let (kind, head, other, _other_class) = if log.address == known.pool_manager {
             (UNI_V4, TOPIC_V4_SWAP, TOPIC_V4_LIQUIDITY, CLASS_TICKS)

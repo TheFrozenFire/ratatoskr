@@ -7,23 +7,23 @@
 //! `TickLens` calls. Tick reads stay out of the detail call so the two do not
 //! share a gas limit or a response-size budget.
 
-use crate::catalog::{
-    VenueRow, AERO, BALANCER_V2, BALANCER_V3, CURVE, METRIC, PANCAKE_V2, PANCAKE_V3, SUSHI_V2,
-    SUSHI_V3, UNI_V2, UNI_V3, UNI_V4, V2_FORK, V3_FORK,
-};
-use crate::decode::known;
 use crate::lens::CALL_GAS;
 use crate::rpc::{Rpc, StorageError};
+use crate::seeds::document;
 use crate::tick::{self, PoolTicks};
 use alloy_primitives::{keccak256, Address, Uint, B256, I256, U256};
 use eyre::eyre;
 use std::str::FromStr;
 use std::sync::OnceLock;
+use store_model::{
+    VenueRow, AERO, BALANCER_V2, BALANCER_V3, CURVE, METRIC, PANCAKE_V2, PANCAKE_V3, SUSHI_V2,
+    SUSHI_V3, UNI_V2, UNI_V3, UNI_V4, V2_FORK, V3_FORK,
+};
 
 mod quote;
 
 use self::quote::*;
-pub(crate) use self::quote::{concentrated_ladder, product_fee_pips, v3_raw_balance};
+pub use self::quote::{concentrated_ladder, product_fee_pips, v3_raw_balance};
 
 const MAGIC: [u8; 32] = [
     0x9a, 0x7a, 0xd5, 0x55, 0x5f, 0xe5, 0x50, 0xf2, 0x7c, 0x28, 0x58, 0x1e, 0x7e, 0xf0, 0xa5, 0x54,
@@ -68,14 +68,17 @@ impl DetailQuery {
         let token1 = row.tokens.get(1).copied().unwrap_or_default();
         let (home, aux) = match row.kind {
             UNI_V4 => (
-                nonzero(row.factory, known().pool_manager),
+                nonzero(row.factory, document().by_name("uni-v4").address),
                 row.extra.unwrap_or_default(),
             ),
             BALANCER_V2 => (
-                nonzero(row.factory, known().bal_v2),
+                nonzero(row.factory, document().by_name("balancer-v2").address),
                 row.extra.unwrap_or_default(),
             ),
-            BALANCER_V3 => (address_of(row.id), known().bal_v3),
+            BALANCER_V3 => (
+                address_of(row.id),
+                document().by_name("balancer-v3").address,
+            ),
             _ => (address_of(row.id), Address::ZERO),
         };
         Self {
@@ -826,7 +829,7 @@ impl Concentrated {
     }
 }
 
-pub(crate) fn tick_request(pool: &Concentrated, ticks: Vec<i32>) -> crate::tick::PoolTicks {
+pub fn tick_request(pool: &Concentrated, ticks: Vec<i32>) -> crate::tick::PoolTicks {
     crate::tick::PoolTicks {
         kind: pool.kind,
         id: pool.id,
@@ -1518,7 +1521,7 @@ mod tests {
         let row = VenueRow {
             kind: UNI_V4,
             id: B256::repeat_byte(0x22),
-            factory: known().pool_manager,
+            factory: document().by_name("uni-v4").address,
             tokens: vec![
                 address!("0000000000000000000000000000000000000000"),
                 address!("c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"),
@@ -1532,7 +1535,7 @@ mod tests {
             log_index: None,
         };
         let query = DetailQuery::from_row(&row);
-        assert_eq!(query.home, known().pool_manager);
+        assert_eq!(query.home, document().by_name("uni-v4").address);
         assert_eq!(query.aux, hooks);
         assert_eq!(query.tick_spacing, 60);
     }
@@ -1546,7 +1549,7 @@ mod tests {
         let row = VenueRow {
             kind: UNI_V3,
             id: VenueRow::address_id(pool),
-            factory: known().uni_v3,
+            factory: document().by_name("uni-v3").address,
             tokens: vec![
                 address!("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"),
                 address!("c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"),

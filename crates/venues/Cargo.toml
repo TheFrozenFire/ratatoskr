@@ -9,11 +9,11 @@ publish.workspace = true
 config.workspace = true
 observability.workspace = true
 alloy-primitives.workspace = true
+chain.workspace = true
 fitter.workspace = true
 num-bigint = "0.4"
 num-rational = "0.4"
 num-traits = "0.2"
-discover.workspace = true
 era.workspace = true
 eyre.workspace = true
 filter.workspace = true
@@ -22,7 +22,6 @@ journal.workspace = true
 routing.workspace = true
 store.workspace = true
 store-model.workspace = true
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "native-tls"] }
 serde_json.workspace = true
 tokio.workspace = true
 

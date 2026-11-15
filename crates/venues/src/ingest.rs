@@ -12,9 +12,9 @@ use eyre::eyre;
 use crate::catalog::{Put, CURVE};
 use crate::lists::{self, ListJob};
 use crate::logs::{self, LogJob};
-use crate::rpc::Rpc;
-use crate::seeds::{self, Document};
 use crate::{DiscoveryStore, TokenStore};
+use chain::rpc::Rpc;
+use chain::seeds::{self, Document};
 
 const CALL_GAS: u64 = 1_000_000;
 const NO_VIEW: u64 = u64::MAX;

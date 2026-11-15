@@ -11,8 +11,8 @@ use crate::answer::{
 };
 use crate::configure;
 use alloy_primitives::{Address, B256};
+use chain::Rpc;
 use store_model::ObservedAnswer;
-use venues::Rpc;
 
 const SPAN: u64 = 2_000;
 const RECENT_BLOCKS: u64 = 8_000;

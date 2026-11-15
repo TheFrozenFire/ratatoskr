@@ -6,6 +6,6 @@ pub use store::service::{
 };
 pub use store_model::{
     decode_body, decode_row, encode_body, encode_row, kind_name, Put, ReceiptBody, TokenRecord,
-    VenueRow, AERO, BALANCER_V2, BALANCER_V3, CURVE, METRIC, PANCAKE_V2, PANCAKE_V3, SUSHI_V2,
-    SUSHI_V3, UNI_V2, UNI_V3, UNI_V4, V2_FORK, V3_FORK,
+    VenueRow, AERO, BALANCER_V2, BALANCER_V3, CURVE, METRIC, PANCAKE_V3, SUSHI_V3, UNI_V3, UNI_V4,
+    V3_FORK,
 };

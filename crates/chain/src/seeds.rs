@@ -8,18 +8,18 @@ use alloy_primitives::{keccak256, Address, B256};
 use std::str::FromStr;
 use std::sync::OnceLock;
 
-use crate::catalog::{kind_name, METRIC};
+use store_model::{kind_name, METRIC};
 
 const TEXT: &str = include_str!("../../../corpus/mainnet.yaml");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Wrap {
+pub struct Wrap {
     pub token: Address,
     pub wrapper: Address,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Root {
+pub struct Root {
     pub name: String,
     pub kind: u8,
     pub address: Address,
@@ -32,31 +32,31 @@ pub(crate) struct Root {
 }
 
 impl Root {
-    pub(crate) fn logs(&self) -> bool {
+    pub fn logs(&self) -> bool {
         !self.topics.is_empty()
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Document {
+pub struct Document {
     pub wraps: Vec<Wrap>,
     pub multicall: Address,
     pub roots: Vec<Root>,
 }
 
 impl Document {
-    pub(crate) fn by_name(&self, name: &str) -> &Root {
+    pub fn by_name(&self, name: &str) -> &Root {
         self.roots
             .iter()
             .find(|root| root.name == name)
             .unwrap_or_else(|| panic!("seed {name}"))
     }
 
-    pub(crate) fn by_address(&self, address: Address) -> Option<&Root> {
+    pub fn by_address(&self, address: Address) -> Option<&Root> {
         self.roots.iter().find(|root| root.address == address)
     }
 
-    pub(crate) fn kind_address(&self, kind: u8) -> Option<Address> {
+    pub fn kind_address(&self, kind: u8) -> Option<Address> {
         let mut found = self
             .roots
             .iter()
@@ -69,7 +69,7 @@ impl Document {
     }
 }
 
-pub(crate) fn document() -> &'static Document {
+pub fn document() -> &'static Document {
     static DOC: OnceLock<Document> = OnceLock::new();
     DOC.get_or_init(|| parse_document(TEXT).expect("corpus/mainnet.yaml"))
 }
@@ -91,6 +91,7 @@ pub fn custodial_wrap() -> (Address, Address) {
 }
 
 /// Quote contract for this factory, or the only quoted root of `kind`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn quoter(kind: u8, factory: Option<Address>) -> Option<Address> {
     let doc = document();
     if let Some(factory) = factory {
@@ -406,8 +407,8 @@ fn scalar(text: &str) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::{UNI_V2, UNI_V3, V2_FORK};
     use alloy_primitives::b256;
+    use store_model::{UNI_V2, UNI_V3, V2_FORK};
 
     #[test]
     fn the_seed_file_names_each_root_once() {

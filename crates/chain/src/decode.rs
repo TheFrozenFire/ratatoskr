@@ -9,7 +9,7 @@ use discover::univ3_pool;
 use journal::Log;
 use std::sync::OnceLock;
 
-use crate::catalog::{
+use store_model::{
     VenueRow, BALANCER_V2, BALANCER_V3, METRIC, PANCAKE_V2, PANCAKE_V3, SUSHI_V2, SUSHI_V3, UNI_V2,
     UNI_V3, UNI_V4, V2_FORK, V3_FORK,
 };
