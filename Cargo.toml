@@ -13,7 +13,6 @@ members = [
     "crates/store",
     "crates/pipeline",
     "crates/observability",
-    "crates/univ3",
     "crates/venues",
     "crates/routing",
     "crates/searcher",
@@ -67,7 +66,6 @@ action = { path = "crates/action" }
 trade = { path = "crates/trade" }
 survey = { path = "crates/survey" }
 simulate = { path = "crates/simulate" }
-univ3 = { path = "crates/univ3" }
 venues = { path = "crates/venues" }
 # Libraries for one outbound devp2p socket. Not the reth node.
 reth-chainspec = { git = "https://github.com/paradigmxyz/reth", tag = "v2.10.0" }
