@@ -414,7 +414,6 @@ async fn supervise(args: Args, loaded: config::Config) -> eyre::Result<()> {
                 socket: paths.peer_socket.clone(),
                 catalog: paths.peers.clone(),
                 egress,
-                key: config::expand_home(&peer_settings.key)?,
                 peer: peer_settings,
                 network: loaded.network.clone(),
             },

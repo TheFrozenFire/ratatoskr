@@ -89,7 +89,7 @@ impl Process {
 #[serde(deny_unknown_fields)]
 pub struct Peer {
     pub target: usize,
-    /// Created on first start when the file is absent. `~/` is the home directory.
+    /// Secp256k1 node secret, as hex. A `*.local.yaml` file sets this.
     pub key: String,
     /// Absent means `<data_dir>/peer.sock`.
     pub socket: Option<String>,
@@ -108,7 +108,7 @@ impl Default for Peer {
     fn default() -> Self {
         Self {
             target: 16,
-            key: "~/.config/ratatoskr/node.key".into(),
+            key: String::new(),
             socket: None,
             bind4: None,
             bind6: None,
@@ -516,7 +516,12 @@ mod tests {
         assert_eq!(loaded.process.services, ["db", "peer"]);
         assert_eq!(loaded.process.pipelines, ["headers", "venues", "state"]);
         assert_eq!(loaded.peer.target, 16);
-        assert_eq!(loaded.peer.key, "~/.config/ratatoskr/node.key");
+        let key = loaded.peer.key.trim();
+        assert!(
+            key.is_empty() || (key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit())),
+            "peer.key length {}",
+            key.len()
+        );
         assert_eq!(loaded.spots.hub_floor, 3);
         assert_eq!(loaded.spots.hub_limit, 32);
         assert!(loaded.peer.socket.is_none());

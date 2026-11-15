@@ -1,8 +1,7 @@
 //! Hold a small set of outbound mainnet sessions and serve blocks on a local socket.
 //!
 //! The peer service keeps the peer directory. A client asks it for a block and exits.
-//! The node key path comes from configuration. The default is
-//! `~/.config/ratatoskr/node.key`, and that file stays the same across restarts.
+//! The node secret is `peer.key`, hex, from configuration.
 //! Peers we have dialed are remembered in the peer catalog: each status change and
 //! each newly covered block is a sighting, and the summary of that history picks
 //! the next dial.
@@ -33,7 +32,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 use store_model::{encode_header_records, BlockRecord, HeaderRecord};
 use tokio::{
@@ -52,7 +51,6 @@ pub struct PeerConfig {
     /// `peers.redb`. Opened once. A held writer lock is returned, not retried.
     pub catalog: PathBuf,
     pub egress: Option<Egress>,
-    pub key: PathBuf,
     pub peer: config::Peer,
     pub network: config::Network,
 }
@@ -113,7 +111,7 @@ pub struct PreparedPeer {
 
 /// Load the node key and bind. `open` has already taken the catalog writer lock.
 pub fn prepare(opened: OpenedPeer, settings: &PeerConfig) -> eyre::Result<PreparedPeer> {
-    let key = load_node_key(&settings.key)?;
+    let key = parse_node_key(&settings.peer.key)?;
     let id = pk2id(&key.public_key(SECP256K1));
     info!(
         %id,
@@ -1284,32 +1282,13 @@ async fn range_response(
     })
 }
 
-fn load_node_key(path: &Path) -> eyre::Result<SecretKey> {
-    if let Some(parent) = path.parent() {
-        let created = !parent.exists();
-        fs::create_dir_all(parent)?;
-        if created {
-            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
-        }
+fn parse_node_key(text: &str) -> eyre::Result<SecretKey> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(eyre::eyre!("peer.key is missing"));
     }
-    if path.exists() {
-        let text = fs::read_to_string(path)?;
-        let bytes = hex_decode(text.trim()).wrap_err("node.key")?;
-        return SecretKey::from_slice(&bytes).wrap_err("node.key");
-    }
-    let key = SecretKey::new(&mut rand::thread_rng());
-    let mut hex = String::new();
-    for byte in key.secret_bytes() {
-        hex.push_str(&format!("{byte:02x}"));
-    }
-    fs::write(path, hex + "\n")?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    let created = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .unwrap_or(0);
-    info!(%created, path = %path.display(), "wrote a new node key");
-    Ok(key)
+    let bytes = hex_decode(text).wrap_err("peer.key")?;
+    SecretKey::from_slice(&bytes).wrap_err("peer.key")
 }
 
 fn hex_decode(text: &str) -> eyre::Result<Vec<u8>> {
@@ -1346,7 +1325,7 @@ mod tests {
         net::{IpAddr, Ipv4Addr},
         process::{Command, Stdio},
         sync::Mutex as StdMutex,
-        time::UNIX_EPOCH,
+        time::{SystemTime, UNIX_EPOCH},
     };
     use store_model::{decode_header_records, encode_header_records};
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -1570,7 +1549,6 @@ mod tests {
                 socket: socket.clone(),
                 catalog: path,
                 egress: None,
-                key: dir.join("node.key"),
                 peer: config::Peer {
                     target: 1,
                     ..config::Peer::default()
