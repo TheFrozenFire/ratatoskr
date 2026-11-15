@@ -11,7 +11,7 @@ use reth_eth_wire_types::{
     GetReceipts70, HeadersDirection,
 };
 use reth_ethereum_primitives::Receipt;
-use store_model::{encode_block_record, encode_receipt_bundle, BlockRecord, HeaderRecord};
+use store_model::{compress_receipt_bundle, encode_receipt_bundle, BlockRecord, HeaderRecord};
 
 /// Fetch every log in `block_number` from the connected peer.
 pub async fn fetch_block_logs(
@@ -185,7 +185,7 @@ pub async fn fetch_block_range(
     for (header, receipts) in headers.iter().zip(receipt_lists) {
         receipts_match_header(header, &receipts)?;
         let bundle = encode_receipt_bundle(&receipts);
-        let compressed = zstd::bulk::compress(&bundle, 3).map_err(|err| eyre!("zstd: {err}"))?;
+        let compressed = compress_receipt_bundle(&bundle)?;
         records.push(BlockRecord {
             number: header.number,
             hash: header.hash_slow(),
@@ -199,14 +199,7 @@ pub async fn fetch_block_range(
     Ok(records)
 }
 
-/// Concatenate the encoded records from [`fetch_block_range`].
-pub fn encode_block_records(records: &[BlockRecord]) -> Vec<u8> {
-    let mut out = Vec::new();
-    for record in records {
-        out.extend_from_slice(&encode_block_record(record));
-    }
-    out
-}
+pub use store_model::encode_block_records;
 
 async fn fetch_headers(
     session: &OutboundSession,

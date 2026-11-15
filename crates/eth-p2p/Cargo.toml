@@ -27,4 +27,3 @@ reth-ethereum-primitives.workspace = true
 reth-network-peers.workspace = true
 secp256k1.workspace = true
 tokio.workspace = true
-zstd = "0.13"

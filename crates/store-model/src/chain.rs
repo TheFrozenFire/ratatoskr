@@ -146,6 +146,15 @@ pub fn decode_header_records(bytes: &[u8]) -> Result<Vec<HeaderRecord>, &'static
     Ok(records)
 }
 
+/// Concatenate encoded block records. The inverse is [`decode_block_records`].
+pub fn encode_block_records(records: &[BlockRecord]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for record in records {
+        out.extend_from_slice(&encode_block_record(record));
+    }
+    out
+}
+
 /// Decode a concatenation of [`encode_block_record`] values.
 pub fn decode_block_records(mut bytes: &[u8]) -> Result<Vec<BlockRecord>, &'static str> {
     let mut records = Vec::new();

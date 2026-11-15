@@ -13,3 +13,4 @@ eyre.workspace = true
 num-bigint = "0.4"
 reth-ethereum-primitives.workspace = true
 reth-network-peers.workspace = true
+zstd = "0.13"

@@ -15,7 +15,7 @@
 use alloy_primitives::{Address, Bytes, B256};
 use reth_ethereum_primitives::Receipt;
 use serde::Serialize;
-use store_model::{decode_receipt_bundle, BlockRecord};
+use store_model::{decode_receipt_bundle, decompress_receipt_bundle, BlockRecord};
 
 /// One log, with its place in the chain.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -68,8 +68,7 @@ pub fn logs_in_block(record: &BlockRecord) -> eyre::Result<Vec<Log>> {
     if record.receipts_zstd.is_empty() {
         return Ok(Vec::new());
     }
-    let bytes = zstd::stream::decode_all(record.receipts_zstd.as_slice())
-        .map_err(|err| eyre::eyre!("zstd: {err}"))?;
+    let bytes = decompress_receipt_bundle(&record.receipts_zstd)?;
     let receipts = decode_receipt_bundle(&bytes)?;
     Ok(flatten_logs(record.number, record.hash, &receipts))
 }

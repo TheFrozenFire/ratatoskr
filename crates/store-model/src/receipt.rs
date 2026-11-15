@@ -2,12 +2,23 @@
 //!
 //! The bytes are a little-endian receipt count, then for each receipt a
 //! little-endian length and the EIP-2718 encoding, bloom included. The block
-//! record stores those bytes inside a zstd frame.
+//! record stores those bytes inside a zstd frame at level 3.
 
 use alloy_consensus::{ReceiptWithBloom, TxReceipt};
 use alloy_eips::eip2718::{Decodable2718, Encodable2718};
 use eyre::eyre;
 use reth_ethereum_primitives::Receipt;
+
+/// Level used for a receipt frame stored on a block record.
+pub const RECEIPT_ZSTD_LEVEL: i32 = 3;
+
+pub fn compress_receipt_bundle(raw: &[u8]) -> eyre::Result<Vec<u8>> {
+    zstd::bulk::compress(raw, RECEIPT_ZSTD_LEVEL).map_err(|err| eyre!("zstd: {err}"))
+}
+
+pub fn decompress_receipt_bundle(frame: &[u8]) -> eyre::Result<Vec<u8>> {
+    zstd::stream::decode_all(frame).map_err(|err| eyre!("zstd: {err}"))
+}
 
 pub fn encode_receipt_bundle(receipts: &[Receipt]) -> Vec<u8> {
     let mut out = Vec::new();

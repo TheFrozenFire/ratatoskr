@@ -11,4 +11,3 @@ eyre.workspace = true
 reth-ethereum-primitives.workspace = true
 serde.workspace = true
 store-model.workspace = true
-zstd = "0.13"

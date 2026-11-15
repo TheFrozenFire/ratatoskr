@@ -22,10 +22,13 @@ pub use spot::Spot;
 
 pub use chain::{
     decode_block_record, decode_block_records, decode_header_record, decode_header_records,
-    encode_block_record, encode_header_record, encode_header_records, BlockRecord, HeaderRecord,
-    MAINNET_GENESIS_HASH,
+    encode_block_record, encode_block_records, encode_header_record, encode_header_records,
+    BlockRecord, HeaderRecord, MAINNET_GENESIS_HASH,
 };
-pub use receipt::{decode_receipt_bundle, encode_receipt_bundle};
+pub use receipt::{
+    compress_receipt_bundle, decode_receipt_bundle, decompress_receipt_bundle,
+    encode_receipt_bundle, RECEIPT_ZSTD_LEVEL,
+};
 
 pub use peer::{
     PublishedPeer, Sighting, Summary, DIAL_FAILED, DROPPED, EMPTY, SAW_STATUS, SERVED, TOO_MANY,
