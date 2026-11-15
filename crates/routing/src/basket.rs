@@ -37,19 +37,10 @@ pub fn open_count_wins(open_count: &BigInt, closed_count: &BigInt, cost: &BigInt
     open_count - cost > *closed_count
 }
 
-/// Constant-product numerator `output * multiplier * tender`.
-pub fn product_num(output: &BigInt, multiplier: &BigInt, tender: &BigInt) -> BigInt {
-    output * multiplier * tender
-}
-
-/// Constant-product denominator `input + multiplier * tender`.
-pub fn product_den(input: &BigInt, multiplier: &BigInt, tender: &BigInt) -> BigInt {
-    input + multiplier * tender
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hub::{product_den, product_num};
 
     fn z(value: i64) -> BigInt {
         BigInt::from(value)

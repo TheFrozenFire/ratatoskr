@@ -9,7 +9,15 @@
 
 use num_bigint::BigInt;
 
-use crate::basket::{product_den, product_num};
+/// Constant-product numerator `output * multiplier * tender`.
+pub fn product_num(output: &BigInt, multiplier: &BigInt, tender: &BigInt) -> BigInt {
+    output * multiplier * tender
+}
+
+/// Constant-product denominator `input + multiplier * tender`.
+pub fn product_den(input: &BigInt, multiplier: &BigInt, tender: &BigInt) -> BigInt {
+    input + multiplier * tender
+}
 
 /// One constant-product leg: input reserve, output reserve, and multiplier.
 #[derive(Clone, Debug, PartialEq, Eq)]
