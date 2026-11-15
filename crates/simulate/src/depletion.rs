@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use num_bigint::BigInt;
 use num_traits::Zero;
 
-use crate::{ceil_div, floor_div, quote, Action, SlopeSegment};
+use routing::{ceil_div, floor_div, quote, Action, SlopeSegment};
 
 /// A tender was negative.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -254,7 +254,7 @@ pub fn settle_three_coin(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SlopeSegment;
+    use routing::SlopeSegment;
 
     fn z(value: i64) -> BigInt {
         BigInt::from(value)

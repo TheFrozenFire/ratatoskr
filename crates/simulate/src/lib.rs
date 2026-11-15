@@ -3,7 +3,10 @@
 //! A price is the numeraire value of one raw unit. [`score`] applies those
 //! prices to the amounts the plan spent and the amounts it received. The gas
 //! is copied onto the score. This crate does not search, does not allocate,
-//! and does not open the catalog.
+//! and does not open the catalog. The trading-set ledger quotes one direction
+//! from the reserves it was opened on.
+
+pub mod depletion;
 
 use std::collections::{BTreeMap, BTreeSet};
 

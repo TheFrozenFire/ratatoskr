@@ -1,4 +1,4 @@
-//! Pair conduit, basket count, the trading-set ledger, and hub labels.
+//! Pair conduit, basket count, and hub labels.
 //!
 //! A slope segment is a positive input width and a nonnegative output on one
 //! action. Input `t` on that segment pays `(output * t) / width`, which is
@@ -6,11 +6,9 @@
 //! steepest remaining segment.
 //!
 //! A basket count is the largest integer every fixed-weight output still
-//! supports. A trading set quotes one direction from its original reserves:
-//! same-direction tenders are one submission.
+//! supports.
 
 pub mod basket;
-pub mod depletion;
 pub mod hub;
 pub mod latency;
 
@@ -19,7 +17,7 @@ use num_traits::Zero;
 use std::cmp::Ordering;
 
 /// Floor quotient for a positive divisor. The remainder is nonnegative.
-pub(crate) fn floor_div(numer: &BigInt, denom: &BigInt) -> Option<BigInt> {
+pub fn floor_div(numer: &BigInt, denom: &BigInt) -> Option<BigInt> {
     if denom <= &BigInt::from(0) {
         return None;
     }
@@ -32,7 +30,7 @@ pub(crate) fn floor_div(numer: &BigInt, denom: &BigInt) -> Option<BigInt> {
 }
 
 /// Least integer quotient that meets a nonnegative numerator.
-pub(crate) fn ceil_div(numer: &BigInt, denom: &BigInt) -> Option<BigInt> {
+pub fn ceil_div(numer: &BigInt, denom: &BigInt) -> Option<BigInt> {
     if denom <= &BigInt::from(0) || numer < &BigInt::from(0) {
         return None;
     }
