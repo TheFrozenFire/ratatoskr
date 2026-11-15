@@ -705,11 +705,11 @@ fn hit_spans(numbers: &[u64]) -> Vec<(u64, u64)> {
 mod tests {
     use super::*;
     use alloy_primitives::{b256, Address, B256};
-    use corpus::Corpus;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use store::service::Corpus;
 
     struct Files {
         corpus: Corpus,
@@ -974,7 +974,10 @@ mod tests {
         let dir = TempDir::new();
         let store = Files {
             corpus: Corpus::create(&dir.0.join("corpus.redb")).unwrap(),
-            catalog: crate::Catalog::open(&dir.0.join("venues.redb")).unwrap(),
+            catalog: {
+                crate::install_catalog_hooks();
+                crate::Catalog::open(&dir.0.join("venues.redb")).unwrap()
+            },
         };
         let era_calls = Arc::new(AtomicUsize::new(0));
         let peer_calls = Arc::new(AtomicUsize::new(0));

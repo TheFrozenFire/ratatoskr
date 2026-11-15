@@ -166,18 +166,18 @@ async fn dispatch(store: &LocalStore, op: Op) -> eyre::Result<Reply> {
             Ok(Reply::Empty)
         }
         Op::PoolState { body } => {
-            let call = venues::decode_state_call(&body)?;
+            let call = crate::wire::decode_state_call(&body)?;
             let reply = state_call(store, call).await?;
-            Ok(Reply::PoolState(venues::encode_state_reply(&reply)?))
+            Ok(Reply::PoolState(crate::wire::encode_state_reply(&reply)?))
         }
     }
 }
 
 async fn state_call(
     store: &LocalStore,
-    call: venues::StateCall,
-) -> eyre::Result<venues::StateReply> {
-    use venues::{StateCall, StateReply};
+    call: crate::wire::StateCall,
+) -> eyre::Result<crate::wire::StateReply> {
+    use crate::wire::{StateCall, StateReply};
     let reply = match call {
         StateCall::ReadVenue { kind, id } => StateReply::Venue(store.read_venue(kind, id).await?),
         StateCall::Reconcile { now } => StateReply::Wrote(store.reconcile(now).await?),

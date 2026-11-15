@@ -1,0 +1,398 @@
+//! Receipt corpus service.
+//!
+//! One redb row per block. The value is a [`store_model::BlockRecord`].
+//! An empty value is a hole: peers would not serve that block. `meta.bytes`
+//! is the sum of stored record lengths, and `meta.cursor-<range>` is the next
+//! block a named ingest range still needs.
+
+use eyre::WrapErr;
+use redb::{
+    Database, Durability, ReadOnlyDatabase, ReadableDatabase, ReadableTable, TableDefinition,
+};
+use std::path::{Path, PathBuf};
+use store_model::{decode_block_record, encode_block_record, BlockRecord};
+
+const BLOCKS: TableDefinition<u64, &[u8]> = TableDefinition::new("blocks");
+const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
+
+/// Receipt batches are multi-megabyte sequential reads and writes.
+const PAGE_CACHE: usize = 64 * 1024 * 1024;
+
+enum Db {
+    Write(Database),
+    Read(ReadOnlyDatabase),
+}
+
+impl Db {
+    fn begin_read(&self) -> Result<redb::ReadTransaction, redb::TransactionError> {
+        match self {
+            Db::Write(db) => db.begin_read(),
+            Db::Read(db) => db.begin_read(),
+        }
+    }
+
+    fn cache_stats(&self) -> redb::CacheStats {
+        match self {
+            Db::Write(db) => db.cache_stats(),
+            Db::Read(db) => db.cache_stats(),
+        }
+    }
+
+    fn begin_write(&self) -> eyre::Result<redb::WriteTransaction> {
+        match self {
+            Db::Write(db) => Ok(db.begin_write()?),
+            Db::Read(_) => Err(eyre::eyre!("corpus is open read-only")),
+        }
+    }
+}
+
+pub struct Corpus {
+    db: Db,
+    label: String,
+}
+
+fn open_database(path: &Path, create: bool) -> Result<Db, redb::DatabaseError> {
+    let mut builder = redb::Builder::new();
+    builder.set_cache_size(PAGE_CACHE);
+    builder.set_concurrency_mode(redb::ConcurrencyMode::SingleWriter);
+    if create {
+        Ok(Db::Write(builder.create(path)?))
+    } else {
+        Ok(Db::Read(builder.open_read_only(path)?))
+    }
+}
+
+impl Corpus {
+    pub fn create(path: &Path) -> eyre::Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let db = open_database(path, true).wrap_err("create redb")?;
+        Ok(Self::new(path, db))
+    }
+
+    /// Page cache configured for this file, and the counters redb has accumulated.
+    pub fn cache_reading(&self) -> ipc::db::CacheReading {
+        ipc::db::reading(&self.label, PAGE_CACHE as u64, self.db.cache_stats())
+    }
+
+    fn new(path: &Path, db: Db) -> Self {
+        Self {
+            db,
+            label: ipc::db::file_label(path),
+        }
+    }
+
+    /// Open a corpus another process may be writing. Callers only read.
+    pub fn open(path: &Path) -> eyre::Result<Self> {
+        let db = open_database(path, false).wrap_err("open corpus")?;
+        Ok(Self::new(path, db))
+    }
+
+    pub fn meta(&self, key: &str) -> eyre::Result<Option<u64>> {
+        meta_get(&self.db, key)
+    }
+
+    pub fn put_meta(&self, key: &str, value: u64) -> eyre::Result<()> {
+        let txn = self.db.begin_write()?;
+        {
+            let mut meta = txn.open_table(META)?;
+            meta.insert(key, value)?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Replace the blocks in `records` and advance `cursor_key` past the last one.
+    ///
+    /// The returned value is the increase in stored bytes. A rewrite of a
+    /// shorter record can add nothing.
+    pub fn write_records(&self, cursor_key: &str, records: &[BlockRecord]) -> eyre::Result<u64> {
+        let mut txn = self.db.begin_write()?;
+        txn.set_durability(Durability::Immediate)?;
+        let delta = {
+            let mut blocks = txn.open_table(BLOCKS)?;
+            let mut meta = txn.open_table(META)?;
+            let mut delta: i64 = 0;
+            for record in records {
+                let bytes = encode_block_record(record);
+                let previous = blocks.insert(record.number, bytes.as_slice())?;
+                if let Some(previous) = previous {
+                    delta -= previous.value().len() as i64;
+                }
+                delta += bytes.len() as i64;
+            }
+            let last = records.last().map(|record| record.number).unwrap_or(0);
+            meta.insert(cursor_key, last.saturating_add(1))?;
+            let stored = meta.get("bytes")?.map(|value| value.value()).unwrap_or(0);
+            let stored = (stored as i64 + delta).max(0) as u64;
+            meta.insert("bytes", stored)?;
+            delta
+        };
+        txn.commit()?;
+        Ok(delta.max(0) as u64)
+    }
+
+    /// Remember that `number` was not served. A later real record can replace it.
+    pub fn write_hole(&self, number: u64) -> eyre::Result<()> {
+        let txn = self.db.begin_write()?;
+        {
+            let mut meta = txn.open_table(META)?;
+            let holes = meta.get("holes")?.map(|value| value.value()).unwrap_or(0);
+            meta.insert("holes", holes.saturating_add(1))?;
+            let mut blocks = txn.open_table(BLOCKS)?;
+            if blocks.get(number)?.is_none() {
+                blocks.insert(number, &[][..])?;
+            }
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// One stored block. A missing row and an empty hole are both `None`.
+    pub fn read_block(&self, number: u64) -> eyre::Result<Option<BlockRecord>> {
+        let read = self.db.begin_read()?;
+        let table = match read.open_table(BLOCKS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(err) => return Err(err.into()),
+        };
+        let Some(value) = table.get(number)? else {
+            return Ok(None);
+        };
+        let bytes = value.value();
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        let (record, consumed) =
+            decode_block_record(bytes).map_err(|err| eyre::eyre!("block {number}: {err}"))?;
+        if consumed != bytes.len() {
+            return Err(eyre::eyre!("block {number} has trailing bytes"));
+        }
+        if record.receipts_zstd.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(record))
+    }
+
+    /// Insert receipt blocks without moving an ingest cursor.
+    ///
+    /// Empty `receipts_zstd` is skipped. A hole at the same number is replaced.
+    pub fn put_blocks(&self, records: &[BlockRecord]) -> eyre::Result<u64> {
+        if records.is_empty() {
+            return Ok(0);
+        }
+        let mut txn = self.db.begin_write()?;
+        txn.set_durability(Durability::Immediate)?;
+        let delta = {
+            let mut blocks = txn.open_table(BLOCKS)?;
+            let mut meta = txn.open_table(META)?;
+            let mut delta: i64 = 0;
+            for record in records {
+                if record.receipts_zstd.is_empty() {
+                    continue;
+                }
+                let bytes = encode_block_record(record);
+                let previous = blocks.insert(record.number, bytes.as_slice())?;
+                if let Some(previous) = previous {
+                    delta -= previous.value().len() as i64;
+                }
+                delta += bytes.len() as i64;
+            }
+            let stored = meta.get("bytes")?.map(|value| value.value()).unwrap_or(0);
+            let stored = (stored as i64 + delta).max(0) as u64;
+            meta.insert("bytes", stored)?;
+            delta
+        };
+        txn.commit()?;
+        Ok(delta.max(0) as u64)
+    }
+
+    /// Copy block rows from `from` upward until `byte_budget` bytes are held.
+    ///
+    /// The read transaction ends before this returns. One row is always
+    /// included when any remain, so a single large block still makes progress.
+    pub fn read_block_page(
+        &self,
+        from: u64,
+        byte_budget: usize,
+    ) -> eyre::Result<Vec<(u64, Vec<u8>)>> {
+        let read = self.db.begin_read()?;
+        let table = match read.open_table(BLOCKS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(err) => return Err(err.into()),
+        };
+        let mut out = Vec::new();
+        let mut held = 0usize;
+        for item in table.range(from..)? {
+            let (key, value) = item?;
+            let bytes = value.value().to_vec();
+            held = held.saturating_add(bytes.len());
+            out.push((key.value(), bytes));
+            if held >= byte_budget {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Copy at most `limit` stored rows with a key greater than `after`.
+    ///
+    /// The read stops when the page is full. Later keys are not visited.
+    pub fn page_blocks(
+        &self,
+        after: Option<u64>,
+        limit: usize,
+    ) -> eyre::Result<Vec<(u64, Vec<u8>)>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let read = self.db.begin_read()?;
+        let table = match read.open_table(BLOCKS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(err) => return Err(err.into()),
+        };
+        let mut page = Vec::with_capacity(limit);
+        let rows = match after {
+            Some(after) => {
+                let Some(start) = after.checked_add(1) else {
+                    return Ok(page);
+                };
+                table.range(start..)?
+            }
+            None => table.range::<u64>(..)?,
+        };
+        for row in rows {
+            if page.len() == limit {
+                break;
+            }
+            let (key, value) = row?;
+            page.push((key.value(), value.value().to_vec()));
+        }
+        Ok(page)
+    }
+
+    /// Visit every stored block in number order, including holes.
+    pub fn for_each_block(
+        &self,
+        mut visit: impl FnMut(u64, &[u8]) -> eyre::Result<()>,
+    ) -> eyre::Result<()> {
+        let read = self.db.begin_read()?;
+        let table = match read.open_table(BLOCKS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(()),
+            Err(err) => return Err(err.into()),
+        };
+        for row in table.iter()? {
+            let (key, value) = row?;
+            visit(key.value(), value.value())?;
+        }
+        Ok(())
+    }
+
+    pub fn default_path() -> PathBuf {
+        data_dir().join("corpus.redb")
+    }
+}
+
+fn meta_get(db: &Db, key: &str) -> eyre::Result<Option<u64>> {
+    let txn = db.begin_read()?;
+    let table = match txn.open_table(META) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+    Ok(table.get(key)?.map(|value| value.value()))
+}
+
+fn data_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/ratatoskr")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::b256;
+
+    fn sample(number: u64) -> BlockRecord {
+        BlockRecord {
+            number,
+            hash: b256!("1111111111111111111111111111111111111111111111111111111111111111"),
+            parent_hash: b256!("2222222222222222222222222222222222222222222222222222222222222222"),
+            timestamp: 1,
+            receipts_root: alloy_primitives::B256::ZERO,
+            transactions_root: alloy_primitives::B256::ZERO,
+            receipts_zstd: vec![1, 2, 3],
+        }
+    }
+
+    #[test]
+    fn records_advance_the_cursor_and_a_hole_is_empty() {
+        let path = std::env::temp_dir().join(format!(
+            "ratatoskr-corpus-{}-{}.redb",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let corpus = Corpus::create(&path).unwrap();
+        let added = corpus.write_records("cursor-test", &[sample(7)]).unwrap();
+        assert!(added > 0);
+        assert_eq!(corpus.meta("cursor-test").unwrap(), Some(8));
+        assert_eq!(corpus.meta("bytes").unwrap(), Some(added));
+        corpus.write_hole(8).unwrap();
+        assert_eq!(corpus.meta("holes").unwrap(), Some(1));
+        let mut seen = Vec::new();
+        corpus
+            .for_each_block(|number, bytes| {
+                seen.push((number, bytes.len()));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(seen, vec![(7, added as usize), (8, 0)]);
+        assert!(corpus.read_block(8).unwrap().is_none());
+        assert_eq!(corpus.read_block(7).unwrap().unwrap().number, 7);
+        let cursor = corpus.meta("cursor-test").unwrap();
+        corpus.put_blocks(&[sample(9)]).unwrap();
+        assert_eq!(corpus.meta("cursor-test").unwrap(), cursor);
+        assert_eq!(corpus.read_block(9).unwrap().unwrap().number, 9);
+        corpus.write_hole(10).unwrap();
+        corpus.put_blocks(&[sample(10)]).unwrap();
+        assert_eq!(corpus.read_block(10).unwrap().unwrap().number, 10);
+        drop(corpus);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_block_page_stops_at_the_byte_budget_and_resumes() {
+        let path = std::env::temp_dir().join(format!(
+            "ratatoskr-corpus-page-{}-{}.redb",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let corpus = Corpus::create(&path).unwrap();
+        corpus
+            .write_records("cursor-page", &[sample(1), sample(2), sample(3)])
+            .unwrap();
+        let first = corpus.read_block_page(0, 1).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].0, 1);
+        let next = corpus.read_block_page(first[0].0 + 1, 1).unwrap();
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].0, 2);
+        let rest = corpus.read_block_page(next[0].0 + 1, 1).unwrap();
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0].0, 3);
+        assert!(corpus.read_block_page(rest[0].0 + 1, 1).unwrap().is_empty());
+        drop(corpus);
+        let _ = std::fs::remove_file(&path);
+    }
+}

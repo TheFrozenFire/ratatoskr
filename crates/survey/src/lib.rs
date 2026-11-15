@@ -29,7 +29,7 @@ use std::path::Path;
 
 use eyre::WrapErr;
 use searcher::execute;
-use venues::Catalog;
+use store::service::Catalog;
 
 use crate::reader::Reader;
 use crate::source::Source;
@@ -50,7 +50,7 @@ pub fn run(data_dir: &Path) -> eyre::Result<()> {
 /// `limit` keeps the first trades in scenario order. `None` runs all of them.
 pub fn measure(data_dir: &Path, limit: Option<usize>) -> eyre::Result<()> {
     eprintln!("opening {} read-only", data_dir.display());
-    let catalog = venues::EntityRead::open(data_dir).wrap_err("open catalog")?;
+    let catalog = store::service::EntityRead::open(data_dir).wrap_err("open catalog")?;
     let mut stage = stage::load(&catalog)?;
     measure::run(&catalog, &mut stage, limit)
 }

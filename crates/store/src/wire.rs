@@ -3,15 +3,14 @@
 //! The request line stays `pool_state`. These bytes are the arguments and the
 //! reply, so a tick page does not have to grow a new opcode.
 
-use crate::detail::TickWord;
-use crate::state::{
-    CurveRecord, Dirty, ImmutablePut, ImmutableRow, MutableStored, MutableView, MutableWrite,
-    PoolState, QuoteRecord, TickPage, WatchHit, WorkFail, WorkJob,
-};
-use crate::{decode_row, encode_row, VenueRow};
 use alloy_primitives::B256;
 use eyre::eyre;
 use serde_json::{json, Value};
+use store_model::{
+    decode_row, encode_row, CurveRecord, Dirty, ImmutablePut, ImmutableRow, MutableStored,
+    MutableView, MutableWrite, PoolState, QuoteRecord, TickPage, TickWord, VenueRow, WatchHit,
+    WorkFail, WorkJob,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StateCall {

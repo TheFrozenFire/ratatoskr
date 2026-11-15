@@ -14,12 +14,12 @@ mod catalog;
 mod conduit;
 mod decode;
 mod detail;
-mod entity;
 mod fit;
 mod fit_formula;
 mod fit_math;
 mod fit_select;
 mod history;
+mod hooks;
 mod import;
 mod ingest;
 mod lens;
@@ -31,9 +31,8 @@ mod seeds;
 mod state;
 mod tick;
 mod tokens;
-mod wire;
 
-pub use wire::{
+pub use store::{
     decode_state_call, decode_state_reply, encode_state_call, encode_state_reply, StateCall,
     StateReply,
 };
@@ -46,10 +45,10 @@ pub use catalog::{
 };
 pub use conduit::{ConduitFail, ConduitJob};
 pub use detail::{load_details, DetailQuery, PoolDetail, Quote};
-pub use entity::EntityStore;
 pub use fit::{drop_partial_quotes, export_curve_fit, import_curve_fit, refit_curves, FitReport};
 pub use fit_select::{logistic_outs, poke_choose, poke_formula, select_fit};
 pub use history::BloomScan;
+pub use hooks::install_catalog_hooks;
 pub use logs::Walk;
 pub use metrics::{prometheus_text, publish_summary, status_json};
 pub use rpc::{default_call_rpcs, Rpc, RpcLog};
@@ -58,6 +57,7 @@ pub use state::{
     estimate, refresh_kinds, CurveRecord, ImmutablePut, ImmutableRow, MutableStored, MutableWrite,
     PoolState, QuoteRecord, RefreshReport, StateSummary, TickPage, WatchHit, WorkFail, WorkJob,
 };
+pub use store::EntityStore;
 
 use ipc::HistoryPeer;
 use std::sync::OnceLock;
@@ -178,6 +178,7 @@ where
     S: EntityStore + Clone + 'static,
     P: HistoryPeer + Clone + 'static,
 {
+    install_catalog_hooks();
     if opts.phase == RunPhase::State {
         return state::run(store, peer, opts, stop).await;
     }

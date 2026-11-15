@@ -10,7 +10,7 @@ use model::{
     BlockRecord, HeaderRecord,
 };
 use serde_json::{json, Value};
-use venues::{decode_body, decode_row, encode_body, encode_row, Put, ReceiptBody, VenueRow};
+use store_model::{decode_body, decode_row, encode_body, encode_row, Put, ReceiptBody, VenueRow};
 
 /// `scan_blocks` returns at most this many corpus rows.
 pub const SCAN_PAGE: u64 = 64;

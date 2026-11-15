@@ -6,11 +6,12 @@ use eyre::{eyre, WrapErr};
 use model::{BlockRecord, HeaderRecord};
 use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
-use venues::{
-    decode_state_reply, encode_state_call, CurveRecord, ImmutablePut, ImmutableRow, MutableStored,
-    MutableWrite, PoolState, Put, QuoteRecord, ReceiptBody, StateCall, StateReply, TickPage,
-    VenueRow, WatchHit, WorkFail, WorkJob,
+use store_model::{
+    CurveRecord, ImmutablePut, ImmutableRow, MutableStored, MutableWrite, PoolState, Put,
+    QuoteRecord, ReceiptBody, TickPage, VenueRow, WatchHit, WorkFail, WorkJob,
 };
+
+use crate::wire::{decode_state_reply, encode_state_call, StateCall, StateReply};
 
 use crate::{short_header_range, EntityStore};
 

@@ -114,9 +114,9 @@ The dirty mark clears in the same write as the quoting state when the newest wat
 
 One `ratatoskr` process owns both file sets (`--services db,peer` by default). The peer service is the only dialer.
 
-The database service owns `headers.redb` (the header chain), `corpus.redb` (the corpus), `discovery.redb` (the discovery store), `entities.redb` (the venue catalog), and `work.redb` (the work queue). That is `ratatoskr` with `--services db`. A path ending in `venues.redb` still names that directory. On open, a lone `venues.redb` is renamed to `entities.redb` and its crawl tables move into `discovery.redb`. An `entities.redb` that is already present leaves a sibling `venues.redb` closed.
+The database service owns `headers.redb` (the header chain), `corpus.redb` (the corpus), `discovery.redb` (the discovery store), `entities.redb` (the venue catalog), and `work.redb` (the work queue). That is `ratatoskr` with `--services db`. `store::service::HeaderChain` opens the header chain. `store::service::Corpus` opens the corpus. `store::service::Catalog` opens the discovery store, the venue catalog, and the work queue. A path ending in `venues.redb` still names that directory. On open, a lone `venues.redb` is renamed to `entities.redb` and its crawl tables move into `discovery.redb`. An `entities.redb` that is already present leaves a sibling `venues.redb` closed.
 
-The peer service owns `peers.redb`, the peer directory. That is `ratatoskr` with `--services peer`. A peer-only run opens the peer directory. The default supervisor opens that file before the entity files and stops if the open fails.
+The peer service owns `peers.redb`, the peer directory. `store::service::Peers` opens that file. That is `ratatoskr` with `--services peer`. A peer-only run opens the peer directory. The default supervisor opens that file before the entity files and stops if the open fails.
 
 The venue catalog holds identities, configuration, quoting state, tick books, price curves, pair conduits, quote records, and watch marks. The discovery store holds list cursors, bloom hits, and era1 receipt bytes. The work queue holds leases. Deleting the work queue drops the leases. The pools remain in the venue catalog.
 
@@ -132,7 +132,7 @@ A pool identity with no observation stays version 1. An observation appends the 
 
 The writer opens each database in single-writer mode. One process writes a file. Other processes may open that file read-only and follow its commits. A second writer fails with "Database already open." redb commits through two header slots. Header append, peer sightings, venue commits, hit commits, era1 receipt bytes, state writes, corpus writes, cursor writes, and feed writes use immediate durability.
 
-`peers.redb` stays with the dialer. A peer-only process leaves the entity files closed. An oracles-only process leaves the entity files closed and `store::service::Feeds` opens `feeds.redb`. A spots-only process opens the venue catalog and `store::service::Spots` opens `spots.redb`. It leaves `feeds.redb` closed.
+`store::service::Peers` opens `peers.redb` for the dialer. A peer-only process leaves the entity files closed. An oracles-only process leaves the entity files closed and `store::service::Feeds` opens `feeds.redb`. A spots-only process opens the venue catalog and `store::service::Spots` opens `spots.redb`. It leaves `feeds.redb` closed. `store::service::Pools` replaces `univ3-pools.redb`. That file is not imported into the venue catalog.
 
 ### Sockets
 

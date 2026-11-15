@@ -1,27 +1,35 @@
 //! Storage services.
 //!
 //! [`service`] is the interface a domain crate calls. Those services read and
-//! write [`store_model`] records. `feeds.redb` and `spots.redb` are opened
-//! there. [`LocalStore`] still opens the header chain, the receipt corpus, and
-//! the venue catalog through the crates that hold those files.
+//! write [`store_model`] records. [`LocalStore`] opens the header chain, the
+//! receipt corpus, and the venue catalog through those services.
 
 use alloy_primitives::{Address, B256};
-use chain::HeaderChain;
-use corpus::Corpus;
 use eyre::WrapErr;
 use model::{BlockRecord, HeaderRecord};
+use service::{Catalog, Corpus, HeaderChain};
 use std::path::Path;
 use std::sync::Arc;
-use venues::{Catalog, Put, ReceiptBody, TokenRecord, VenueRow};
+use store_model::{
+    ConduitFail, ConduitJob, CurveRecord, ImmutablePut, ImmutableRow, MutableStored, MutableWrite,
+    PoolState, Put, QuoteRecord, ReceiptBody, StateSummary, TickPage, TokenRecord, VenueRow,
+    WatchHit, WorkFail, WorkJob,
+};
 
+mod entity;
 mod remote;
 mod serve;
 pub mod service;
+mod wire;
 
+pub use entity::EntityStore;
 pub use remote::RemoteStore;
 pub use serve::{db_socket, serve};
 pub use service::{FeedError, Feeds, SpotError, Spots};
-pub use venues::EntityStore;
+pub use wire::{
+    decode_state_call, decode_state_reply, encode_state_call, encode_state_reply, StateCall,
+    StateReply,
+};
 
 const HEADER_BATCH: u64 = 8192;
 /// Block bytes copied out of one corpus read. The table is multiple gigabytes,
@@ -111,7 +119,7 @@ impl LocalStore {
             .ok_or_else(|| eyre::eyre!("venues are not open"))
     }
 
-    pub fn state_summary(&self) -> eyre::Result<venues::StateSummary> {
+    pub fn state_summary(&self) -> eyre::Result<StateSummary> {
         self.catalog_db()?.state_summary()
     }
 
@@ -401,73 +409,66 @@ impl EntityStore for LocalStore {
         limit: u32,
         now: u64,
         lease_for: u64,
-    ) -> eyre::Result<Vec<venues::WorkJob>> {
+    ) -> eyre::Result<Vec<WorkJob>> {
         let catalog = self.catalog_db()?;
         blocking(move || catalog.claim_work(stage, limit, now, lease_for)).await
     }
 
-    async fn finish_work(
-        &self,
-        done: &[(u8, u8, B256)],
-        failed: &[venues::WorkFail],
-    ) -> eyre::Result<()> {
+    async fn finish_work(&self, done: &[(u8, u8, B256)], failed: &[WorkFail]) -> eyre::Result<()> {
         let catalog = self.catalog_db()?;
         let done = done.to_vec();
         let failed = failed.to_vec();
         blocking(move || catalog.finish_work(&done, &failed)).await
     }
 
-    async fn enqueue_work(&self, jobs: &[venues::WorkJob], now: u64) -> eyre::Result<()> {
+    async fn enqueue_work(&self, jobs: &[WorkJob], now: u64) -> eyre::Result<()> {
         let catalog = self.catalog_db()?;
         let jobs = jobs.to_vec();
         blocking(move || catalog.enqueue_work(&jobs, now)).await
     }
 
-    async fn put_immutable(
-        &self,
-        rows: &[venues::ImmutableRow],
-    ) -> eyre::Result<Vec<venues::ImmutablePut>> {
+    async fn put_immutable(&self, rows: &[ImmutableRow]) -> eyre::Result<Vec<ImmutablePut>> {
         let catalog = self.catalog_db()?;
         let rows = rows.to_vec();
         blocking(move || catalog.put_immutable(&rows)).await
     }
 
-    async fn put_mutable(&self, row: &venues::MutableWrite) -> eyre::Result<venues::MutableStored> {
+    async fn put_mutable(&self, row: &MutableWrite) -> eyre::Result<MutableStored> {
         let catalog = self.catalog_db()?;
         let row = row.clone();
         blocking(move || catalog.put_mutable(&row)).await
     }
 
-    async fn put_tick_pages(&self, pages: &[venues::TickPage]) -> eyre::Result<()> {
+    async fn put_tick_pages(&self, pages: &[TickPage]) -> eyre::Result<()> {
         let catalog = self.catalog_db()?;
         let pages = pages.to_vec();
         blocking(move || catalog.put_tick_pages(&pages)).await
     }
 
-    async fn put_curve(&self, curve: &venues::CurveRecord) -> eyre::Result<()> {
+    async fn put_curve(&self, curve: &CurveRecord) -> eyre::Result<()> {
         let catalog = self.catalog_db()?;
         let curve = curve.clone();
         blocking(move || catalog.put_curve(&curve)).await
     }
 
-    async fn put_quote(&self, quote: &venues::QuoteRecord) -> eyre::Result<()> {
+    async fn put_quote(&self, quote: &QuoteRecord) -> eyre::Result<()> {
         let catalog = self.catalog_db()?;
         let quote = quote.clone();
         blocking(move || catalog.put_quote(&quote)).await
     }
 
-    async fn put_quotes(&self, quotes: &[venues::QuoteRecord]) -> eyre::Result<()> {
+    async fn put_quotes(&self, quotes: &[QuoteRecord]) -> eyre::Result<()> {
         let catalog = self.catalog_db()?;
         let quotes = quotes.to_vec();
         blocking(move || catalog.put_quotes(&quotes)).await
     }
 
-    async fn read_state(&self, kind: u8, id: B256) -> eyre::Result<venues::PoolState> {
+    async fn read_state(&self, kind: u8, id: B256) -> eyre::Result<PoolState> {
         let catalog = self.catalog_db()?;
         blocking(move || catalog.read_state(kind, id)).await
     }
 
-    async fn apply_watch(&self, through: u64, hits: &[venues::WatchHit]) -> eyre::Result<()> {
+    async fn apply_watch(&self, through: u64, hits: &[WatchHit]) -> eyre::Result<()> {
         let catalog = self.catalog_db()?;
         let hits = hits.to_vec();
         blocking(move || catalog.apply_watch(through, &hits)).await
@@ -488,7 +489,7 @@ impl EntityStore for LocalStore {
         limit: u32,
         now: u64,
         lease_for: u64,
-    ) -> eyre::Result<Vec<venues::ConduitJob>> {
+    ) -> eyre::Result<Vec<ConduitJob>> {
         let catalog = self.catalog_db()?;
         blocking(move || catalog.claim_conduits(limit, now, lease_for)).await
     }
@@ -497,7 +498,7 @@ impl EntityStore for LocalStore {
         &self,
         done: &[(Address, Address)],
         again: &[(Address, Address)],
-        failed: &[venues::ConduitFail],
+        failed: &[ConduitFail],
     ) -> eyre::Result<()> {
         let catalog = self.catalog_db()?;
         let done = done.to_vec();
@@ -537,7 +538,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
-    use venues::{encode_row, Put, VenueRow, UNI_V3};
+    use store_model::{encode_row, Put, VenueRow, UNI_V3};
 
     struct TempDir(PathBuf);
 

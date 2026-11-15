@@ -160,6 +160,7 @@ struct Owned {
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
+    venues::install_catalog_hooks();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -203,7 +204,7 @@ async fn supervise(args: Args) -> eyre::Result<()> {
     if args.drop_partial_quotes {
         let venues_path = paths.venues.clone();
         let dropped = tokio::task::spawn_blocking(move || {
-            let catalog = venues::Catalog::open(&venues_path)?;
+            let catalog = store::service::Catalog::open(&venues_path)?;
             venues::drop_partial_quotes(&catalog)
         })
         .await
@@ -214,7 +215,7 @@ async fn supervise(args: Args) -> eyre::Result<()> {
     if let Some(path) = args.import_fit.clone() {
         let venues_path = paths.venues.clone();
         let report = tokio::task::spawn_blocking(move || {
-            let catalog = venues::Catalog::open(&venues_path)?;
+            let catalog = store::service::Catalog::open(&venues_path)?;
             venues::import_curve_fit(&catalog, &path)
         })
         .await
@@ -231,7 +232,7 @@ async fn supervise(args: Args) -> eyre::Result<()> {
     if args.refit {
         let venues_path = paths.venues.clone();
         let wrote = tokio::task::spawn_blocking(move || {
-            let catalog = venues::Catalog::open(&venues_path)?;
+            let catalog = store::service::Catalog::open(&venues_path)?;
             venues::refit_curves(&catalog)
         })
         .await
@@ -246,7 +247,7 @@ async fn supervise(args: Args) -> eyre::Result<()> {
         let urls = resolve_rpcs(&args.rpc, true)?;
         let venues_path = paths.venues.clone();
         let (report, built) = tokio::task::spawn_blocking(move || {
-            let catalog = venues::Catalog::open(&venues_path)?;
+            let catalog = store::service::Catalog::open(&venues_path)?;
             let rpc = venues::Rpc::new(urls)?;
             let report = venues::refresh_kinds(&catalog, &rpc, &kinds)?;
             let built = catalog.drain_conduits()?;
@@ -263,7 +264,7 @@ async fn supervise(args: Args) -> eyre::Result<()> {
     if let Some(out) = args.export_fit.clone() {
         let venues_path = paths.venues.clone();
         let report = tokio::task::spawn_blocking(move || {
-            let catalog = venues::Catalog::open(&venues_path)?;
+            let catalog = store::service::Catalog::open(&venues_path)?;
             venues::export_curve_fit(&catalog, &out)
         })
         .await
@@ -293,7 +294,7 @@ async fn supervise(args: Args) -> eyre::Result<()> {
         if args.drop_empty {
             let venues_path = paths.venues.clone();
             let dropped = tokio::task::spawn_blocking(move || {
-                let catalog = venues::Catalog::open(&venues_path)?;
+                let catalog = store::service::Catalog::open(&venues_path)?;
                 catalog.drop_empty_pools()
             })
             .await
@@ -319,7 +320,7 @@ async fn supervise(args: Args) -> eyre::Result<()> {
             let venues_path = paths.venues.clone();
             let listed = venues::read_fill_ids(&sample_dir)?;
             let (removed, left) = tokio::task::spawn_blocking(move || {
-                let catalog = venues::Catalog::open(&venues_path)?;
+                let catalog = store::service::Catalog::open(&venues_path)?;
                 catalog.trim_listed(target, &listed)
             })
             .await
@@ -351,7 +352,7 @@ async fn supervise(args: Args) -> eyre::Result<()> {
         }
     }
     if args.summarize {
-        let catalog = venues::Catalog::open(&paths.venues)?;
+        let catalog = store::service::Catalog::open(&paths.venues)?;
         let summary = catalog.state_summary()?;
         println!("identities {}", summary.identities);
         println!("immutable {}", summary.immutable);
@@ -943,9 +944,9 @@ fn open_owned(services: &Services, pipelines: &Pipelines, paths: &Paths) -> eyre
 fn default_paths() -> eyre::Result<Paths> {
     Ok(Paths {
         peers: directory::default_path(),
-        headers: chain::HeaderChain::default_path(),
-        corpus: corpus::Corpus::default_path(),
-        venues: venues::Catalog::default_path(),
+        headers: store::service::HeaderChain::default_path(),
+        corpus: store::service::Corpus::default_path(),
+        venues: store::service::Catalog::default_path(),
         peer_socket: peer::socket_path()?,
         db_socket: store::db_socket()?,
         feeds: store::service::Feeds::default_path(),

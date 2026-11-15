@@ -1,18 +1,13 @@
-//! Store operations venue and ingest code can name.
-//!
-//! The implementation lives in `store`. The trait is here so those crates can
-//! take it without a dependency cycle.
+//! Store operations a caller can name without opening the files.
 
 use alloy_primitives::{Address, B256};
-use model::{BlockRecord, HeaderRecord};
 
-use crate::catalog::TokenRecord;
-use crate::conduit::{ConduitFail, ConduitJob};
-use crate::state::{
-    CurveRecord, ImmutablePut, ImmutableRow, MutableStored, MutableWrite, PoolState, QuoteRecord,
-    TickPage, WatchHit, WorkFail, WorkJob,
+use model::{BlockRecord, HeaderRecord};
+use store_model::{
+    ConduitFail, ConduitJob, CurveRecord, ImmutablePut, ImmutableRow, MutableStored, MutableWrite,
+    PoolState, Put, QuoteRecord, ReceiptBody, TickPage, TokenRecord, VenueRow, WatchHit, WorkFail,
+    WorkJob,
 };
-use crate::{Put, ReceiptBody, VenueRow};
 
 #[allow(async_fn_in_trait)]
 pub trait EntityStore: Send + Sync {

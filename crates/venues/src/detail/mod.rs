@@ -122,12 +122,7 @@ pub struct BitmapWord {
     pub bits: U256,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TickWord {
-    pub tick: i32,
-    pub liquidity_gross: u128,
-    pub liquidity_net: i128,
-}
+pub use store_model::TickWord;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Concentrated {

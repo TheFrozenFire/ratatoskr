@@ -524,7 +524,7 @@ dependencies = [
  "model",
  "serde",
  "serde_json",
- "venues",
+ "store-model",
 ]
 
 [[package]]
@@ -1124,11 +1124,7 @@ dependencies = [
 name = "chain"
 version = "0.1.0"
 dependencies = [
- "alloy-primitives",
- "eyre",
- "ipc",
- "model",
- "redb",
+ "store",
 ]
 
 [[package]]
@@ -1356,9 +1352,7 @@ dependencies = [
  "alloy-eips",
  "alloy-primitives",
  "eyre",
- "ipc",
  "model",
- "redb",
  "reth-ethereum-primitives",
  "zstd",
 ]
@@ -1778,11 +1772,9 @@ dependencies = [
 name = "directory"
 version = "0.1.0"
 dependencies = [
- "eyre",
- "ipc",
- "redb",
  "reth-network-peers",
- "tracing",
+ "store",
+ "store-model",
 ]
 
 [[package]]
@@ -3312,6 +3304,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "serde",
+ "store-model",
 ]
 
 [[package]]
@@ -5406,21 +5399,19 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "api",
- "chain",
- "corpus",
  "eyre",
  "ipc",
  "model",
  "num-bigint",
  "oracles",
  "redb",
+ "reth-network-peers",
  "routing",
  "serde_json",
  "store-model",
  "thiserror",
  "tokio",
  "tracing",
- "venues",
 ]
 
 [[package]]
@@ -5428,7 +5419,9 @@ name = "store-model"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "eyre",
  "num-bigint",
+ "reth-network-peers",
 ]
 
 [[package]]
@@ -5478,6 +5471,7 @@ dependencies = [
  "routing",
  "searcher",
  "simulate",
+ "store",
  "tracing",
  "trade",
  "venues",
@@ -6014,9 +6008,9 @@ dependencies = [
  "corpus",
  "discover",
  "eyre",
- "ipc",
  "model",
- "redb",
+ "store",
+ "store-model",
  "tracing",
 ]
 
@@ -6110,10 +6104,11 @@ dependencies = [
  "num-integer",
  "num-rational",
  "num-traits",
- "redb",
  "reqwest 0.12.28",
  "routing",
  "serde_json",
+ "store",
+ "store-model",
  "tokio",
  "tracing",
  "zstd",

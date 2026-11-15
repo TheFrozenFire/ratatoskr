@@ -1,14 +1,7 @@
-//! Row bytes for pool state, tick pages, curves, quotes, and work jobs.
+//! Row bytes for a pool detail.
 
-use super::{
-    clip_error, tick_key, CurveRecord, MutableView, MutableWrite, QuoteRecord, TickPage, WorkJob,
-    TICK_PAGES,
-};
-use crate::detail::{
-    BitmapWord, Concentrated, CurveCoin, CurvePool, MetricBin, MetricPool, TickWord,
-};
+use crate::detail::{BitmapWord, Concentrated, CurveCoin, CurvePool, MetricBin, MetricPool};
 use alloy_primitives::{Address, B256, U256};
-use redb::{ReadableTable, TableDefinition};
 
 struct Reader<'a> {
     bytes: &'a [u8],
@@ -37,10 +30,6 @@ impl<'a> Reader<'a> {
         Ok(self.take(1)?[0])
     }
 
-    fn u16(&mut self) -> Result<u16, String> {
-        Ok(u16::from_le_bytes(self.take(2)?.try_into().unwrap()))
-    }
-
     fn u32(&mut self) -> Result<u32, String> {
         Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
     }
@@ -57,10 +46,6 @@ impl<'a> Reader<'a> {
         Ok(u128::from_le_bytes(self.take(16)?.try_into().unwrap()))
     }
 
-    fn i128(&mut self) -> Result<i128, String> {
-        Ok(i128::from_le_bytes(self.take(16)?.try_into().unwrap()))
-    }
-
     fn addr(&mut self) -> Result<Address, String> {
         Ok(Address::from_slice(self.take(20)?))
     }
@@ -71,11 +56,6 @@ impl<'a> Reader<'a> {
 
     fn word(&mut self) -> Result<U256, String> {
         Ok(U256::from_be_slice(self.take(32)?))
-    }
-
-    fn bytes(&mut self) -> Result<Vec<u8>, String> {
-        let len = self.u32()? as usize;
-        Ok(self.take(len)?.to_vec())
     }
 
     fn finish(&self) -> Result<(), String> {
@@ -113,11 +93,6 @@ pub(super) fn push_addr(out: &mut Vec<u8>, value: Address) {
 
 pub(super) fn push_word(out: &mut Vec<u8>, value: U256) {
     out.extend_from_slice(&value.to_be_bytes::<32>());
-}
-
-pub(super) fn push_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
-    push_u32(out, u32::try_from(bytes.len()).unwrap_or(u32::MAX));
-    out.extend_from_slice(bytes);
 }
 
 pub(super) fn push_option_u32(out: &mut Vec<u8>, value: Option<u32>) {
@@ -611,329 +586,4 @@ pub(super) fn decode_metric(immutable: &[u8], body: &[u8]) -> Result<MetricPool,
         bins,
         flags,
     })
-}
-
-pub(super) fn encode_mutable(row: &MutableWrite, generation: u64) -> Vec<u8> {
-    let mut out = vec![1];
-    push_u64(&mut out, row.block);
-    push_u64(&mut out, generation);
-    out.extend_from_slice(row.bitmap.as_slice());
-    push_u32(&mut out, row.tick_count);
-    push_u8(&mut out, u8::from(row.truncated));
-    match row.next_scan {
-        Some(value) => {
-            push_u8(&mut out, 1);
-            push_i32(&mut out, value);
-        }
-        None => push_u8(&mut out, 0),
-    }
-    push_bytes(&mut out, &row.body);
-    out
-}
-
-pub(super) fn decode_mutable(bytes: &[u8]) -> eyre::Result<MutableView> {
-    let view = decode_mutable_parts(bytes).map_err(|err| eyre::eyre!(err))?;
-    Ok(view)
-}
-
-pub(super) fn decode_mutable_parts(bytes: &[u8]) -> Result<MutableView, String> {
-    let mut reader = Reader::new(bytes);
-    if reader.u8()? != 1 {
-        return Err("mutable".into());
-    }
-    let block = reader.u64()?;
-    let generation = reader.u64()?;
-    let bitmap = reader.hash()?;
-    let tick_count = reader.u32()?;
-    let truncated = reader.u8()? != 0;
-    let next_scan = if reader.u8()? == 1 {
-        Some(reader.i32()?)
-    } else {
-        None
-    };
-    let body = reader.bytes()?;
-    reader.finish()?;
-    Ok(MutableView {
-        block,
-        generation,
-        bitmap,
-        tick_count,
-        truncated,
-        next_scan,
-        body,
-    })
-}
-
-pub(super) fn encode_dirty(block: u64, class: u8) -> Vec<u8> {
-    let mut out = vec![1];
-    push_u64(&mut out, block);
-    push_u8(&mut out, class);
-    out
-}
-
-pub(super) fn decode_dirty(bytes: &[u8]) -> eyre::Result<(u64, u8)> {
-    let mut reader = Reader::new(bytes);
-    if reader.u8().map_err(|err| eyre::eyre!(err))? != 1 {
-        return Err(eyre::eyre!("dirty"));
-    }
-    let block = reader.u64().map_err(|err| eyre::eyre!(err))?;
-    let class = reader.u8().map_err(|err| eyre::eyre!(err))?;
-    reader.finish().map_err(|err| eyre::eyre!(err))?;
-    Ok((block, class))
-}
-
-pub(super) fn encode_tick_page(page: &TickPage) -> eyre::Result<Vec<u8>> {
-    let mut out = vec![1];
-    push_u64(&mut out, page.generation);
-    push_u32(&mut out, page.ticks.len() as u32);
-    for tick in &page.ticks {
-        push_i32(&mut out, tick.tick);
-        push_u128(&mut out, tick.liquidity_gross);
-        out.extend_from_slice(&tick.liquidity_net.to_le_bytes());
-    }
-    Ok(out)
-}
-
-pub(super) fn tick_page_generation(bytes: &[u8]) -> eyre::Result<u64> {
-    let mut reader = Reader::new(bytes);
-    if reader.u8().map_err(|err| eyre::eyre!(err))? != 1 {
-        return Err(eyre::eyre!("tick page"));
-    }
-    reader.u64().map_err(|err| eyre::eyre!(err))
-}
-
-pub(super) fn encode_curve(curve: &CurveRecord) -> Vec<u8> {
-    let mut out = vec![1];
-    push_u32(&mut out, curve.version);
-    push_u64(&mut out, curve.generation);
-    push_bytes(&mut out, &curve.payload);
-    out
-}
-
-pub(super) fn encode_quote(quote: &QuoteRecord) -> Vec<u8> {
-    let mut out = vec![1];
-    push_u32(&mut out, quote.version);
-    push_u64(&mut out, quote.generation);
-    push_u64(&mut out, quote.block);
-    push_bytes(&mut out, &quote.payload);
-    out
-}
-
-pub(super) fn decode_quote_record(kind: u8, id: B256, bytes: &[u8]) -> eyre::Result<QuoteRecord> {
-    let mut reader = Reader::new(bytes);
-    if reader.u8().map_err(|err| eyre::eyre!(err))? != 1 {
-        return Err(eyre::eyre!("quote"));
-    }
-    let version = reader.u32().map_err(|err| eyre::eyre!(err))?;
-    let generation = reader.u64().map_err(|err| eyre::eyre!(err))?;
-    let block = reader.u64().map_err(|err| eyre::eyre!(err))?;
-    let payload = reader.bytes().map_err(|err| eyre::eyre!(err))?;
-    reader.finish().map_err(|err| eyre::eyre!(err))?;
-    Ok(QuoteRecord {
-        kind,
-        id,
-        generation,
-        version,
-        block,
-        payload,
-    })
-}
-
-pub(crate) fn decode_curve_record(kind: u8, id: B256, bytes: &[u8]) -> eyre::Result<CurveRecord> {
-    let mut reader = Reader::new(bytes);
-    if reader.u8().map_err(|err| eyre::eyre!(err))? != 1 {
-        return Err(eyre::eyre!("curve"));
-    }
-    let version = reader.u32().map_err(|err| eyre::eyre!(err))?;
-    let generation = reader.u64().map_err(|err| eyre::eyre!(err))?;
-    let payload = reader.bytes().map_err(|err| eyre::eyre!(err))?;
-    reader.finish().map_err(|err| eyre::eyre!(err))?;
-    Ok(CurveRecord {
-        kind,
-        id,
-        generation,
-        version,
-        payload,
-    })
-}
-
-pub(super) fn encode_job(job: &WorkJob) -> Vec<u8> {
-    let error = clip_error(&job.error);
-    let mut out = vec![2];
-    push_u64(&mut out, job.lease_until);
-    push_u32(&mut out, job.attempt);
-    push_u64(&mut out, job.not_before);
-    push_u64(&mut out, job.generation);
-    push_i32(&mut out, job.tick_cursor);
-    push_u8(&mut out, job.class);
-    push_u64(&mut out, job.priority);
-    let bytes = error.as_bytes();
-    let len = u16::try_from(bytes.len()).unwrap_or(u16::MAX);
-    out.extend_from_slice(&len.to_le_bytes());
-    out.extend_from_slice(&bytes[..len as usize]);
-    out
-}
-
-pub(super) fn decode_job(key: &[u8], bytes: &[u8]) -> eyre::Result<WorkJob> {
-    if key.len() != 34 {
-        return Err(eyre::eyre!("work key"));
-    }
-    let mut reader = Reader::new(bytes);
-    let tag = reader.u8().map_err(|err| eyre::eyre!(err))?;
-    if tag != 1 && tag != 2 {
-        return Err(eyre::eyre!("work"));
-    }
-    let lease_until = reader.u64().map_err(|err| eyre::eyre!(err))?;
-    let attempt = reader.u32().map_err(|err| eyre::eyre!(err))?;
-    let not_before = reader.u64().map_err(|err| eyre::eyre!(err))?;
-    let generation = reader.u64().map_err(|err| eyre::eyre!(err))?;
-    let tick_cursor = reader.i32().map_err(|err| eyre::eyre!(err))?;
-    let class = reader.u8().map_err(|err| eyre::eyre!(err))?;
-    let priority = if tag == 2 {
-        reader.u64().map_err(|err| eyre::eyre!(err))?
-    } else {
-        0
-    };
-    let len = reader.u16().map_err(|err| eyre::eyre!(err))? as usize;
-    let error = reader.take(len).map_err(|err| eyre::eyre!(err))?.to_vec();
-    reader.finish().map_err(|err| eyre::eyre!(err))?;
-    Ok(WorkJob {
-        stage: key[0],
-        kind: key[1],
-        id: B256::from_slice(&key[2..]),
-        lease_until,
-        attempt,
-        not_before,
-        generation,
-        tick_cursor,
-        class,
-        priority,
-        error: String::from_utf8_lossy(&error).into_owned(),
-    })
-}
-
-pub(super) fn word8(bytes: &[u8]) -> eyre::Result<[u8; 8]> {
-    bytes
-        .try_into()
-        .map_err(|_| eyre::eyre!("mismatch counter"))
-}
-
-pub(super) fn read_optional(
-    read: &redb::ReadTransaction,
-    table: TableDefinition<&[u8], &[u8]>,
-    key: &[u8; 33],
-) -> eyre::Result<Option<Vec<u8>>> {
-    let table = match read.open_table(table) {
-        Ok(table) => table,
-        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
-        Err(err) => return Err(err.into()),
-    };
-    Ok(table
-        .get(key.as_slice())?
-        .map(|value| value.value().to_vec()))
-}
-
-pub(super) fn read_tick_words(
-    read: &redb::ReadTransaction,
-    kind: u8,
-    id: B256,
-) -> eyre::Result<Vec<TickWord>> {
-    let table = match read.open_table(TICK_PAGES) {
-        Ok(table) => table,
-        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
-        Err(err) => return Err(err.into()),
-    };
-    let start = tick_key(kind, id, 0);
-    let end = tick_key(kind, id, u32::MAX);
-    let mut ticks = Vec::new();
-    for item in table.range::<&[u8]>(start.as_slice()..=end.as_slice())? {
-        let (_key, value) = item?;
-        ticks.extend(decode_tick_words(value.value())?);
-    }
-    ticks.sort_by_key(|tick| tick.tick);
-    Ok(ticks)
-}
-
-pub(super) fn decode_tick_words(bytes: &[u8]) -> eyre::Result<Vec<TickWord>> {
-    let mut reader = Reader::new(bytes);
-    if reader.u8().map_err(|err| eyre::eyre!(err))? != 1 {
-        return Err(eyre::eyre!("tick page"));
-    }
-    let _generation = reader.u64().map_err(|err| eyre::eyre!(err))?;
-    let n = reader.u32().map_err(|err| eyre::eyre!(err))? as usize;
-    let mut ticks = Vec::with_capacity(n);
-    for _ in 0..n {
-        ticks.push(TickWord {
-            tick: reader.i32().map_err(|err| eyre::eyre!(err))?,
-            liquidity_gross: reader.u128().map_err(|err| eyre::eyre!(err))?,
-            liquidity_net: reader.i128().map_err(|err| eyre::eyre!(err))?,
-        });
-    }
-    Ok(ticks)
-}
-
-pub(super) fn restamp_ticks(
-    table: &mut redb::Table<'_, &[u8], &[u8]>,
-    kind: u8,
-    id: B256,
-    generation: u64,
-) -> eyre::Result<()> {
-    let start = tick_key(kind, id, 0);
-    let end = tick_key(kind, id, u32::MAX);
-    let mut rows = Vec::new();
-    for item in table.range::<&[u8]>(start.as_slice()..=end.as_slice())? {
-        let (key, value) = item?;
-        rows.push((key.value().to_vec(), value.value().to_vec()));
-    }
-    for (key, value) in rows {
-        let mut ticks = decode_tick_words(&value)?;
-        ticks.sort_by_key(|tick| tick.tick);
-        let bytes = encode_tick_page(&TickPage {
-            kind,
-            id,
-            page: u32::from_be_bytes(key[33..].try_into().unwrap()),
-            generation,
-            ticks,
-        })?;
-        table.insert(key.as_slice(), bytes.as_slice())?;
-    }
-    Ok(())
-}
-
-pub(super) fn stride_pick(ids: &[(u8, B256)], remove: usize) -> Vec<(u8, B256)> {
-    if remove == 0 || ids.is_empty() {
-        return Vec::new();
-    }
-    if remove >= ids.len() {
-        return ids.to_vec();
-    }
-    let mut out = Vec::with_capacity(remove);
-    let mut acc = 0_usize;
-    for id in ids {
-        acc += remove;
-        if acc >= ids.len() {
-            acc -= ids.len();
-            out.push(*id);
-        }
-    }
-    out
-}
-
-pub(super) fn delete_prefix(
-    table: &mut redb::Table<'_, &[u8], &[u8]>,
-    prefix: &[u8; 33],
-) -> eyre::Result<()> {
-    let mut start = [0u8; 37];
-    start[..33].copy_from_slice(prefix);
-    let mut end = start;
-    end[33..].copy_from_slice(&u32::MAX.to_be_bytes());
-    let mut keys = Vec::new();
-    for item in table.range::<&[u8]>(start.as_slice()..=end.as_slice())? {
-        let (key, _) = item?;
-        keys.push(key.value().to_vec());
-    }
-    for key in keys {
-        table.remove(key.as_slice())?;
-    }
-    Ok(())
 }

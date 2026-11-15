@@ -17,4 +17,5 @@ routing.workspace = true
 searcher.workspace = true
 simulate.workspace = true
 trade.workspace = true
+store.workspace = true
 venues.workspace = true
