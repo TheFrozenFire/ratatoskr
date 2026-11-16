@@ -7,18 +7,18 @@
 //! input. A custodial wrap has no chords: it pays one token out for one token
 //! in, at any size. A route is a sequence of these edges.
 //!
-//! [`optimize`] bisects the basket count. A count `Q` asks each output for
-//! `Q` times its weight. The slope books are prepared once for that search.
-//! The search walks routes from the outputs back to
-//! the inputs and books one net input on each edge. Two routes that share an
-//! edge book one tender, and the quote is [`routing::quote`] on that net.
-//! The count is the largest one whose inputs fit the amounts.
+//! [`optimize`] funds the basket in one fill. A pace asks each output for that
+//! many times its weight. Each slice buys that pace on the steepest residual
+//! route into every output that is still at the minimum, then reads the cost
+//! backward. Two routes that share an edge book one tender, and the quote is
+//! [`routing::quote`] on that net. The count is the last pace whose inputs fit.
 //!
 //! Gas is the sum of the gas units of the actions whose chords receive input.
 //! The same action is charged once. The objective is the basket count. A gas
 //! ceiling drops a candidate that would pass it. The allocator does not read
 //! a venue kind.
 
+mod fund;
 mod solve;
 
 #[cfg(test)]
@@ -29,7 +29,6 @@ use std::fmt;
 
 use action::Action;
 use num_bigint::BigInt;
-use num_traits::Zero;
 
 pub use action::Token;
 
@@ -188,66 +187,7 @@ impl std::error::Error for OptimizeError {}
 pub fn optimize(problem: &Problem) -> Result<Plan, OptimizeError> {
     check(problem)?;
     let _books = solve::hold(problem);
-    let bound = solve::output_bound(problem);
-    if bound.is_zero() {
-        return Ok(zero_plan(problem));
-    }
-    Ok(search_bisect(problem, &bound))
-}
-
-/// Bisect the ask. A one-output probe that falls short has run the routes out.
-/// A basket probe that falls short only lowers the high end, because a smaller
-/// ask can fund a larger count.
-fn search_bisect(problem: &Problem, bound: &BigInt) -> Plan {
-    let mut lo = BigInt::from(0);
-    let mut hi = bound + 1;
-    let mut best = zero_plan(problem);
-    while &lo + 1 < hi {
-        let mid = (&lo + &hi) / 2;
-        let Some(plan) = solve::meet(problem, &mid) else {
-            hi = mid;
-            continue;
-        };
-        if plan.count >= mid {
-            lo = plan.count.clone();
-            if lo >= hi {
-                hi = &lo + 1;
-            }
-            best = plan;
-        } else if problem.outputs.len() == 1 {
-            if plan.count > lo {
-                lo = plan.count.clone();
-                best = plan;
-            }
-            hi = &lo + 1;
-        } else if plan.count > lo {
-            lo = plan.count.clone();
-            best = plan;
-            hi = mid;
-        } else {
-            hi = mid;
-        }
-    }
-    best
-}
-
-fn zero_plan(problem: &Problem) -> Plan {
-    Plan {
-        count: BigInt::from(0),
-        flows: Vec::new(),
-        spent: problem
-            .inputs
-            .iter()
-            .map(|input| (input.token, BigInt::from(0)))
-            .collect(),
-        received: problem
-            .outputs
-            .iter()
-            .map(|output| (output.token, BigInt::from(0)))
-            .collect(),
-        tenders: Vec::new(),
-        gas: BigInt::from(0),
-    }
+    Ok(fund::fund(problem, None))
 }
 
 fn check(problem: &Problem) -> Result<(), OptimizeError> {
@@ -425,6 +365,11 @@ fn check_route(
         }
         if index > 0 && inputs.contains(&token_in) || inputs.contains(&token_out) {
             return Err(OptimizeError::SecondInput);
+        }
+        if outputs.contains(&token_in)
+            || (outputs.contains(&token_out) && index + 1 != route.edges.len())
+        {
+            return Err(OptimizeError::Cycle);
         }
         previous = Some(token_out);
     }

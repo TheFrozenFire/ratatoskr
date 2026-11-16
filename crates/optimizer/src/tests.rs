@@ -455,10 +455,10 @@ fn a_landing_above_the_direct_edge_is_taken_with_it() {
 }
 
 #[test]
-fn a_landing_segment_of_the_same_slope_beats_the_shorter_tie() {
-    // One unit overshoots the opening chord and lands in a segment of the
-    // same slope. The whole landing segment ties the direct edge's rate and
-    // pays more, so the direct edge stays closed.
+fn the_direct_piece_beats_an_opening_that_truncates() {
+    // The path's opening pays 40 for one source token. The direct chord pays
+    // 10_000 for 100, so the direct chord is filled and the path takes what
+    // remains.
     let problem = problem(
         &[(1, 20_000)],
         &[(3, 1)],
@@ -477,10 +477,31 @@ fn a_landing_segment_of_the_same_slope_beats_the_shorter_tie() {
     funded(&problem, &plan);
     assert_eq!(plan.count, z(2_000_000));
     assert_eq!(spent(&plan, 1), z(20_000));
-    assert!(plan
+    assert_eq!(received(&plan, 3), z(2_000_000));
+    let direct = plan
         .tenders
         .iter()
-        .all(|tender| !is_pool(&tender.action, 1)));
+        .find(|tender| is_pool(&tender.action, 1))
+        .expect("direct");
+    let hop = plan
+        .tenders
+        .iter()
+        .find(|tender| is_pool(&tender.action, 2))
+        .expect("first hop");
+    let opening = plan
+        .tenders
+        .iter()
+        .find(|tender| is_pool(&tender.action, 3))
+        .expect("opening");
+    let landing = plan
+        .tenders
+        .iter()
+        .find(|tender| is_pool(&tender.action, 4))
+        .expect("landing");
+    assert_eq!(direct.input, z(100));
+    assert_eq!(hop.input, z(19_900));
+    assert_eq!(opening.input, z(4));
+    assert_eq!(landing.input, z(198_996));
 }
 
 #[test]
@@ -594,14 +615,16 @@ fn leftover_intermediate_balance_funds_the_other_path() {
 }
 
 #[test]
-fn a_count_above_the_curves_returns_the_reachable_plan() {
+fn a_count_above_the_curve_is_not_a_plan() {
     let problem = problem(
         &[(1, 100)],
         &[(2, 1)],
         vec![conduit(1, 2, vec![segment(10, 10, 1)])],
         vec![vec![0]],
     );
-    let plan = crate::solve::meet(&problem, &z(40)).expect("reachable");
+    assert!(crate::solve::meet(&problem, &z(40)).is_none());
+    let plan = optimize(&problem).expect("curve");
+    funded(&problem, &plan);
     assert_eq!(plan.count, z(10));
     assert_eq!(spent(&plan, 1), z(10));
     assert_eq!(received(&plan, 2), z(10));
@@ -660,7 +683,7 @@ fn a_shared_conduit_is_one_tender_and_both_outputs_are_funded() {
 }
 
 #[test]
-fn an_output_that_is_also_an_intermediate_keeps_its_own_amount() {
+fn a_route_that_spends_an_output_is_rejected() {
     let problem = problem(
         &[(1, 10)],
         &[(2, 1), (3, 1)],
@@ -670,12 +693,7 @@ fn an_output_that_is_also_an_intermediate_keeps_its_own_amount() {
         ],
         vec![vec![0], vec![0, 1]],
     );
-    let plan = optimize(&problem).expect("curves");
-    funded(&problem, &plan);
-    assert_eq!(plan.count, z(5));
-    assert!(received(&plan, 2) >= z(5));
-    assert!(received(&plan, 3) >= z(5));
-    assert_eq!(spent(&plan, 1), z(10));
+    assert_eq!(optimize(&problem), Err(OptimizeError::Cycle));
 }
 
 #[test]
@@ -1198,7 +1216,7 @@ fn the_steeper_curve_funds_its_leg_of_the_basket() {
 }
 
 #[test]
-fn one_action_funds_the_count_for_less_gas_than_two_slices() {
+fn equal_slopes_spend_the_earlier_chords() {
     let mut problem = problem(
         &[(1, 10)],
         &[(2, 1)],
@@ -1215,9 +1233,10 @@ fn one_action_funds_the_count_for_less_gas_than_two_slices() {
     let plan = optimize(&problem).expect("curves");
     funded(&problem, &plan);
     assert_eq!(plan.count, z(10));
-    assert_eq!(plan.gas, z(4));
-    assert_eq!(plan.tenders.len(), 1);
-    assert!(is_pool(&plan.tenders[0].action, 3));
+    assert_eq!(plan.gas, z(6));
+    assert_eq!(plan.tenders.len(), 2);
+    assert!(plan.tenders.iter().any(|tender| is_pool(&tender.action, 1)));
+    assert!(plan.tenders.iter().any(|tender| is_pool(&tender.action, 2)));
 }
 
 #[test]
@@ -2022,10 +2041,9 @@ fn one_output_with_a_shared_budget_keeps_the_exhausted_flows() {
     assert_eq!(plan.gas, z(0));
 }
 
-/// Asking for both outputs at once spends the steeper leg and leaves the other at zero.
-/// A smaller ask cuts that leg and funds both. The count is the smaller ask.
+/// Both legs stay on the basket pace. Count 31 needs 11 of the budget.
 #[test]
-fn a_lower_ask_funds_more_of_the_basket() {
+fn the_basket_funds_the_last_pace_both_legs_can_meet() {
     let problem = problem(
         &[(1, 10)],
         &[(2, 1), (3, 1)],
@@ -2035,25 +2053,29 @@ fn a_lower_ask_funds_more_of_the_basket() {
         ],
         vec![vec![0], vec![1]],
     );
-    let high = crate::solve::meet(&problem, &z(100)).expect("high");
-    let low = crate::solve::meet(&problem, &z(30)).expect("low");
-    assert!(low.count > high.count);
+    assert!(crate::solve::meet(&problem, &z(100)).is_none());
+    let low = crate::solve::meet(&problem, &z(30)).expect("pace");
+    funded(&problem, &low);
+    assert_eq!(low.count, z(30));
+    assert_eq!(spent(&low, 1), z(9));
+    assert_eq!(received(&low, 2), z(30));
+    assert_eq!(received(&low, 3), z(30));
     let plan = optimize(&problem).expect("basket");
     funded(&problem, &plan);
     assert_eq!(plan.count, z(30));
-    assert_eq!(spent(&plan, 1), z(10));
-    assert_eq!(received(&plan, 2), z(40));
+    assert_eq!(spent(&plan, 1), z(9));
+    assert_eq!(received(&plan, 2), z(30));
     assert_eq!(received(&plan, 3), z(30));
     assert_eq!(plan.gas, z(0));
     assert_eq!(plan.flows.len(), 2);
     assert_eq!(plan.flows[0].route, 0);
-    assert_eq!(plan.flows[0].input, z(4));
-    assert_eq!(plan.flows[0].output, z(40));
+    assert_eq!(plan.flows[0].input, z(3));
+    assert_eq!(plan.flows[0].output, z(30));
     assert_eq!(plan.flows[1].route, 1);
     assert_eq!(plan.flows[1].input, z(6));
     assert_eq!(plan.flows[1].output, z(30));
     assert_eq!(plan.tenders.len(), 2);
-    assert_eq!(plan.tenders[0].input, z(4));
+    assert_eq!(plan.tenders[0].input, z(3));
     assert_eq!(plan.tenders[1].input, z(6));
 }
 
