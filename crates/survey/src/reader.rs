@@ -5,7 +5,7 @@ use std::time::Instant;
 use alloy_primitives::{Address, B256};
 use routing::SlopeSegment;
 use searcher::{Conduits, Token};
-use venue::{root_address, VenueRow, BALANCER_V2, BALANCER_V3, UNI_V4};
+use venue::{VenueRow, BALANCER_V2, UNI_V4};
 
 use crate::graph::{Graph, PathEnds};
 use crate::source::Source;
@@ -83,61 +83,19 @@ pub(crate) fn catalog_swap_cost(
     cost: &mut NameCost,
 ) -> Result<action::Action, trade::TradeError> {
     let started = Instant::now();
-    let invariant = match key.kind {
-        1..=4 => action::Invariant::Product,
-        5..=10 => action::Invariant::Concentrated,
-        11 | 12 => action::Invariant::Weighted,
-        13 => action::Invariant::Stable,
-        14 => action::Invariant::Bin,
-        _ => action::Invariant::Product,
+    let venue = if matches!(key.kind, UNI_V4 | BALANCER_V2) {
+        let read = Instant::now();
+        let row = source.read_venue(key.kind, B256::from(key.pool));
+        cost.venue_calls += 1;
+        cost.venue_us += read.elapsed().as_micros();
+        row.ok().flatten()
+    } else {
+        None
     };
-    let contract = action::Address::new(contract_of(source, key, cost))?;
-    let action = action::Action::Swap(action::Swap::new(
-        contract, key.pool, token_in, token_out, invariant,
-    )?);
+    let action = venue::swap_action(token_in, token_out, key, venue.as_ref())?;
     cost.calls += 1;
     cost.us += started.elapsed().as_micros();
     Ok(action)
-}
-
-pub(crate) fn contract_of(
-    source: &impl Source,
-    key: &routing::Action,
-    cost: &mut NameCost,
-) -> [u8; 20] {
-    let id = B256::from(key.pool);
-    match key.kind {
-        UNI_V4 | BALANCER_V2 => {
-            let started = Instant::now();
-            let row = source.read_venue(key.kind, id);
-            cost.venue_calls += 1;
-            cost.venue_us += started.elapsed().as_micros();
-            if let Ok(Some(row)) = row {
-                if row.factory != Address::ZERO {
-                    return bytes_of(row.factory);
-                }
-            }
-            root_address(key.kind)
-                .map(bytes_of)
-                .unwrap_or_else(|| low20(key))
-        }
-        BALANCER_V3 => root_address(BALANCER_V3)
-            .map(bytes_of)
-            .unwrap_or_else(|| low20(key)),
-        _ => low20(key),
-    }
-}
-
-fn bytes_of(address: Address) -> [u8; 20] {
-    let mut bytes = [0_u8; 20];
-    bytes.copy_from_slice(address.as_slice());
-    bytes
-}
-
-fn low20(key: &routing::Action) -> [u8; 20] {
-    let mut bytes = [0_u8; 20];
-    bytes.copy_from_slice(&key.pool[12..]);
-    bytes
 }
 
 pub(crate) fn keep_disjoint<S: Source>(

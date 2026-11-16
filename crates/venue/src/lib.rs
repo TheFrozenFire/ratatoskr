@@ -15,6 +15,7 @@ mod import;
 mod ingest;
 mod lists;
 mod logs;
+mod name;
 mod state;
 mod tokens;
 
@@ -34,12 +35,14 @@ pub use fit::{
 pub use history::BloomScan;
 pub use hooks::install_catalog_hooks;
 pub use logs::Walk;
+pub use name::swap_action;
 pub use state::{
     curve_for_snapshot, drop_empty_pools, refresh_kinds, CurveRecord, ImmutablePut, ImmutableRow,
     MutableStored, MutableWrite, PoolState, RefreshReport, StateSummary, TickPage, WatchHit,
     WorkFail, WorkJob,
 };
 pub use store::{ChainStore, ConduitStore, CorpusStore, DiscoveryStore, TokenStore, VenueStore};
+pub use tokens::native_wrapper;
 
 use peer::HistoryPeer;
 use std::sync::OnceLock;

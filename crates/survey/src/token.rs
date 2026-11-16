@@ -15,14 +15,6 @@ pub(crate) fn token_of(address: Address) -> Token {
     Token(raw)
 }
 
-/// The non-zero token whose record points at native ETH.
-pub(crate) fn wrapper(records: &[TokenRecord]) -> Option<Token> {
-    records
-        .iter()
-        .find(|row| row.address != Address::ZERO && row.wraps == Some(Address::ZERO))
-        .map(|row| token_of(row.address))
-}
-
 pub(crate) fn labels(records: &[TokenRecord]) -> Vec<Known> {
     let mut out = Vec::new();
     if records.iter().any(|row| row.address == Address::ZERO) {

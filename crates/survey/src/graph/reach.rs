@@ -2,9 +2,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use searcher::Token;
-
-use super::{native, targets, Graph};
+use searcher::{Graph, Token, NATIVE};
 
 /// Tokens with a directed path into the hub set, out of it, both, or neither.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -34,7 +32,7 @@ pub(crate) fn reach_of(
         all.insert(*token);
     }
     for token in all {
-        if hub_set.contains(&token) || native(token) {
+        if hub_set.contains(&token) || token == NATIVE {
             continue;
         }
         match (
@@ -48,23 +46,6 @@ pub(crate) fn reach_of(
         }
     }
     reach
-}
-
-/// Who has a conduit into this token, in token order.
-pub(crate) fn incoming(graph: &Graph) -> HashMap<Token, Vec<Token>> {
-    let mut incoming: HashMap<Token, Vec<Token>> = HashMap::new();
-    let mut sources: Vec<Token> = graph.out.keys().copied().collect();
-    sources.sort();
-    for from in sources {
-        for next in targets(graph, from) {
-            incoming.entry(next).or_default().push(from);
-        }
-    }
-    for preds in incoming.values_mut() {
-        preds.sort();
-        preds.dedup();
-    }
-    incoming
 }
 
 /// The one hub among this token's counterparties, when there is exactly one.
@@ -113,7 +94,7 @@ pub(super) fn forward(graph: &Graph) -> HashMap<Token, Vec<Token>> {
     let mut sources: Vec<Token> = graph.out.keys().copied().collect();
     sources.sort();
     for token in sources {
-        out.insert(token, targets(graph, token));
+        out.insert(token, graph.targets(token));
     }
     out
 }

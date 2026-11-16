@@ -12,14 +12,18 @@
 //! Native ETH is the zero address. The wrap pays one wrapped token per native
 //! token at any size.
 //!
-//! The caller supplies the conduits. This crate does not open the catalog and
-//! does not allocate the flow. A curve is kept only when a route uses it.
+//! The caller supplies the conduits. [`Graph`] records those conduits so a
+//! caller can rank hubs and list neighbors. This crate does not open the
+//! catalog and does not allocate the flow. A curve is kept only when a route
+//! uses it.
 
+mod graph;
 mod query;
 mod route;
 mod walk;
 
 pub use action::{Token, NATIVE};
+pub use graph::{hub_census, incoming, Graph, HubCensus, HubScore, Link, Meta};
 pub use query::{prepare, Query, SearchError, Trade, NEIGHBOR_LIMIT, WALK_DEPTH};
 pub use route::{execute, Conduits, Curve, Edge, Route, RouteSet};
 

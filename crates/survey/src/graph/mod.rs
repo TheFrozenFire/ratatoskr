@@ -1,85 +1,19 @@
-//! Directed conduit graph used to choose trades.
+//! Sample paths chosen from the conduit graph.
 //!
-//! An edge is one stored pair conduit. Liquidity is the sum of its piece
-//! widths. Distance counts conduits. The first hub in the list wins when two
-//! hubs are the same distance away.
+//! The graph and the hub ranking live in [`searcher`]. Distance counts
+//! conduits. The first hub in the list wins when two hubs are the same
+//! distance away.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use searcher::Token;
 
-mod census;
 mod reach;
 mod select;
 
-pub(crate) use census::{hub_census, HubCensus};
-pub(crate) use reach::{incoming, reach_of, sole_hub, HubReach};
+pub(crate) use reach::{reach_of, sole_hub, HubReach};
+pub(crate) use searcher::{hub_census, incoming, Graph, HubCensus};
 pub(crate) use select::{select, Deep, PathEnds, Selection};
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Link {
-    pub to: Token,
-    pub capacity: u128,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Meta {
-    pub kinds: u32,
-    pub capacity: u128,
-}
-
-#[derive(Clone, Debug, Default)]
-pub(crate) struct Graph {
-    pub out: HashMap<Token, Vec<Link>>,
-    index: HashMap<(Token, Token), Meta>,
-}
-
-impl Graph {
-    pub(crate) fn push(&mut self, from: Token, to: Token, kinds: u32, capacity: u128) {
-        self.index.insert((from, to), Meta { kinds, capacity });
-        self.out
-            .entry(from)
-            .or_default()
-            .push(Link { to, capacity });
-    }
-
-    pub(crate) fn degree(&self, token: Token) -> usize {
-        self.out.get(&token).map(|links| links.len()).unwrap_or(0)
-    }
-
-    pub(crate) fn capacity(&self, token: Token) -> u128 {
-        self.out
-            .get(&token)
-            .map(|links| {
-                links
-                    .iter()
-                    .fold(0_u128, |sum, link| sum.saturating_add(link.capacity))
-            })
-            .unwrap_or(0)
-    }
-
-    pub(crate) fn meta(&self, from: Token, to: Token) -> Option<Meta> {
-        self.index.get(&(from, to)).copied()
-    }
-
-    pub(crate) fn neighbors(&self, token: Token) -> HashSet<Token> {
-        self.out
-            .get(&token)
-            .map(|links| links.iter().map(|link| link.to).collect())
-            .unwrap_or_default()
-    }
-}
-
-fn targets(graph: &Graph, token: Token) -> Vec<Token> {
-    let mut tokens = graph
-        .out
-        .get(&token)
-        .map(|links| links.iter().map(|link| link.to).collect::<Vec<_>>())
-        .unwrap_or_default();
-    tokens.sort();
-    tokens.dedup();
-    tokens
-}
 
 fn rebuild(parent: &HashMap<Token, Token>, from: Token, to: Token) -> Vec<Token> {
     let mut path = vec![to];
@@ -90,10 +24,6 @@ fn rebuild(parent: &HashMap<Token, Token>, from: Token, to: Token) -> Vec<Token>
     }
     path.reverse();
     path
-}
-
-fn native(token: Token) -> bool {
-    token.0 == [0_u8; 20]
 }
 
 #[cfg(test)]

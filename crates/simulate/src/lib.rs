@@ -1,12 +1,17 @@
 //! The numeraire value of a finished plan, and the pools a measurement keeps.
 //!
-//! A price is the numeraire value of one raw unit. [`score`] applies those
-//! prices to the amounts the plan spent and the amounts it received. The gas
-//! is copied onto the score. This crate does not search, does not allocate,
-//! and does not open the catalog. The trading-set ledger quotes one direction
-//! from the reserves it was opened on.
+//! A price is the numeraire value of one raw unit. It is the first slope of
+//! the pair conduit into the numeraire, or the best product through one hub
+//! when that conduit is absent. [`score`] applies those prices to the amounts
+//! the plan spent and the amounts it received. The gas is copied onto the
+//! score. This crate does not search, does not allocate, and does not open
+//! the catalog. The trading-set ledger quotes one direction from the reserves
+//! it was opened on.
 
 pub mod depletion;
+mod spot;
+
+pub use spot::spot_price;
 
 use std::collections::{BTreeMap, BTreeSet};
 

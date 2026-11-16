@@ -4,10 +4,10 @@ use std::cell::Cell;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
-use searcher::Token;
+use searcher::{Token, NATIVE};
 
-use super::reach::{forward, incoming, sole_hub, walk, Walk};
-use super::{native, rebuild, targets, Graph};
+use super::reach::{forward, sole_hub, walk, Walk};
+use super::{incoming, rebuild, Graph};
 
 #[derive(Clone, Debug)]
 pub(crate) struct PathEnds {
@@ -257,7 +257,7 @@ fn collect(
     let mut tendrils = Vec::new();
     for token in tokens {
         let dist = walk.dist[&token];
-        if dist == 0 || hubs.contains(&token) || native(token) {
+        if dist == 0 || hubs.contains(&token) || token == NATIVE {
             continue;
         }
         if !small(graph, indegree, token) {
@@ -312,7 +312,7 @@ fn max_dist(
         .iter()
         .filter(|(token, _)| {
             !hubs.contains(token)
-                && !native(**token)
+                && **token != NATIVE
                 && (!small_only || small(graph, indegree, **token))
         })
         .map(|(_, dist)| *dist)
@@ -336,7 +336,7 @@ fn count_reach(
         all.insert(*token);
     }
     for token in all {
-        if hubs.contains(&token) || native(token) {
+        if hubs.contains(&token) || token == NATIVE {
             continue;
         }
         let to = toward.dist.contains_key(&token);
@@ -728,7 +728,7 @@ fn avoiding(ctx: &Ctx<'_>, source: Token, dest: Token, max_edges: usize) -> Reac
         if hops >= max_edges {
             continue;
         }
-        for next in targets(ctx.graph, node) {
+        for next in ctx.graph.targets(node) {
             if ctx.hubs.contains(&next) || parent.contains_key(&next) {
                 continue;
             }
@@ -848,7 +848,7 @@ fn toward_hubs(ctx: &Ctx<'_>, source: Token, max_edges: usize) -> HashMap<Token,
         if hops >= max_edges {
             continue;
         }
-        for next in targets(ctx.graph, node) {
+        for next in ctx.graph.targets(node) {
             if depth.contains_key(&next) {
                 continue;
             }
@@ -1053,7 +1053,7 @@ fn outside_span(graph: &Graph, outside: &[Token]) -> (u64, u32) {
     let mut edges = 0_u64;
     for token in outside {
         let mut nexts = Vec::new();
-        for next in targets(graph, *token) {
+        for next in graph.targets(*token) {
             if set.contains(&next) {
                 edges += 1;
                 nexts.push(next);
@@ -1104,7 +1104,7 @@ fn isolated(
     let mut smalls: Vec<Token> = outside
         .iter()
         .copied()
-        .filter(|token| !native(*token) && small(graph, indegree, *token))
+        .filter(|token| *token != NATIVE && small(graph, indegree, *token))
         .collect();
     smalls.sort_by_key(|token| (graph.capacity(*token), *token));
     smalls.truncate(40);
@@ -1156,7 +1156,7 @@ fn farthest(
         if hops >= 8 {
             continue;
         }
-        for next in targets(graph, node) {
+        for next in graph.targets(node) {
             if parent.contains_key(&next) {
                 continue;
             }

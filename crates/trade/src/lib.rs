@@ -9,8 +9,9 @@
 //! returns the plan.
 //!
 //! The caller names each pool key as an [`Action`]. A custodial wrap is one
-//! unlimited edge, built from native ETH on one side of the wrap curve. This
-//! crate does not read a venue kind and does not open the catalog.
+//! unlimited edge, built from native ETH on one side of the wrap curve. Gas is
+//! this action's units the first time it opens. This crate does not read a
+//! venue kind and does not open the catalog.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -19,7 +20,10 @@ use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
 use optimizer::{optimize, Chord, Curve, Edge, Input, Output, Route};
 
+mod gas;
+
 pub use action::{Action, Token, NATIVE};
+pub use gas::{open_gas, units as gas_units};
 pub use optimizer::{OptimizeError, Plan, Problem};
 pub use routing::SlopeSegment;
 pub use searcher::{Conduits, Query, RouteSet, SearchError};

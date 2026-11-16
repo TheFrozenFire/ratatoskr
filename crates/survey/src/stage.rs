@@ -27,8 +27,9 @@ pub(crate) struct Stage {
 
 pub(crate) fn load<S: Source>(source: &S, spots: &config::Spots) -> eyre::Result<Stage> {
     let records = source.tokens().wrap_err("tokens")?;
-    let wrapped =
-        token::wrapper(&records).ok_or_else(|| eyre::eyre!("the catalog has no wrapper token"))?;
+    let wrapped = venue::native_wrapper(&records)
+        .map(token::token_of)
+        .ok_or_else(|| eyre::eyre!("the catalog has no wrapper token"))?;
     let known = token::labels(&records);
     eprintln!("scanning conduits");
     let survey = scan::survey(source)?;

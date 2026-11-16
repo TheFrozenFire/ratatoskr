@@ -14,6 +14,14 @@ use crate::TokenStore;
 
 const SCAN: usize = 65_536;
 
+/// The non-zero token whose record points at native ETH.
+pub fn native_wrapper(records: &[TokenRecord]) -> Option<Address> {
+    records
+        .iter()
+        .find(|row| row.address != Address::ZERO && row.wraps == Some(Address::ZERO))
+        .map(|row| row.address)
+}
+
 /// Wrapper links from the seed file. An empty symbol leaves a stored symbol.
 pub(crate) async fn write_links<S: TokenStore>(store: &S) -> eyre::Result<()> {
     let mut rows = Vec::new();
