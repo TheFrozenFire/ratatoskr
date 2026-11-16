@@ -1,7 +1,7 @@
 //! What a committed snapshot enqueues next.
 
 use super::{
-    blank_job, concentrated_kind, curve_is_current, curve_job, derive_curve, join_detail, limits,
+    blank_job, concentrated_kind, curve_is_current, curve_job, detail_id, join_detail, limits,
     priority_of, unix_now, CurveRecord, PoolDetail, VenueStore, WorkFail, WorkJob, CLASS_NONE,
     CLASS_TICKS, DIRTY_BAND, STAGE_CURVE, STAGE_MUTABLE, STAGE_TICKS,
 };
@@ -169,13 +169,15 @@ pub(super) async fn after_book<S: VenueStore + crate::ConduitStore>(
 }
 
 /// Choose a curve from local quotes of `detail`.
-pub(crate) fn curve_for_snapshot(
-    detail: &PoolDetail,
-    generation: u64,
-) -> Result<CurveRecord, String> {
-    let mut curve = derive_curve(detail, generation)?;
-    curve.payload = crate::fit::local_curve_payload(detail)?;
-    Ok(curve)
+pub fn curve_for_snapshot(detail: &PoolDetail, generation: u64) -> Result<CurveRecord, String> {
+    let (kind, id) = detail_id(detail)?;
+    Ok(CurveRecord {
+        kind,
+        id,
+        generation,
+        version: super::CURVE_VERSION,
+        payload: crate::fit::local_curve_payload(detail)?,
+    })
 }
 
 pub(crate) fn keep_or_drop(

@@ -74,11 +74,21 @@ pub(crate) fn parse_hex(text: &str) -> BigInt {
     }
 }
 
+static POW10: LazyLock<Vec<BigInt>> = LazyLock::new(|| {
+    (0..=256u32)
+        .map(|exp| BigInt::from(10u32).pow(exp))
+        .collect()
+});
+
 pub(crate) fn pow10(exp: u64) -> BigInt {
     // A quote scale past this is not a token amount. Capping keeps a wild
     // input from asking for 10^(2^32).
     let exp = u32::try_from(exp).unwrap_or(4_096).min(4_096);
-    BigInt::from(10u32).pow(exp)
+    if exp <= 256 {
+        POW10[exp as usize].clone()
+    } else {
+        BigInt::from(10u32).pow(exp)
+    }
 }
 
 pub(crate) fn floor_div(numer: &BigInt, denom: &BigInt) -> BigInt {
@@ -100,10 +110,45 @@ pub(crate) fn context_floor(value: BigDecimal) -> BigDecimal {
     Context::new(prec_80(), RoundingMode::Floor).round_decimal(value)
 }
 
+fn cmp_abs_pow10(n: &BigInt, exp: u64) -> Ordering {
+    let Ok(exp) = u32::try_from(exp) else {
+        return Ordering::Less;
+    };
+    let pow = if exp <= 4_096 {
+        pow10(u64::from(exp))
+    } else {
+        BigInt::from(10u32).pow(exp)
+    };
+    match n.sign() {
+        Sign::Minus => n.abs().cmp(&pow),
+        _ => n.cmp(&pow),
+    }
+}
+
 pub(crate) fn floor_log10_int(n: &BigInt) -> u64 {
-    let text = n.to_str_radix(10);
-    let text = text.trim_start_matches('-');
-    text.len() as u64 - 1
+    if n.is_zero() {
+        return 0;
+    }
+    let bits = n.bits();
+    let mut guess = ((bits - 1) as f64 * std::f64::consts::LOG10_2).floor() as u64;
+    if guess >= bits {
+        guess = bits - 1;
+    }
+    // The bit-length guess can be off. Step until 10^guess <= |n| < 10^(guess+1),
+    // which is the digit count minus one.
+    loop {
+        if cmp_abs_pow10(n, guess) == Ordering::Less {
+            if guess == 0 {
+                return 0;
+            }
+            guess -= 1;
+            continue;
+        }
+        if guess == u64::MAX || cmp_abs_pow10(n, guess + 1) == Ordering::Less {
+            return guess;
+        }
+        guess += 1;
+    }
 }
 
 pub(crate) fn cmp_pow10(numer: &BigInt, denom: &BigInt, exp: i64) -> Ordering {
@@ -187,6 +232,13 @@ pub(crate) fn floor80_ratio(value: &BigRational) -> BigRational {
         return BigRational::zero();
     }
     let dec = round_sig_floor_dec(value.numer(), value.denom(), 80);
+    let (digits, _) = dec.as_bigint_and_exponent();
+    // `round_sig_floor_dec` already keeps 80 significant digits. The decimal
+    // context repeats that floor, and it is a no-op while the coefficient
+    // stays below 10^80.
+    if digits < pow10(80) {
+        return rat_from_decimal(&dec);
+    }
     rat_from_decimal(&context_floor(dec))
 }
 
@@ -292,16 +344,16 @@ pub(crate) fn exp_floor80(t: &BigRational) -> BigRational {
     floor80_ratio(&scale_int(digits, n - 79))
 }
 
-pub(crate) fn rat_pow(base: &BigRational, mut exp: u32) -> BigRational {
-    let mut result = BigRational::one();
-    let mut b = base.clone();
+fn int_pow(base: &BigInt, mut exp: u32) -> BigInt {
+    let mut result = BigInt::one();
+    let mut value = base.clone();
     while exp > 0 {
         if exp & 1 == 1 {
-            result *= &b;
+            result *= &value;
         }
         exp >>= 1;
         if exp > 0 {
-            b = &b * &b;
+            value = &value * &value;
         }
     }
     result
@@ -403,8 +455,21 @@ pub(crate) fn decimal_pow(base: &BigRational, exp: &BigRational) -> BigRational 
         return BigRational::one();
     }
     if let Some(k) = small_u32(exp) {
-        return floor80_ratio(&rat_pow(base, k));
+        // The reduced power and the unreduced power are the same rational.
+        // Skipping the intermediate gcd leaves one 80-digit floor.
+        let numer = int_pow(base.numer(), k);
+        let denom = int_pow(base.denom(), k);
+        return floor80_ratio(&BigRational::new_raw(numer, denom));
     }
+    if &(exp.numer() * 4) == exp.denom() {
+        if let Some(root) = quarter_root(base) {
+            return root;
+        }
+    }
+    decimal_pow_series(base, exp)
+}
+
+fn decimal_pow_series(base: &BigRational, exp: &BigRational) -> BigRational {
     let work = 100u64;
     let base_bd = ratio_bd(base, work);
     let exp_bd = ratio_bd(exp, work);
@@ -414,4 +479,59 @@ pub(crate) fn decimal_pow(base: &BigRational, exp: &BigRational) -> BigRational 
     let ctx = bd_at(work);
     let raised = bd_floor(&ln * &exp_bd, work).exp_with_context(&ctx);
     rat_from_decimal(&bd_floor(raised, 80))
+}
+
+/// `(numer/denom)^(1/4)` at the same 80-digit floor as the log series,
+/// from two integer square roots at 120 guard digits.
+fn quarter_root(base: &BigRational) -> Option<BigRational> {
+    if !base.numer().is_positive() || !base.denom().is_positive() {
+        return None;
+    }
+    const DIGITS: u64 = 120;
+    let scale = pow10(DIGITS * 4);
+    let scaled = (base.numer() * &scale).div_floor(base.denom());
+    if !scaled.is_positive() {
+        return Some(BigRational::zero());
+    }
+    let root = BigInt::from(scaled.magnitude().sqrt().sqrt());
+    Some(floor80_ratio(&BigRational::new(root, pow10(DIGITS))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quarter_root_matches_the_log_series() {
+        let quarter = BigRational::new(BigInt::from(1), BigInt::from(4));
+        let mut bases = vec![
+            BigRational::new(BigInt::from(1), BigInt::from(2)),
+            BigRational::new(BigInt::from(2), BigInt::from(3)),
+            BigRational::new(BigInt::from(3), BigInt::from(4)),
+            BigRational::new(BigInt::from(999), BigInt::from(1000)),
+            BigRational::new(BigInt::from(1000), BigInt::from(1001)),
+            BigRational::new(BigInt::from(5), BigInt::from(2)),
+            BigRational::new(BigInt::from(1), BigInt::from(10).pow(6)),
+            BigRational::from_integer(BigInt::from(10).pow(6)),
+        ];
+        let wad = BigInt::from(10).pow(18);
+        let balance_in = BigInt::from(1000u64) * &wad;
+        let balance_out = BigInt::from(4000u64) * &wad;
+        let fee = BigInt::from(3) * BigInt::from(10).pow(15);
+        let amount = BigInt::from(10).pow(16);
+        let after = floor_div(&(&amount * (&wad - &fee)), &wad);
+        bases.push(floor80_ratio(&BigRational::new(
+            balance_in.clone(),
+            &balance_in + &after,
+        )));
+        bases.push(floor80_ratio(&BigRational::new(
+            balance_out.clone(),
+            &balance_out + &after,
+        )));
+        for base in bases {
+            let root = quarter_root(&base).expect("root");
+            assert_eq!(root, decimal_pow_series(&base, &quarter), "base {base}");
+            assert_eq!(decimal_pow(&base, &quarter), root);
+        }
+    }
 }

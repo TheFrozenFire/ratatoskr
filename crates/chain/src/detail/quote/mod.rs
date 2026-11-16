@@ -45,7 +45,7 @@ impl PoolDetail {
 }
 
 pub use balancer::v3_raw_balance;
-pub use concentrated::concentrated_ladder;
+pub use concentrated::{concentrated_end, concentrated_ladder};
 pub use product::product_fee_pips;
 
 #[cfg(test)]

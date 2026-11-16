@@ -121,7 +121,10 @@ pub(super) fn plan_of(kind: u8, id: B256, state: PoolState) -> PoolPlan {
 }
 
 pub(super) fn bigint_from_u256(value: U256) -> BigInt {
-    BigInt::from_bytes_be(Sign::Plus, &value.to_be_bytes::<32>())
+    match u128::try_from(value) {
+        Ok(small) => BigInt::from(small),
+        Err(_) => BigInt::from_bytes_le(Sign::Plus, &value.to_le_bytes::<32>()),
+    }
 }
 
 pub(super) fn pairs_of(detail: &PoolDetail) -> Vec<(Address, Address)> {
@@ -202,7 +205,7 @@ pub(super) fn fill_local(sample: &mut Sample, quote: &Quote) {
 
 /// Knots `estimate` accepts on one direction: the origin, the sampling ceiling,
 /// and the grid fractions of that ceiling. A fraction `estimate` refuses is omitted.
-pub(crate) fn direction_knots(
+pub fn direction_knots(
     detail: &PoolDetail,
     curve: &crate::state::CurveRecord,
     token_in: Address,
@@ -213,12 +216,35 @@ pub(crate) fn direction_knots(
     if max_in.is_zero() {
         return knots;
     }
+    if curve.version != crate::state::CURVE_VERSION {
+        return knots;
+    }
+    let Ok(fit) = fitter::decode_fit(&curve.payload) else {
+        return knots;
+    };
+    if fit.reason != 0 {
+        return knots;
+    }
+    let Some(direction) = fit
+        .directions
+        .iter()
+        .find(|item| item.token_in == token_in && item.token_out == token_out)
+    else {
+        return knots;
+    };
     for (_, amount) in grid_amounts(max_in) {
-        let Ok(quote) = super::estimate(curve, curve.generation, token_in, token_out, amount)
-        else {
+        let input = bigint_from_u256(amount);
+        if amount.is_zero() {
+            knots.push((input, BigInt::from(0)));
+            continue;
+        }
+        let Some(output) = fitter::eval_formula(&direction.formula, &input) else {
             continue;
         };
-        knots.push((bigint_from_u256(amount), bigint_from_u256(quote.amount_out)));
+        if super::estimate::accept_output(&output).is_err() {
+            continue;
+        }
+        knots.push((input, output));
     }
     knots
 }

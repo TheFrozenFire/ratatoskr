@@ -5,7 +5,7 @@
 //! is this document: a reason, then one stored formula per direction.
 
 use alloy_primitives::Address;
-use num_bigint::BigInt;
+use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
 use num_traits::Zero;
 
@@ -298,9 +298,62 @@ fn push_bool(out: &mut Vec<u8>, value: bool) {
 }
 
 fn push_bi(out: &mut Vec<u8>, value: &BigInt) {
+    let mut stack = [0u8; 33];
+    if let Some(len) = signed_be(value, &mut stack) {
+        push_u32(out, len as u32);
+        out.extend_from_slice(&stack[..len]);
+        return;
+    }
     let bytes = value.to_signed_bytes_be();
     push_u32(out, u32::try_from(bytes.len()).unwrap_or(u32::MAX));
     out.extend_from_slice(&bytes[..bytes.len().min(u32::MAX as usize)]);
+}
+
+/// Two's-complement big-endian bytes, matching `BigInt::to_signed_bytes_be`
+/// for a magnitude of at most 256 bits.
+fn signed_be(value: &BigInt, dest: &mut [u8; 33]) -> Option<usize> {
+    let mut le = [0u8; 32];
+    let mut len = 0usize;
+    for (index, digit) in value.magnitude().iter_u64_digits().enumerate() {
+        if index == 4 {
+            return None;
+        }
+        le[index * 8..index * 8 + 8].copy_from_slice(&digit.to_le_bytes());
+        len = index * 8 + 8;
+    }
+    if len == 0 {
+        dest[0] = 0;
+        return Some(1);
+    }
+    while len > 0 && le[len - 1] == 0 {
+        len -= 1;
+    }
+    if len == 0 {
+        dest[0] = 0;
+        return Some(1);
+    }
+    for index in 0..len {
+        dest[index] = le[len - 1 - index];
+    }
+    let first = dest[0];
+    let minimal_negative =
+        first == 0x80 && dest[1..len].iter().all(|byte| *byte == 0) && value.sign() == Sign::Minus;
+    if first > 0x7f && !minimal_negative {
+        dest.copy_within(0..len, 1);
+        dest[0] = 0;
+        len += 1;
+    }
+    if value.sign() == Sign::Minus {
+        let mut carry = true;
+        for byte in dest[..len].iter_mut().rev() {
+            *byte = !*byte;
+            if carry {
+                *byte = byte.wrapping_add(1);
+                carry = *byte == 0;
+            }
+        }
+    }
+    Some(len)
 }
 
 fn push_bis(out: &mut Vec<u8>, values: &[BigInt]) {
@@ -326,11 +379,28 @@ fn push_rat(out: &mut Vec<u8>, value: &BigRational) {
 fn read_bi(cursor: &mut Cursor<'_>) -> Result<BigInt, String> {
     let len = cursor.u32()? as usize;
     let bytes = cursor.take(len)?;
+    Ok(bigint_signed_be(bytes))
+}
+
+/// Inverse of `to_signed_bytes_be` for the widths a stored fit uses.
+/// A value that fits in `i128`, and a positive value whose encoding is a
+/// leading zero plus 16 magnitude bytes, is built from that integer.
+fn bigint_signed_be(bytes: &[u8]) -> BigInt {
     if bytes.is_empty() {
-        Ok(BigInt::zero())
-    } else {
-        Ok(BigInt::from_signed_bytes_be(bytes))
+        return BigInt::zero();
     }
+    if bytes.len() <= 16 {
+        let fill = if bytes[0] & 0x80 == 0 { 0 } else { 0xff };
+        let mut wide = [fill; 16];
+        wide[16 - bytes.len()..].copy_from_slice(bytes);
+        return BigInt::from(i128::from_be_bytes(wide));
+    }
+    if bytes.len() == 17 && bytes[0] == 0 {
+        let mut wide = [0u8; 16];
+        wide.copy_from_slice(&bytes[1..]);
+        return BigInt::from(u128::from_be_bytes(wide));
+    }
+    BigInt::from_signed_bytes_be(bytes)
 }
 
 fn read_bis(cursor: &mut Cursor<'_>) -> Result<Vec<BigInt>, String> {
@@ -966,4 +1036,41 @@ pub fn decode_fit(payload: &[u8]) -> Result<FitPayload, String> {
     }
     cursor.done()?;
     Ok(FitPayload { reason, directions })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stack_signed_bytes_match_bigint() {
+        let mut values = vec![
+            BigInt::from(0),
+            BigInt::from(1),
+            BigInt::from(127),
+            BigInt::from(128),
+            BigInt::from(255),
+            BigInt::from(256),
+            BigInt::from(-1),
+            BigInt::from(-128),
+            BigInt::from(-129),
+            BigInt::from(10).pow(18),
+            BigInt::from(10).pow(24),
+            -BigInt::from(10).pow(18),
+            (BigInt::from(1) << 128) - 1,
+            BigInt::from(1) << 128,
+            (BigInt::from(1) << 255) - 1,
+            BigInt::from(1) << 255,
+        ];
+        let high: BigInt = (BigInt::from(1) << 255) - BigInt::from(1);
+        values.push(-high);
+        let wide: BigInt = BigInt::from(1) << 128;
+        values.push(-wide);
+        let mut dest = [0u8; 33];
+        for value in values {
+            let len = signed_be(&value, &mut dest).expect("fits");
+            assert_eq!(&dest[..len], value.to_signed_bytes_be().as_slice());
+            assert_eq!(bigint_signed_be(&dest[..len]), value);
+        }
+    }
 }

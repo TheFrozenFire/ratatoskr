@@ -6,6 +6,7 @@
 
 mod book;
 mod crypto;
+mod crypto_wide;
 mod product;
 mod score;
 mod share;

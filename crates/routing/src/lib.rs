@@ -11,6 +11,9 @@
 pub mod basket;
 pub mod hub;
 pub mod latency;
+mod pay;
+
+pub use pay::{chord_pay, quote_marginals};
 
 use num_bigint::BigInt;
 use num_traits::Zero;
@@ -57,9 +60,7 @@ pub struct SlopeSegment {
 
 /// Steeper first. Equal slopes of different actions stay in action order.
 fn slope_order(left: &SlopeSegment, right: &SlopeSegment) -> Ordering {
-    let left_cross = &left.output * &right.width;
-    let right_cross = &right.output * &left.width;
-    match left_cross.cmp(&right_cross) {
+    match pay::cross_cmp(&left.output, &right.width, &right.output, &left.width) {
         Ordering::Greater => Ordering::Less,
         Ordering::Less => Ordering::Greater,
         Ordering::Equal => left.action.cmp(&right.action),
@@ -67,13 +68,73 @@ fn slope_order(left: &SlopeSegment, right: &SlopeSegment) -> Ordering {
 }
 
 fn same_slope(left: &SlopeSegment, right: &SlopeSegment) -> bool {
-    &left.output * &right.width == &right.output * &left.width
+    pay::cross_cmp(&left.output, &right.width, &right.output, &left.width) == Ordering::Equal
 }
 
 /// Knots are cumulative `(input, output)`, including the origin when the
 /// caller has one. A later secant that rises is lowered until its slope no
 /// longer rises. A zero-output segment is omitted.
 pub fn segments_from_knots(knots: &[(BigInt, BigInt)], action: Action) -> Vec<SlopeSegment> {
+    if let Some(out) = segments_wide(knots, action) {
+        return out;
+    }
+    segments_bigint(knots, action)
+}
+
+fn segments_wide(knots: &[(BigInt, BigInt)], action: Action) -> Option<Vec<SlopeSegment>> {
+    use alloy_primitives::U256;
+    let mut inputs = Vec::with_capacity(knots.len() + 1);
+    let mut outputs = Vec::with_capacity(knots.len() + 1);
+    inputs.push(U256::ZERO);
+    outputs.push(U256::ZERO);
+    for (input, output) in knots {
+        let input = pay::u256_of(input)?;
+        let mut output = pay::u256_of(output)?;
+        let last_in = *inputs.last()?;
+        let last_out = *outputs.last()?;
+        if input <= last_in {
+            continue;
+        }
+        if output < last_out {
+            output = last_out;
+        }
+        inputs.push(input);
+        outputs.push(output);
+    }
+    let mut previous: Option<(U256, U256)> = None;
+    let mut out = Vec::new();
+    for index in 1..inputs.len() {
+        let width = inputs[index] - inputs[index - 1];
+        if width.is_zero() {
+            continue;
+        }
+        let mut output = if outputs[index] < outputs[index - 1] {
+            U256::ZERO
+        } else {
+            outputs[index] - outputs[index - 1]
+        };
+        if let Some((previous_width, previous_output)) = previous {
+            let rise = pay::wide_mul(output, previous_width);
+            let keep = pay::wide_mul(previous_output, width);
+            if rise > keep {
+                output = pay::mul_div_u256(previous_output, width, previous_width)?;
+            }
+        }
+        outputs[index] = outputs[index - 1].checked_add(output)?;
+        previous = Some((width, output));
+        if output.is_zero() {
+            continue;
+        }
+        out.push(SlopeSegment {
+            width: pay::bigint_of(width),
+            output: pay::bigint_of(output),
+            action,
+        });
+    }
+    Some(out)
+}
+
+fn segments_bigint(knots: &[(BigInt, BigInt)], action: Action) -> Vec<SlopeSegment> {
     let mut points = vec![(BigInt::from(0), BigInt::from(0))];
     for (input, output) in knots {
         let Some(last) = points.last() else {
@@ -144,24 +205,7 @@ pub fn merge(members: &[Vec<SlopeSegment>]) -> Vec<SlopeSegment> {
 
 /// Chord pay along the sorted segments. Input past the last output adds nothing.
 pub fn quote(segments: &[SlopeSegment], input: &BigInt) -> BigInt {
-    if input <= &BigInt::from(0) {
-        return BigInt::from(0);
-    }
-    let mut left = input.clone();
-    let mut paid = BigInt::from(0);
-    for segment in segments {
-        if left.is_zero() || segment.width.is_zero() {
-            break;
-        }
-        let taken = if left < segment.width {
-            left.clone()
-        } else {
-            segment.width.clone()
-        };
-        paid += (&segment.output * &taken) / &segment.width;
-        left -= taken;
-    }
-    paid
+    pay::quote_segments(segments, input)
 }
 
 /// Least input whose forward quote meets `target`. A target above the tail is

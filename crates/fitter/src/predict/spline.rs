@@ -95,17 +95,25 @@ pub(crate) fn hermite_on_span(
     m1: &BigRational,
     dt: &BigInt,
 ) -> BigRational {
-    let t = BigRational::new(dt.clone(), span.clone());
-    let one = BigRational::one();
-    let two = BigRational::from_integer(BigInt::from(2));
-    let three = BigRational::from_integer(BigInt::from(3));
-    let one_t = &one - &t;
-    let h00 = (&one + &two * &t) * &one_t * &one_t;
-    let h10 = &t * &one_t * &one_t;
-    let h01 = &t * &t * (&three - &two * &t);
-    let h11 = &t * &t * (&t - &one);
-    let span_r = BigRational::from_integer(span.clone());
-    h00 * y0 + h10 * &span_r * m0 + h01 * y1 + h11 * span_r * m1
+    // Same cubic as the reduced basis, over one denominator.
+    let gap = span - dt;
+    let gap2 = &gap * &gap;
+    let span2 = span * span;
+    let span3 = &span2 * span;
+    let dt2 = dt * dt;
+    let h00 = (span + dt * 2) * &gap2;
+    let h01 = &dt2 * (span * 3 - dt * 2);
+    let h10 = dt * &gap2;
+    let h11 = &dt2 * (dt - span);
+    let (y0n, y0d) = (y0.numer(), y0.denom());
+    let (y1n, y1d) = (y1.numer(), y1.denom());
+    let (m0n, m0d) = (m0.numer(), m0.denom());
+    let (m1n, m1d) = (m1.numer(), m1.denom());
+    let numer = &h00 * y0n * y1d * m0d * m1d
+        + &h10 * m0n * span * y0d * y1d * m1d
+        + &h01 * y1n * y0d * m0d * m1d
+        + &h11 * m1n * span * y0d * y1d * m0d;
+    BigRational::new_raw(numer, &span3 * y0d * y1d * m0d * m1d)
 }
 
 pub(crate) fn chord_quote(knots: &[(BigInt, BigInt)]) -> Option<Predict> {
@@ -319,4 +327,46 @@ pub(crate) fn added_residual(
         }
         Some(trunc_rat(&value))
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn basis(
+        y0: &BigRational,
+        y1: &BigRational,
+        span: &BigInt,
+        m0: &BigRational,
+        m1: &BigRational,
+        dt: &BigInt,
+    ) -> BigRational {
+        let t = BigRational::new(dt.clone(), span.clone());
+        let one = BigRational::one();
+        let two = BigRational::from_integer(BigInt::from(2));
+        let three = BigRational::from_integer(BigInt::from(3));
+        let one_t = &one - &t;
+        let h00 = (&one + &two * &t) * &one_t * &one_t;
+        let h10 = &t * &one_t * &one_t;
+        let h01 = &t * &t * (&three - &two * &t);
+        let h11 = &t * &t * (&t - &one);
+        let span_r = BigRational::from_integer(span.clone());
+        h00 * y0 + h10 * &span_r * m0 + h01 * y1 + h11 * span_r * m1
+    }
+
+    #[test]
+    fn hermite_span_matches_the_reduced_basis() {
+        let y0 = BigRational::new(BigInt::from(3), BigInt::from(2));
+        let y1 = BigRational::from_integer(BigInt::from(9));
+        let m0 = BigRational::new(BigInt::from(5), BigInt::from(4));
+        let m1 = BigRational::new(BigInt::from(-2), BigInt::from(7));
+        let span = BigInt::from(1000);
+        for dt in [0, 1, 17, 500, 999, 1000] {
+            let dt = BigInt::from(dt);
+            assert_eq!(
+                hermite_on_span(&y0, &y1, &span, &m0, &m1, &dt),
+                basis(&y0, &y1, &span, &m0, &m1, &dt)
+            );
+        }
+    }
 }

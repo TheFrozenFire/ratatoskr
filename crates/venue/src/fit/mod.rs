@@ -11,11 +11,13 @@ mod estimate;
 mod formula;
 mod plan;
 
-pub use curve::refit_curves;
+pub use curve::{local_curve_payload, refit_curves, selector_inputs};
+pub use domain::{domain_max, grid_amounts, GRID};
 pub use estimate::estimate;
+pub use plan::direction_knots;
 
-pub(crate) use curve::{curve_payload, local_curve_payload};
-pub(crate) use plan::{direction_knots, has_trade_size, trade_capacity};
+pub(crate) use curve::curve_payload;
+pub(crate) use plan::{has_trade_size, trade_capacity};
 
 #[cfg(test)]
 mod tests;

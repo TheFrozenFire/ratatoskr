@@ -27,13 +27,17 @@ pub use catalog::{
 pub use chain::detail::{load_details, DetailQuery, PoolDetail, Quote};
 pub use chain::{custodial_wrap, default_call_rpcs, root_address, Rpc, RpcLog};
 pub use conduit::{drain_conduits, trim_listed, ConduitFail, ConduitJob};
-pub use fit::{estimate, refit_curves};
+pub use fit::{
+    direction_knots, domain_max, estimate, grid_amounts, local_curve_payload, refit_curves,
+    selector_inputs, GRID,
+};
 pub use history::BloomScan;
 pub use hooks::install_catalog_hooks;
 pub use logs::Walk;
 pub use state::{
-    drop_empty_pools, refresh_kinds, CurveRecord, ImmutablePut, ImmutableRow, MutableStored,
-    MutableWrite, PoolState, RefreshReport, StateSummary, TickPage, WatchHit, WorkFail, WorkJob,
+    curve_for_snapshot, drop_empty_pools, refresh_kinds, CurveRecord, ImmutablePut, ImmutableRow,
+    MutableStored, MutableWrite, PoolState, RefreshReport, StateSummary, TickPage, WatchHit,
+    WorkFail, WorkJob,
 };
 pub use store::{ChainStore, ConduitStore, CorpusStore, DiscoveryStore, TokenStore, VenueStore};
 

@@ -94,12 +94,23 @@ pub(super) fn product_fit(
     }
 }
 
+/// State JSON and one labeled direction per ordered pair, as `fitter::choose` receives them.
+pub fn selector_inputs(detail: &PoolDetail) -> Result<Vec<(Value, Value)>, String> {
+    let state = state_json(detail);
+    let mut out = Vec::new();
+    for (token_in, token_out) in pairs_of(detail) {
+        let built = direction_of(detail, token_in, token_out);
+        out.push((state.clone(), selector_direction(&built)));
+    }
+    Ok(out)
+}
+
 /// Choose each direction from local quotes of `detail`.
 ///
 /// The selector's label field is named `chain_out`. The amounts written there
 /// are `PoolDetail::quote` results. When no direction has a positive local
 /// quote, the payload is the structural product formula or a skip reason.
-pub(crate) fn local_curve_payload(detail: &PoolDetail) -> Result<Vec<u8>, String> {
+pub fn local_curve_payload(detail: &PoolDetail) -> Result<Vec<u8>, String> {
     let state = state_json(detail);
     let pairs = pairs_of(detail);
     let mut fits = Vec::new();

@@ -132,7 +132,10 @@ pub(super) fn quote_crypto(
 }
 
 fn bigint_from_u256(value: U256) -> BigInt {
-    BigInt::from_bytes_be(Sign::Plus, &value.to_be_bytes::<32>())
+    match u128::try_from(value) {
+        Ok(small) => BigInt::from(small),
+        Err(_) => BigInt::from_bytes_le(Sign::Plus, &value.to_le_bytes::<32>()),
+    }
 }
 
 fn u256_from_bigint(value: &BigInt) -> Result<U256, String> {
@@ -221,6 +224,35 @@ pub(super) fn get_d(xp: &[U256], amp: U256) -> Result<U256, String> {
     Err("invariant".into())
 }
 
+/// Positive root of `y² + (b − d) y − c = 0`, the fixed point of one Newton step.
+/// The iteration still starts from this value and stops on the same `|Δ| ≤ 1` test.
+fn y_seed(b: U256, d: U256, c: U256) -> U256 {
+    let abs_b = if b >= d { b - d } else { d - b };
+    let Some(square) = abs_b.checked_mul(abs_b) else {
+        return d;
+    };
+    let Some(four_c) = c.checked_mul(U256::from(4u8)) else {
+        return d;
+    };
+    let Some(disc) = square.checked_add(four_c) else {
+        return d;
+    };
+    let root = disc.root(2);
+    let Some(sum) = (if b >= d {
+        root.checked_sub(abs_b)
+    } else {
+        root.checked_add(abs_b)
+    }) else {
+        return d;
+    };
+    let y = sum / U256::from(2u8);
+    if y.is_zero() {
+        d
+    } else {
+        y
+    }
+}
+
 pub(super) fn get_y(
     i: usize,
     j: usize,
@@ -243,7 +275,7 @@ pub(super) fn get_y(
     }
     c = mul_div(c, d, ann.checked_mul(n).ok_or("ann")?)?;
     let b = s.checked_add(d / ann).ok_or("b")?;
-    let mut y = d;
+    let mut y = y_seed(b, d, c);
     for _ in 0..255 {
         let prev = y;
         let numerator = y.checked_mul(y).ok_or("y")?.checked_add(c).ok_or("y")?;

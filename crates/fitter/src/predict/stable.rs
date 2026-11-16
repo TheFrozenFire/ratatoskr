@@ -1,10 +1,25 @@
 //! Stableswap invariant quotes.
 
 use super::share::*;
-use num_bigint::BigInt;
+use alloy_primitives::{Uint, U256};
+use num_bigint::{BigInt, Sign};
 use num_traits::{One, Signed, ToPrimitive, Zero};
 
+type U512 = Uint<512, 8>;
+
+enum Fitted<T> {
+    Ready(T),
+    Spill,
+}
+
 pub(crate) fn stable_d(xp: &[BigInt], amp: &BigInt) -> Option<BigInt> {
+    match stable_d_fitted(xp, amp) {
+        Fitted::Ready(value) => value,
+        Fitted::Spill => stable_d_slow(xp, amp),
+    }
+}
+
+fn stable_d_slow(xp: &[BigInt], amp: &BigInt) -> Option<BigInt> {
     let n_len = xp.len();
     if n_len < 2 || !amp.is_positive() {
         return None;
@@ -43,6 +58,20 @@ pub(crate) fn stable_d(xp: &[BigInt], amp: &BigInt) -> Option<BigInt> {
 }
 
 pub(crate) fn stable_y(
+    i: i64,
+    j: i64,
+    x: &BigInt,
+    xp: &[BigInt],
+    amp: &BigInt,
+    d: &BigInt,
+) -> Option<BigInt> {
+    match stable_y_fitted(i, j, x, xp, amp, d) {
+        Fitted::Ready(value) => value,
+        Fitted::Spill => stable_y_slow(i, j, x, xp, amp, d),
+    }
+}
+
+fn stable_y_slow(
     i: i64,
     j: i64,
     x: &BigInt,
@@ -172,4 +201,248 @@ pub(crate) fn stable_swap_out(
         dy -= taken;
     }
     Some(dy)
+}
+
+fn stable_d_fitted(xp: &[BigInt], amp: &BigInt) -> Fitted<Option<BigInt>> {
+    match stable_d_result(xp, amp) {
+        Ok(value) => Fitted::Ready(value),
+        Err(stop) => stop,
+    }
+}
+
+fn stable_d_result(xp: &[BigInt], amp: &BigInt) -> Result<Option<BigInt>, Fitted<Option<BigInt>>> {
+    let n_len = xp.len();
+    if n_len < 2 || !amp.is_positive() {
+        return Ok(None);
+    }
+    let n = U256::from(n_len);
+    let mut total = U256::ZERO;
+    let mut xs = Vec::with_capacity(n_len);
+    for value in xp {
+        let value = positive_u256(value)?;
+        total = match total.checked_add(value) {
+            Some(total) => total,
+            None => return Err(Fitted::Spill),
+        };
+        xs.push(value);
+    }
+    if total.is_zero() {
+        return Ok(None);
+    }
+    let amp = positive_u256(amp)?;
+    let Some(ann) = amp.checked_mul(n) else {
+        return Err(Fitted::Spill);
+    };
+    let mut d = total;
+    for _ in 0..255 {
+        let mut d_p = d;
+        for value in &xs {
+            let Some(den) = value.checked_mul(n) else {
+                return Err(Fitted::Spill);
+            };
+            d_p = ready_u256(mul_div(d_p, d, den))?;
+        }
+        let previous = d;
+        let Some(ann_total) = ann.checked_mul(total) else {
+            return Err(Fitted::Spill);
+        };
+        let Some(d_p_n) = d_p.checked_mul(n) else {
+            return Err(Fitted::Spill);
+        };
+        let Some(sum) = ann_total.checked_add(d_p_n) else {
+            return Err(Fitted::Spill);
+        };
+        let Some(ann_less) = ann.checked_sub(U256::from(1u8)) else {
+            return Ok(None);
+        };
+        let Some(left) = ann_less.checked_mul(d) else {
+            return Err(Fitted::Spill);
+        };
+        let Some(n_more) = n.checked_add(U256::from(1u8)) else {
+            return Err(Fitted::Spill);
+        };
+        let Some(right) = n_more.checked_mul(d_p) else {
+            return Err(Fitted::Spill);
+        };
+        let Some(den) = left.checked_add(right) else {
+            return Err(Fitted::Spill);
+        };
+        if den.is_zero() {
+            return Ok(None);
+        }
+        let (quot, _) = sum.widening_mul(d).div_rem(widen(den));
+        d = match narrow(quot) {
+            Some(quot) => quot,
+            None => return Err(Fitted::Spill),
+        };
+        if within_one(d, previous) {
+            return Ok(Some(bigint_of(d)));
+        }
+    }
+    Ok(None)
+}
+
+fn stable_y_fitted(
+    i: i64,
+    j: i64,
+    x: &BigInt,
+    xp: &[BigInt],
+    amp: &BigInt,
+    d: &BigInt,
+) -> Fitted<Option<BigInt>> {
+    match stable_y_result(i, j, x, xp, amp, d) {
+        Ok(value) => Fitted::Ready(value),
+        Err(stop) => stop,
+    }
+}
+
+fn stable_y_result(
+    i: i64,
+    j: i64,
+    x: &BigInt,
+    xp: &[BigInt],
+    amp: &BigInt,
+    d: &BigInt,
+) -> Result<Option<BigInt>, Fitted<Option<BigInt>>> {
+    let n_len = xp.len() as i64;
+    if i == j || i < 0 || j < 0 || i >= n_len || j >= n_len {
+        return Ok(None);
+    }
+    let amp = positive_u256(amp)?;
+    let d = positive_u256(d)?;
+    let x = positive_u256(x)?;
+    let n = U256::from(n_len as u64);
+    let Some(ann) = amp.checked_mul(n) else {
+        return Err(Fitted::Spill);
+    };
+    let mut c = d;
+    let mut s = U256::ZERO;
+    for (k, balance) in xp.iter().enumerate() {
+        if k as i64 == j {
+            continue;
+        }
+        let x_k = if k as i64 == i {
+            x
+        } else {
+            positive_u256(balance)?
+        };
+        s = match s.checked_add(x_k) {
+            Some(s) => s,
+            None => return Err(Fitted::Spill),
+        };
+        let Some(den) = x_k.checked_mul(n) else {
+            return Err(Fitted::Spill);
+        };
+        c = ready_u256(mul_div(c, d, den))?;
+    }
+    let Some(ann_n) = ann.checked_mul(n) else {
+        return Err(Fitted::Spill);
+    };
+    c = ready_u256(mul_div(c, d, ann_n))?;
+    let b = match s.checked_add(ready_u256(div_small(d, ann))?) {
+        Some(b) => b,
+        None => return Err(Fitted::Spill),
+    };
+    let mut y = d;
+    for _ in 0..255 {
+        let previous = y;
+        let Some(two_y) = y.checked_mul(U256::from(2u8)) else {
+            return Err(Fitted::Spill);
+        };
+        let Some(sum) = two_y.checked_add(b) else {
+            return Err(Fitted::Spill);
+        };
+        if sum <= d {
+            return Ok(None);
+        }
+        let den = sum - d;
+        let numer = match y.widening_mul(y).checked_add(widen(c)) {
+            Some(numer) => numer,
+            None => return Err(Fitted::Spill),
+        };
+        let (quot, _) = numer.div_rem(widen(den));
+        y = match narrow(quot) {
+            Some(quot) => quot,
+            None => return Err(Fitted::Spill),
+        };
+        if within_one(y, previous) {
+            return Ok(Some(bigint_of(y)));
+        }
+    }
+    Ok(None)
+}
+
+fn positive_u256(value: &BigInt) -> Result<U256, Fitted<Option<BigInt>>> {
+    if value.sign() == Sign::Minus || value.is_zero() {
+        return Err(Fitted::Ready(None));
+    }
+    u256_of(value).ok_or(Fitted::Spill)
+}
+
+fn ready_u256(value: Fitted<U256>) -> Result<U256, Fitted<Option<BigInt>>> {
+    match value {
+        Fitted::Ready(value) => Ok(value),
+        Fitted::Spill => Err(Fitted::Spill),
+    }
+}
+
+fn mul_div(left: U256, right: U256, den: U256) -> Fitted<U256> {
+    if den.is_zero() {
+        return Fitted::Ready(U256::ZERO);
+    }
+    let (quot, _) = left.widening_mul(right).div_rem(widen(den));
+    match narrow(quot) {
+        Some(quot) => Fitted::Ready(quot),
+        None => Fitted::Spill,
+    }
+}
+
+fn div_small(numer: U256, den: U256) -> Fitted<U256> {
+    if den.is_zero() {
+        return Fitted::Ready(U256::ZERO);
+    }
+    Fitted::Ready(numer / den)
+}
+
+fn within_one(left: U256, right: U256) -> bool {
+    let gap = if left > right {
+        left - right
+    } else {
+        right - left
+    };
+    gap <= U256::from(1u8)
+}
+
+fn u256_of(value: &BigInt) -> Option<U256> {
+    if value.sign() == Sign::Minus {
+        return None;
+    }
+    let mut limbs = [0u64; 4];
+    for (index, digit) in value.magnitude().iter_u64_digits().enumerate() {
+        if index == 4 {
+            return None;
+        }
+        limbs[index] = digit;
+    }
+    Some(U256::from_limbs(limbs))
+}
+
+fn bigint_of(value: U256) -> BigInt {
+    match u128::try_from(value) {
+        Ok(small) => BigInt::from(small),
+        Err(_) => BigInt::from_bytes_le(Sign::Plus, &value.to_le_bytes::<32>()),
+    }
+}
+
+fn widen(value: U256) -> U512 {
+    let limbs = value.as_limbs();
+    U512::from_limbs([limbs[0], limbs[1], limbs[2], limbs[3], 0, 0, 0, 0])
+}
+
+fn narrow(value: U512) -> Option<U256> {
+    let limbs = value.as_limbs();
+    if limbs[4] | limbs[5] | limbs[6] | limbs[7] != 0 {
+        return None;
+    }
+    Some(U256::from_limbs([limbs[0], limbs[1], limbs[2], limbs[3]]))
 }

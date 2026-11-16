@@ -70,8 +70,8 @@ pub(crate) fn scaled_residual_candidate(
                 .filter(|(n, _)| *n != index)
                 .map(|(_, row)| row.clone())
                 .collect();
-            let predict = scaled_quote(&knots, ppm)?;
-            let score = worst_bps(predict.predict().as_ref(), &train[index..index + 1])?;
+            let predict = scaled_quote(&knots, ppm)?.predict();
+            let score = worst_bps(&|dx| predict(dx.clone()), &train[index..index + 1])?;
             worst = worst.max(score);
         }
         let tie_closer = best.as_ref().is_some_and(|(score, chosen)| {
@@ -144,7 +144,7 @@ pub(crate) fn loo_worst(
             .map(|(_, row)| row.clone())
             .collect();
         let predict = added_residual(base.predict(), &knots, alpha)?;
-        let score = worst_bps(predict.as_ref(), &train[index..index + 1])?;
+        let score = worst_bps(&|dx| predict(dx.clone()), &train[index..index + 1])?;
         worst = worst.max(score);
     }
     Some(worst)

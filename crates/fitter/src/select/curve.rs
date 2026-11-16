@@ -213,7 +213,8 @@ pub(crate) fn stable_mixed_candidate(
             prec_i: precs[i].clone(),
             prec_j: precs[j].clone(),
         };
-        let Some(score) = worst_bps(formula.predict().as_ref(), target) else {
+        let quote = formula.predict();
+        let Some(score) = worst_bps(&|dx| quote(dx.clone()), target) else {
             return;
         };
         let replace = match &best {
@@ -233,13 +234,15 @@ pub(crate) fn stable_mixed_candidate(
         return Ok(None);
     }
     if !hold.is_empty() {
-        let hold_score = worst_bps(chosen.predict().as_ref(), &hold);
+        let quote = chosen.predict();
+        let hold_score = worst_bps(&|dx| quote(dx.clone()), &hold);
         if hold_score.is_none_or(|score| score > 10) {
             return Ok(None);
         }
     }
     let scored = if rows.is_empty() { target } else { rows };
-    let Some(score) = worst_bps(chosen.predict().as_ref(), scored) else {
+    let quote = chosen.predict();
+    let Some(score) = worst_bps(&|dx| quote(dx.clone()), scored) else {
         return Ok(None);
     };
     if score > 10 {
@@ -367,7 +370,8 @@ pub(crate) fn flat_pair_candidate(
                 fee_gamma: fee_gamma.clone(),
                 flat_fee,
             };
-            let Some(score) = worst_bps(formula.predict().as_ref(), rows) else {
+            let quote = formula.predict();
+            let Some(score) = worst_bps(&|dx| quote(dx.clone()), rows) else {
                 continue;
             };
             if worse(&best, score) {
@@ -490,7 +494,8 @@ pub(crate) fn crypto3_at(
         out_fee,
         fee_gamma,
     );
-    (worst_bps(formula.predict().as_ref(), rows), formula)
+    let quote = formula.predict();
+    (worst_bps(&|dx| quote(dx.clone()), rows), formula)
 }
 
 pub(crate) fn ann_anchors() -> Vec<BigInt> {
@@ -830,7 +835,8 @@ pub(crate) fn crypto3_consistent_candidate(
             &out_fee,
             &fee_gamma,
         );
-        if worst_bps(predict.predict().as_ref(), &hold).is_none_or(|score| score > 10) {
+        let quote = predict.predict();
+        if worst_bps(&|dx| quote(dx.clone()), &hold).is_none_or(|score| score > 10) {
             return Ok(None);
         }
     }
@@ -842,7 +848,8 @@ pub(crate) fn crypto3_consistent_candidate(
     let predict = crypto3_predict(
         &balances, &scales, &ann, &gamma, &d, i, j, precs, &mid, &out_fee, &fee_gamma,
     );
-    match worst_bps(predict.predict().as_ref(), &scored) {
+    let quote = predict.predict();
+    match worst_bps(&|dx| quote(dx.clone()), &scored) {
         Some(score) if score <= 10 => Ok(Some((score, predict))),
         _ => Ok(None),
     }
@@ -890,7 +897,8 @@ pub(crate) fn stable_scale_at(
     fee_on_input: bool,
 ) -> (Option<i64>, Formula) {
     let formula = stable_scale_predict(xp, amp, i, j, fee, rates, which, ppm, denom, fee_on_input);
-    (worst_bps(formula.predict().as_ref(), rows), formula)
+    let quote = formula.predict();
+    (worst_bps(&|dx| quote(dx.clone()), rows), formula)
 }
 
 pub(crate) fn scale_window(
@@ -1233,7 +1241,7 @@ pub(crate) fn stable_output_candidate(
             let dy = stable_flat_quote(&xp, &amp, i, j, &fee, &rates, &dx)?;
             Some(fd(&(&dy * &stored), &bi(10_000)))
         });
-        let score = worst_bps(predict.as_ref(), target)?;
+        let score = worst_bps(&|dx| predict(dx.clone()), target)?;
         if best.as_ref().map(|item| score < item.0).unwrap_or(true) {
             *best = Some((score, ppm.clone()));
         }
@@ -1285,12 +1293,12 @@ pub(crate) fn stable_output_candidate(
         rates: rates.clone(),
         ppm,
     };
-    if !hold.is_empty()
-        && worst_bps(formula.predict().as_ref(), &hold).is_none_or(|score| score > 10)
+    let quote = formula.predict();
+    if !hold.is_empty() && worst_bps(&|dx| quote(dx.clone()), &hold).is_none_or(|score| score > 10)
     {
         return Ok(None);
     }
-    match worst_bps(formula.predict().as_ref(), rows) {
+    match worst_bps(&|dx| quote(dx.clone()), rows) {
         Some(score) if score <= 10 => Ok(Some((score, formula))),
         _ => Ok(None),
     }
@@ -1352,7 +1360,7 @@ pub(crate) fn refine_precs(
                     )?;
                     Some(unscale_out(&dy, &rate_j, &prec_j))
                 });
-                let Some(score) = worst_bps(predict.as_ref(), target) else {
+                let Some(score) = worst_bps(&|dx| predict(dx.clone()), target) else {
                     return;
                 };
                 if best.as_ref().map(|item| score < item.0).unwrap_or(true) {
@@ -1521,12 +1529,8 @@ pub(crate) fn score_ppms(
     ppms: &[BigInt],
     target: &[(BigInt, BigInt)],
 ) -> Option<i64> {
-    worst_bps(
-        stable_ppms_predict(xp, amp, i, j, fee, rates, ppms)
-            .predict()
-            .as_ref(),
-        target,
-    )
+    let quote = stable_ppms_predict(xp, amp, i, j, fee, rates, ppms).predict();
+    worst_bps(&|dx| quote(dx.clone()), target)
 }
 
 pub(crate) struct JointFound {

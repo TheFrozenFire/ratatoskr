@@ -97,6 +97,9 @@ pub fn choose(
         Some("metric") => consider(&mut found, "bins", &bin_candidate(state, direction, rows)?),
         _ => {}
     }
+    if found.iter().any(|item| item.score == 0) {
+        return Ok(chosen(found));
+    }
     consider(&mut found, "hyperbola", &hyperbola_candidate(rows));
     for (name, scored) in through_sample_candidates(direction, rows)? {
         consider(&mut found, name, &Some(scored));
@@ -208,7 +211,11 @@ pub fn choose(
             &logistic_wide_candidate(direction, rows)?,
         );
     }
-    Ok(found
+    Ok(chosen(found))
+}
+
+fn chosen(found: Vec<Found>) -> Option<Chosen> {
+    found
         .into_iter()
         .min_by(|left, right| {
             (left.score, left.rank, left.name).cmp(&(right.score, right.rank, right.name))
@@ -217,5 +224,5 @@ pub fn choose(
             score: item.score,
             name: item.name,
             formula: item.formula,
-        }))
+        })
 }

@@ -3,7 +3,6 @@ use super::curve::stable_out;
 use super::mul_div::*;
 use super::product::constant_product_out;
 use alloy_primitives::{Address, U256};
-use std::str::FromStr;
 use store_model::BALANCER_V3;
 
 pub(super) fn quote_balancer(
@@ -28,34 +27,50 @@ pub(super) fn quote_balancer(
     let fee = pool.fee.ok_or_else(|| "fee unread".to_string())?;
     let one = e18();
     let raw_in = amount_in;
-    let (balances, amount_in, out_scale, out_rate, in_scale, in_rate) =
-        balancer_space(pool, input, output, amount_in)?;
-    let mut quote = if pool.flags & FLAG_STABLE != 0 {
+    let mut quote = if pool.kind != BALANCER_V3 {
+        quote_balances(pool, input, output, &pool.balances, amount_in, fee, one)?
+    } else {
+        let (balances, amount_in, out_scale, out_rate, in_scale, in_rate) =
+            balancer_space(pool, input, output, amount_in)?;
+        let mut quote = quote_balances(pool, input, output, &balances, amount_in, fee, one)?;
+        quote.amount_out = unscale(quote.amount_out, out_scale, out_rate)?;
+        quote.fee_paid = unscale(quote.fee_paid, in_scale, in_rate)?;
+        quote
+    };
+    quote.amount_in = raw_in;
+    Ok(quote)
+}
+
+fn quote_balances(
+    pool: &BalancerPool,
+    input: usize,
+    output: usize,
+    balances: &[U256],
+    amount_in: U256,
+    fee: U256,
+    one: U256,
+) -> Result<Quote, String> {
+    if pool.flags & FLAG_STABLE != 0 {
         if pool.amp_precision.is_zero() {
             return Err("amp".into());
         }
         let amp = pool.amp / pool.amp_precision;
-        stable_out(&balances, amp, input, output, amount_in, fee, one)?
-    } else if pool.weights.len() != pool.tokens.len() {
-        return Err("weights".into());
-    } else if pool.weights[input] == pool.weights[output] && !pool.weights[input].is_zero() {
-        constant_product_out(balances[input], balances[output], amount_in, fee, one)?
-    } else {
-        weighted_out(
-            balances[input],
-            balances[output],
-            pool.weights[input],
-            pool.weights[output],
-            amount_in,
-            fee,
-        )?
-    };
-    if pool.kind == BALANCER_V3 {
-        quote.amount_out = unscale(quote.amount_out, out_scale, out_rate)?;
-        quote.fee_paid = unscale(quote.fee_paid, in_scale, in_rate)?;
+        return stable_out(balances, amp, input, output, amount_in, fee, one);
     }
-    quote.amount_in = raw_in;
-    Ok(quote)
+    if pool.weights.len() != pool.tokens.len() {
+        return Err("weights".into());
+    }
+    if pool.weights[input] == pool.weights[output] && !pool.weights[input].is_zero() {
+        return constant_product_out(balances[input], balances[output], amount_in, fee, one);
+    }
+    weighted_out(
+        balances[input],
+        balances[output],
+        pool.weights[input],
+        pool.weights[output],
+        amount_in,
+        fee,
+    )
 }
 
 /// Invariant balances, scaled input, then the output scale, output rate, input scale, and input rate.
@@ -71,14 +86,7 @@ fn balancer_space(
     amount_in: U256,
 ) -> Result<BalancerSpace, String> {
     if pool.kind != BALANCER_V3 {
-        return Ok((
-            pool.balances.clone(),
-            amount_in,
-            U256::from(1u8),
-            e18(),
-            U256::from(1u8),
-            e18(),
-        ));
+        return Err("kind".into());
     }
     let n = pool.tokens.len();
     if pool.scaling.len() != n {
@@ -157,15 +165,101 @@ pub(super) fn weighted_out(
 }
 
 pub(super) fn f64_of(value: U256) -> Result<f64, String> {
-    value
-        .to_string()
-        .parse::<f64>()
-        .map_err(|_| "scale".to_string())
+    // Decimal text parsed as f64 rounds the exact integer, ties to even.
+    if let Ok(small) = u128::try_from(value) {
+        return Ok(small as f64);
+    }
+    let bits = 256 - value.leading_zeros();
+    let shift = bits - 53;
+    let mut mant = (value >> shift).as_limbs()[0];
+    let remainder = value & ((U256::from(1u8) << shift) - U256::from(1u8));
+    let half = U256::from(1u8) << (shift - 1);
+    let round_up = remainder > half || (remainder == half && mant & 1 == 1);
+    if round_up {
+        mant += 1;
+        if mant == 1u64 << 53 {
+            mant >>= 1;
+            return Ok(f64_from_sig(mant, bits as u32));
+        }
+    }
+    Ok(f64_from_sig(mant, (bits - 1) as u32))
+}
+
+fn f64_from_sig(mant: u64, exp: u32) -> f64 {
+    if exp >= 1024 {
+        return f64::INFINITY;
+    }
+    f64::from_bits(((u64::from(exp) + 1023) << 52) | (mant & ((1u64 << 52) - 1)))
 }
 
 pub(super) fn f64_floor(value: f64) -> Result<U256, String> {
-    if !value.is_finite() || value < 0.0 {
+    // `{value:.0}` rounds half to even, then prints that integer.
+    if !value.is_finite() || value.is_sign_negative() {
         return Err("quote".into());
     }
-    U256::from_str(&format!("{value:.0}")).map_err(|_| "quote".to_string())
+    let base = value.floor();
+    let diff = value - base;
+    let rounded = if diff > 0.5 {
+        base + 1.0
+    } else if diff < 0.5 || (base as i64) % 2 == 0 {
+        base
+    } else {
+        base + 1.0
+    };
+    if rounded == 0.0 {
+        return Ok(U256::ZERO);
+    }
+    let bits = rounded.to_bits();
+    let exp = ((bits >> 52) & 0x7ff) as i32 - 1023;
+    let mant = (bits & ((1u64 << 52) - 1)) | (1u64 << 52);
+    if exp < 52 {
+        return Ok(U256::from(mant >> (52 - exp)));
+    }
+    if exp > 255 {
+        return Err("quote".into());
+    }
+    Ok(U256::from(mant) << (exp as u32 - 52))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    fn oracle_f64_of(value: U256) -> f64 {
+        value.to_string().parse::<f64>().unwrap()
+    }
+
+    fn oracle_f64_floor(value: f64) -> U256 {
+        U256::from_str(&format!("{value:.0}")).unwrap()
+    }
+
+    #[test]
+    fn float_conversion_matches_decimal_text() {
+        let mut values = vec![
+            U256::ZERO,
+            U256::from(1u8),
+            U256::from(1u64 << 53),
+            U256::from((1u64 << 53) + 1),
+            U256::from((1u64 << 53) + 2),
+            U256::from(1_000_000_000_000_000_000u64),
+            U256::from(1_000_000_000_000_000_000_000u128),
+            U256::from(4_000_000_000_000_000_000_000u128),
+            U256::from(u128::MAX),
+            U256::from(u128::MAX) + U256::from(1u8),
+        ];
+        values.push(U256::from(1u8) << 200);
+        values.push((U256::from(1u8) << 200) + U256::from(1u8));
+        for value in values {
+            assert_eq!(f64_of(value).unwrap(), oracle_f64_of(value));
+        }
+        let mut half = 0.5f64;
+        for _ in 0..20 {
+            assert_eq!(f64_floor(half).unwrap(), oracle_f64_floor(half));
+            half += 1.0;
+        }
+        for value in [0.0, 0.49, 1.0, 1.5, 2.5, 10.4, 1e18, 1e21] {
+            assert_eq!(f64_floor(value).unwrap(), oracle_f64_floor(value));
+        }
+    }
 }

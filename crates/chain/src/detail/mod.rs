@@ -8,6 +8,7 @@
 //! share a gas limit or a response-size budget.
 
 mod codec;
+mod fixtures;
 mod load;
 mod quote;
 mod slots;
@@ -25,8 +26,9 @@ use store_model::{
 };
 
 pub use codec::decode_details;
+pub use fixtures::{shapes, token0, token1, Shape};
 pub use load::{call_data, load_details, load_details_at};
-pub use quote::{concentrated_ladder, product_fee_pips, v3_raw_balance};
+pub use quote::{concentrated_end, concentrated_ladder, product_fee_pips, v3_raw_balance};
 pub use slots::tick_request;
 pub use types::{
     BalancerPool, BitmapWord, Concentrated, ConstantProduct, CurveCoin, CurvePool, DetailQuery,
@@ -247,6 +249,37 @@ mod tests {
             .quote(token0, token1, U256::from(10_000_000_000_000_000u64))
             .unwrap();
         assert_eq!(quote.amount_out, U256::from(9_999_009_901_970_393u64));
+        let again = |amount: u64| {
+            let pool = CurvePool {
+                kind: CURVE,
+                id: B256::ZERO,
+                pool: Address::ZERO,
+                amp: U256::from(100u8),
+                fee: Some(U256::ZERO),
+                gamma: U256::ZERO,
+                d: U256::ZERO,
+                mid_fee: U256::ZERO,
+                out_fee: U256::ZERO,
+                fee_gamma: U256::ZERO,
+                coins_indexed_by_uint: true,
+                coins: vec![coin(token0), coin(token1)],
+                flags: 0,
+            };
+            PoolDetail::Curve(pool)
+                .quote(token0, token1, U256::from(amount))
+                .unwrap()
+                .amount_out
+        };
+        assert_eq!(again(1), U256::ZERO);
+        assert_eq!(again(1_000_000_000_000), U256::from(999_999_990_099u64));
+        assert_eq!(
+            again(100_000_000_000_000_000),
+            U256::from(99_900_110_864_758_514u64)
+        );
+        assert_eq!(
+            again(500_000_000_000_000_000),
+            U256::from(496_752_702_498_812_842u64)
+        );
     }
 
     #[test]

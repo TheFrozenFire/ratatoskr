@@ -364,7 +364,7 @@ fn pair(action: &Action) -> Option<(Token, Token)> {
     }
 }
 
-pub(crate) fn quote_curve(curve: &Curve, input: &BigInt) -> BigInt {
+pub fn quote_curve(curve: &Curve, input: &BigInt) -> BigInt {
     match curve {
         Curve::Unlimited => {
             if input <= &BigInt::from(0) {
@@ -379,24 +379,10 @@ pub(crate) fn quote_curve(curve: &Curve, input: &BigInt) -> BigInt {
 
 /// Same integer division as [`routing::quote`], read from the chords in place.
 fn quote_chords(chords: &[Chord], input: &BigInt) -> BigInt {
-    if input <= &BigInt::from(0) {
-        return BigInt::from(0);
-    }
-    let mut left = input.clone();
-    let mut paid = BigInt::from(0);
-    for chord in chords {
-        if left.is_zero() || chord.width.is_zero() {
-            break;
-        }
-        let taken = if left < chord.width {
-            left.clone()
-        } else {
-            chord.width.clone()
-        };
-        paid += (&chord.output * &taken) / &chord.width;
-        left -= taken;
-    }
-    paid
+    routing::quote_marginals(
+        chords.iter().map(|chord| (&chord.width, &chord.output)),
+        input,
+    )
 }
 
 fn check_route(

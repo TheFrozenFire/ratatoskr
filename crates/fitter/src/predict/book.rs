@@ -4,7 +4,6 @@ use super::product::{div_up, mul_div_up};
 use super::share::*;
 use num_bigint::BigInt;
 use num_traits::{One, Signed, Zero};
-use std::collections::BTreeMap;
 
 pub(crate) fn sqrt_at_tick(tick: &BigInt) -> Option<BigInt> {
     let abs_tick = tick.abs();
@@ -113,12 +112,12 @@ pub(crate) fn apply_liquidity(liquidity: &BigInt, delta: &BigInt) -> Option<BigI
     Some(liquidity + delta)
 }
 
-pub(crate) fn bisect_right(keys: &[BigInt], target: &BigInt) -> usize {
+pub(crate) fn bisect_right(keys: &[(BigInt, BigInt)], target: &BigInt) -> usize {
     let mut lo = 0;
     let mut hi = keys.len();
     while lo < hi {
         let mid = (lo + hi) / 2;
-        if &keys[mid] <= target {
+        if &keys[mid].0 <= target {
             lo = mid + 1;
         } else {
             hi = mid;
@@ -128,7 +127,7 @@ pub(crate) fn bisect_right(keys: &[BigInt], target: &BigInt) -> usize {
 }
 
 pub(crate) fn next_initialized(
-    keys: &[BigInt],
+    keys: &[(BigInt, BigInt)],
     current: &BigInt,
     include: bool,
     zero_for_one: bool,
@@ -143,22 +142,25 @@ pub(crate) fn next_initialized(
         if index == 0 {
             return None;
         }
-        Some(keys[index - 1].clone())
+        Some(keys[index - 1].0.clone())
     } else {
         let index = bisect_right(keys, current);
         if index >= keys.len() {
             return None;
         }
-        Some(keys[index].clone())
+        Some(keys[index].0.clone())
     }
 }
 
 pub(crate) fn tick_net(
-    nets: &BTreeMap<BigInt, BigInt>,
+    ticks: &[(BigInt, BigInt)],
     boundary: &BigInt,
     zero_for_one: bool,
 ) -> Option<BigInt> {
-    let net = nets.get(boundary)?.clone();
+    let index = ticks
+        .binary_search_by(|(tick, _)| tick.cmp(boundary))
+        .ok()?;
+    let net = ticks[index].1.clone();
     if zero_for_one {
         Some(-net)
     } else {
@@ -185,10 +187,17 @@ pub(crate) fn concentrated_out(
     }
     let mut ordered = ticks.to_vec();
     ordered.sort();
-    let keys: Vec<BigInt> = ordered.iter().map(|(tick, _)| tick.clone()).collect();
-    let mut nets = BTreeMap::new();
-    for (tick, net) in &ordered {
-        nets.insert(tick.clone(), net.clone());
+    let steps = ordered.len() + 2;
+    // Equal ticks keep the last net, matching a map insert after this sort.
+    let mut ladder: Vec<(BigInt, BigInt)> = Vec::with_capacity(ordered.len());
+    for pair in ordered {
+        if let Some(last) = ladder.last_mut() {
+            if last.0 == pair.0 {
+                last.1 = pair.1;
+                continue;
+            }
+        }
+        ladder.push(pair);
     }
     let mut sqrt = sqrt_price.clone();
     let mut liq = liquidity.clone();
@@ -196,11 +205,11 @@ pub(crate) fn concentrated_out(
     let mut include = zero_for_one;
     let mut remaining = amount.clone();
     let mut amount_out = BigInt::zero();
-    for _ in 0..ordered.len() + 2 {
+    for _ in 0..steps {
         if !remaining.is_positive() {
             break;
         }
-        let boundary = next_initialized(&keys, &tick, include, zero_for_one);
+        let boundary = next_initialized(&ladder, &tick, include, zero_for_one);
         include = false;
         let target = if let Some(bound) = &boundary {
             sqrt_at_tick(bound)?
@@ -215,7 +224,7 @@ pub(crate) fn concentrated_out(
         }
         if on_tick {
             let bound = boundary.clone()?;
-            let net = tick_net(&nets, &bound, zero_for_one)?;
+            let net = tick_net(&ladder, &bound, zero_for_one)?;
             liq = apply_liquidity(&liq, &net)?;
             tick = bound;
             continue;
@@ -224,7 +233,7 @@ pub(crate) fn concentrated_out(
             let Some(bound) = boundary.clone() else {
                 break;
             };
-            let net = tick_net(&nets, &bound, zero_for_one)?;
+            let net = tick_net(&ladder, &bound, zero_for_one)?;
             liq = apply_liquidity(&liq, &net)?;
             sqrt = target;
             tick = bound;
@@ -315,7 +324,7 @@ pub(crate) fn concentrated_out(
             break;
         }
         let bound = boundary?;
-        let net = tick_net(&nets, &bound, zero_for_one)?;
+        let net = tick_net(&ladder, &bound, zero_for_one)?;
         liq = apply_liquidity(&liq, &net)?;
         tick = bound;
     }

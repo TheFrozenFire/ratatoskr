@@ -14,8 +14,8 @@ pub(super) fn quote_metric(
     if pool.token0.is_zero() || pool.token1.is_zero() {
         return Err("token".into());
     }
-    let price = pool.marginal_price_x64()?;
     let bin = pool.bins.iter().find(|bin| bin.index == pool.bin_index);
+    let price = pool.price_at(bin.map(|bin| bin.length_e6).unwrap_or(0))?;
     let selling_token0 = if token_in == pool.token0 && token_out == pool.token1 {
         true
     } else if token_in == pool.token1 && token_out == pool.token0 {
@@ -78,19 +78,23 @@ pub(super) fn quote_metric(
 
 impl MetricPool {
     pub fn marginal_price_x64(&self) -> Result<U256, String> {
-        if self.reference_x64.is_zero() {
-            return Err("reference price".into());
-        }
         let length = self
             .bins
             .iter()
             .find(|bin| bin.index == self.bin_index)
-            .map(|bin| U256::from(bin.length_e6))
-            .unwrap_or(U256::ZERO);
+            .map(|bin| bin.length_e6)
+            .unwrap_or(0);
+        self.price_at(length)
+    }
+
+    fn price_at(&self, length_e6: u16) -> Result<U256, String> {
+        if self.reference_x64.is_zero() {
+            return Err("reference price".into());
+        }
         let lower = distance_price(self.reference_x64, self.distance_e6)?;
         let upper = distance_price(
             self.reference_x64,
-            self.distance_e6.saturating_add(length.to::<i32>()),
+            self.distance_e6.saturating_add(i32::from(length_e6)),
         )?;
         if upper < lower {
             return Err("bin price".into());

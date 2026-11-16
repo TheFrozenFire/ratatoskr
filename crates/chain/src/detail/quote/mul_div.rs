@@ -6,6 +6,18 @@ pub(super) fn mul_div(a: U256, b: U256, denom: U256) -> Result<U256, String> {
     if denom.is_zero() {
         return Err("div0".into());
     }
+    if let (Ok(left), Ok(right)) = (u128::try_from(a), u128::try_from(b)) {
+        if let Some(product) = left.checked_mul(right) {
+            // The product fits in 128 bits. A wider denominator yields zero.
+            return match u128::try_from(denom) {
+                Ok(den) => Ok(U256::from(product / den)),
+                Err(_) => Ok(U256::ZERO),
+            };
+        }
+        // The product of two 128-bit factors still fits in 256 bits.
+        let product = U256::from(left) * U256::from(right);
+        return Ok(product / denom);
+    }
     let (q, _) = widening(a, b).div_rem(u512(denom));
     narrow(q).ok_or_else(|| "overflow".to_string())
 }

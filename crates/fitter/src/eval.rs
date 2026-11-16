@@ -15,10 +15,140 @@ use num_traits::{One, Zero};
 use std::sync::Arc;
 
 pub fn eval_formula(formula: &Formula, amount: &BigInt) -> Option<BigInt> {
-    formula.predict()(amount.clone())
+    formula.at(amount)
 }
 
 impl Formula {
+    pub(crate) fn at(&self, amount: &BigInt) -> Option<BigInt> {
+        match self {
+            Self::Product {
+                reserve_in,
+                reserve_out,
+                fee,
+                denom,
+            } => product_out(reserve_in, reserve_out, amount, fee, denom),
+            Self::Weighted {
+                balance_in,
+                balance_out,
+                weight_in,
+                weight_out,
+                fee,
+            } => weighted_out(balance_in, balance_out, weight_in, weight_out, amount, fee),
+            Self::BalancerStable {
+                xp,
+                amp,
+                i,
+                j,
+                fee,
+                prec_i,
+                prec_j,
+            } => {
+                let dy = stable_swap_out(
+                    xp,
+                    amp.clone(),
+                    bi(*i),
+                    bi(*j),
+                    amount * prec_i,
+                    fee.clone(),
+                    wad(),
+                    true,
+                    BigInt::zero(),
+                )?;
+                Some(fd(&dy, prec_j))
+            }
+            Self::Ladder {
+                sqrt_price,
+                liquidity,
+                tick,
+                fee,
+                ticks,
+                zero_for_one,
+            } => concentrated_out(
+                sqrt_price,
+                liquidity,
+                tick,
+                fee,
+                ticks,
+                *zero_for_one,
+                amount,
+            ),
+            Self::Bins {
+                reference,
+                distance,
+                length,
+                position,
+                selling0,
+                scaled_out,
+                scale_out,
+            } => bin_out(
+                reference, distance, length, position, amount, *selling0, scaled_out, scale_out,
+            ),
+            Self::Stable {
+                xp,
+                amp,
+                i,
+                j,
+                fee,
+                denom,
+                offpeg,
+                rate_i,
+                rate_j,
+                prec_i,
+                prec_j,
+            } => {
+                let dxp = dxp_of(amount, rate_i, prec_i);
+                let dy = stable_swap_out(
+                    xp,
+                    amp.clone(),
+                    bi(*i),
+                    bi(*j),
+                    dxp,
+                    fee.clone(),
+                    denom.clone(),
+                    false,
+                    offpeg.clone(),
+                )?;
+                Some(unscale_out(&dy, rate_j, prec_j))
+            }
+            Self::Crypto2 {
+                balances,
+                precs,
+                scale,
+                ann,
+                gamma,
+                d,
+                i,
+                j,
+                mid,
+                out_fee,
+                fee_gamma,
+            } => crypto2_out(
+                balances, precs, scale, ann, gamma, d, *i, *j, amount, mid, out_fee, fee_gamma,
+            ),
+            Self::Crypto3 {
+                balances,
+                precs,
+                scales,
+                ann,
+                gamma,
+                d,
+                i,
+                j,
+                mid,
+                out_fee,
+                fee_gamma,
+            } => crypto3_out(
+                balances, precs, scales, ann, gamma, d, *i, *j, amount, mid, out_fee, fee_gamma,
+            ),
+            Self::Hyperbola { x1, y1, x2, y2 } => hyperbola_out(x1, y1, x2, y2, amount),
+            Self::Chord { knots } => {
+                let quote = knot_predict(chord_quote(knots));
+                quote(amount.clone())
+            }
+            _ => self.predict()(amount.clone()),
+        }
+    }
+
     pub(crate) fn predict(&self) -> Predict {
         match self {
             Self::Hyperbola { x1, y1, x2, y2 } => {

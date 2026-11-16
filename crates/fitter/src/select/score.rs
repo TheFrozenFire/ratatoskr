@@ -53,7 +53,7 @@ pub(crate) fn consider(found: &mut Vec<Found>, name: &'static str, got: &Option<
 }
 
 pub(crate) fn score_predict(formula: Formula, rows: &[(BigInt, BigInt)]) -> Option<Scored> {
-    let score = worst_bps(formula.predict().as_ref(), rows)?;
+    let score = worst_bps(&|dx| formula.at(&dx), rows)?;
     Some((score, formula))
 }
 
@@ -216,10 +216,11 @@ pub(crate) fn gated(
     rows: &[(BigInt, BigInt)],
 ) -> Option<Scored> {
     let predict = formula.predict();
-    if !hold.is_empty() && worst_bps(predict.as_ref(), hold).is_none_or(|score| score > 10) {
+    if !hold.is_empty() && worst_bps(&|dx| predict(dx.clone()), hold).is_none_or(|score| score > 10)
+    {
         return None;
     }
-    let score = worst_bps(predict.as_ref(), rows)?;
+    let score = worst_bps(&|dx| predict(dx.clone()), rows)?;
     if score > 10 {
         None
     } else {

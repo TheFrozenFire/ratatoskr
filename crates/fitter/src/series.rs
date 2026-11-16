@@ -3,6 +3,7 @@
 use super::units::*;
 use bigdecimal::{BigDecimal, Context, RoundingMode};
 use num_bigint::{BigInt, Sign};
+use num_integer::Integer;
 use num_rational::BigRational;
 use num_traits::{One, Signed, Zero};
 use std::num::NonZeroU64;
@@ -72,8 +73,7 @@ pub(crate) fn round_div(numer: &BigInt, denom: &BigInt) -> BigInt {
     if !denom.is_positive() {
         return BigInt::zero();
     }
-    let q = numer / denom;
-    let r = numer % denom;
+    let (q, r) = numer.div_rem(denom);
     let twice = if r.is_negative() { -&r * 2 } else { &r * 2 };
     if &twice < denom {
         q

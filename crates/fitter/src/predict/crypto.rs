@@ -20,6 +20,19 @@ pub(crate) fn crypto_y2(
     d: &BigInt,
     i: i64,
 ) -> Option<BigInt> {
+    match super::crypto_wide::y2(ann, gamma, x, d, i) {
+        Ok(answer) => answer,
+        Err(()) => crypto_y2_slow(ann, gamma, x, d, i),
+    }
+}
+
+pub(super) fn crypto_y2_slow(
+    ann: &BigInt,
+    gamma: &BigInt,
+    x: &[BigInt],
+    d: &BigInt,
+    i: i64,
+) -> Option<BigInt> {
     if !ann.is_positive()
         || !gamma.is_positive()
         || !d.is_positive()
@@ -311,6 +324,19 @@ pub(crate) fn crypto_y3(
     d: &BigInt,
     i: i64,
 ) -> Option<BigInt> {
+    match super::crypto_wide::y3(ann, gamma, x, d, i) {
+        Ok(answer) => answer,
+        Err(()) => crypto_y3_slow(ann, gamma, x, d, i),
+    }
+}
+
+pub(super) fn crypto_y3_slow(
+    ann: &BigInt,
+    gamma: &BigInt,
+    x: &[BigInt],
+    d: &BigInt,
+    i: i64,
+) -> Option<BigInt> {
     if !ann.is_positive()
         || !gamma.is_positive()
         || !d.is_positive()
@@ -465,4 +491,66 @@ pub fn crypto3_out(
     let fee = crypto_fee3(&xp, mid_fee, out_fee, fee_gamma);
     let taken = floor_div(&(&fee * &dy), &FEE_1E10);
     Some(dy - taken)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    fn n(text: &str) -> BigInt {
+        BigInt::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn wide_newton_matches_bigint_on_fixture_sizes() {
+        let ann = BigInt::from(400_000);
+        let gamma = n("145000000000000");
+        let d = n("863257940499748221795");
+        let scale = n("20038379687692298260");
+        let balances = vec![n("535404253762953867722"), n("17320665696279630959")];
+        let precs = vec![BigInt::from(1), BigInt::from(1)];
+        for dx in [
+            "0",
+            "1",
+            "10000000000000000",
+            "53540425376295386",
+            "535404253762953867722",
+        ] {
+            let xp = scaled_pair(&balances, &precs, &scale, 0, &n(dx)).unwrap();
+            assert!(super::super::crypto_wide::y2(&ann, &gamma, &xp, &d, 1).is_ok());
+            assert_eq!(
+                crypto_y2(&ann, &gamma, &xp, &d, 1),
+                crypto_y2_slow(&ann, &gamma, &xp, &d, 1)
+            );
+        }
+        let ann3 = BigInt::from(2_700_000);
+        let gamma3 = BigInt::from(1_300_000_000_000u64);
+        let d3 = n("23832478032965456732327");
+        let balances3 = [
+            BigInt::from(7_949_965_799u64),
+            n("4113599969321168658"),
+            n("848042467675018410911"),
+        ];
+        let precs3 = [
+            BigInt::from(1_000_000_000_000u64),
+            BigInt::from(1),
+            BigInt::from(1),
+        ];
+        let scales = [n("1928615248180488065580"), n("9373305418011774631")];
+        let dx = BigInt::from(1_000_000u64);
+        let grown0 = &balances3[0] + &dx;
+        let xp3 = vec![
+            &grown0 * &precs3[0],
+            floor_div(&(&balances3[1] * &scales[0]), &*WAD) * &precs3[1],
+            floor_div(&(&balances3[2] * &scales[1]), &*WAD) * &precs3[2],
+        ];
+        assert!(super::super::crypto_wide::y3(&ann3, &gamma3, &xp3, &d3, 1).is_ok());
+        assert_eq!(
+            crypto_y3(&ann3, &gamma3, &xp3, &d3, 1),
+            crypto_y3_slow(&ann3, &gamma3, &xp3, &d3, 1)
+        );
+        let huge: BigInt = BigInt::from(1) << 300;
+        assert!(super::super::crypto_wide::y2(&ann, &gamma, &[huge.clone(), huge], &d, 0).is_err());
+    }
 }

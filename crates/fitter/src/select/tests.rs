@@ -227,7 +227,7 @@ fn selector_structural() {
         .map(|(x, y, _)| (parse_bi(x), parse_bi(y)))
         .collect();
     let refit = chord_quote(&train).expect("chord");
-    assert!(worst_bps(refit.as_ref(), &hold).unwrap() <= 10);
+    assert!(worst_bps(&|dx| refit(dx.clone()), &hold).unwrap() <= 10);
 }
 
 fn pack(
@@ -412,7 +412,7 @@ fn selector_scale_windows() {
             )
         }
     });
-    let bare = worst_bps(raw.as_ref(), &out_rows).expect("bare");
+    let bare = worst_bps(&|dx| raw(dx.clone()), &out_rows).expect("bare");
     assert!(bare > 10);
     let out_state = curve_coins(&[&stored.to_string(), &stored.to_string()], "100", "0");
     let out_got = stable_output_candidate(&out_state, 0, 1, &out_dir, &out_rows)
@@ -475,7 +475,7 @@ fn selector_residuals() {
     let (scaled_dir, scaled_rows) = pack(&scaled_book, "a", "b");
     let (scaled_train, _) = split_holdout(&scaled_dir).unwrap();
     let bare_residual = residual_quote(&scaled_train).expect("residual");
-    assert!(worst_bps(bare_residual.as_ref(), &scaled_rows).unwrap() > 10);
+    assert!(worst_bps(&|dx| bare_residual(dx.clone()), &scaled_rows).unwrap() > 10);
     let scaled_got = scaled_residual_candidate(&scaled_dir, &scaled_rows)
         .unwrap()
         .expect("scaled");
@@ -510,7 +510,7 @@ fn selector_residuals() {
     let (flat_train, _) = split_holdout(&flat_dir).unwrap();
     let clamped =
         added_residual(ladder.predict(), &flat_train, &BigRational::one()).expect("clamped");
-    assert!(worst_bps(clamped.as_ref(), &flat_rows).unwrap() > 10);
+    assert!(worst_bps(&|dx| clamped(dx.clone()), &flat_rows).unwrap() > 10);
     let flat_got = flat_residual_candidate(&ladder, &flat_dir, &flat_rows)
         .unwrap()
         .expect("flat");
@@ -541,7 +541,7 @@ fn selector_loo_alpha() {
     let alpha_base = hyperbola_candidate(&alpha_rows).expect("hyperbola");
     let clamped = added_residual(alpha_base.1.predict(), &alpha_train, &BigRational::one())
         .expect("clamped alpha");
-    assert!(worst_bps(clamped.as_ref(), &alpha_rows).unwrap() > 10);
+    assert!(worst_bps(&|dx| clamped(dx.clone()), &alpha_rows).unwrap() > 10);
     let alpha_got = loo_alpha_candidate(&alpha_base.1, &alpha_dir, &alpha_rows)
         .unwrap()
         .expect("loo");

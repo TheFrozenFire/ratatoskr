@@ -1129,6 +1129,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "config",
+ "criterion",
  "eyre",
  "fitter",
  "journal",
@@ -3595,6 +3596,7 @@ name = "optimizer"
 version = "0.1.0"
 dependencies = [
  "action",
+ "criterion",
  "num-bigint",
  "num-traits",
  "routing",
@@ -4740,6 +4742,8 @@ dependencies = [
 name = "routing"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
+ "criterion",
  "num-bigint",
  "num-traits",
 ]
@@ -6142,6 +6146,7 @@ dependencies = [
  "alloy-primitives",
  "chain",
  "config",
+ "criterion",
  "era",
  "eyre",
  "filter",

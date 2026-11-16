@@ -2,6 +2,7 @@ use super::super::types::*;
 use super::mul_div::*;
 use alloy_primitives::{Address, U256};
 use std::str::FromStr;
+use std::sync::LazyLock;
 
 const MIN_SQRT: &str = "4295128739";
 const MAX_SQRT: &str = "1461446703485210103287273052203988822378723970342";
@@ -34,12 +35,13 @@ pub(super) fn quote_concentrated(
     let mut remaining = amount_in;
     let mut amount_out = U256::ZERO;
     let mut fee_paid = U256::ZERO;
+    let ordered = ticks_are_ordered(pool);
     let steps = pool.ticks.len() + 1;
     for _ in 0..=steps {
         if remaining.is_zero() {
             break;
         }
-        let boundary = next_initialized(pool, tick, zero_for_one, include_tick);
+        let boundary = next_initialized(pool, tick, zero_for_one, include_tick, ordered);
         include_tick = false;
         let target = match boundary {
             Some(next) => sqrt_at_tick(next)?,
@@ -56,7 +58,10 @@ pub(super) fn quote_concentrated(
             let Some(crossed) = boundary else {
                 break;
             };
-            liquidity = add_liquidity(liquidity, net_on_cross(pool, crossed, zero_for_one))?;
+            liquidity = add_liquidity(
+                liquidity,
+                net_on_cross(pool, crossed, zero_for_one, ordered),
+            )?;
             tick = crossed;
             continue;
         }
@@ -64,7 +69,10 @@ pub(super) fn quote_concentrated(
             let Some(crossed) = boundary else {
                 break;
             };
-            liquidity = add_liquidity(liquidity, net_on_cross(pool, crossed, zero_for_one))?;
+            liquidity = add_liquidity(
+                liquidity,
+                net_on_cross(pool, crossed, zero_for_one, ordered),
+            )?;
             sqrt = target;
             tick = crossed;
             continue;
@@ -80,7 +88,10 @@ pub(super) fn quote_concentrated(
         if !step.reached {
             break;
         }
-        liquidity = add_liquidity(liquidity, net_on_cross(pool, crossed, zero_for_one))?;
+        liquidity = add_liquidity(
+            liquidity,
+            net_on_cross(pool, crossed, zero_for_one, ordered),
+        )?;
         tick = crossed;
     }
     Ok(Quote {
@@ -156,12 +167,22 @@ fn swap_step(
     })
 }
 
+fn ticks_are_ordered(pool: &Concentrated) -> bool {
+    pool.ticks
+        .windows(2)
+        .all(|pair| pair[0].tick <= pair[1].tick)
+}
+
 pub(super) fn next_initialized(
     pool: &Concentrated,
     tick: i32,
     zero_for_one: bool,
     include_tick: bool,
+    ordered: bool,
 ) -> Option<i32> {
+    if ordered {
+        return next_ordered(pool, tick, zero_for_one, include_tick);
+    }
     if zero_for_one {
         pool.ticks
             .iter()
@@ -183,13 +204,50 @@ pub(super) fn next_initialized(
     }
 }
 
-pub(super) fn net_on_cross(pool: &Concentrated, tick: i32, zero_for_one: bool) -> i128 {
-    let net = pool
-        .ticks
-        .iter()
-        .find(|word| word.tick == tick)
-        .map(|word| word.liquidity_net)
-        .unwrap_or(0);
+fn next_ordered(
+    pool: &Concentrated,
+    tick: i32,
+    zero_for_one: bool,
+    include_tick: bool,
+) -> Option<i32> {
+    if zero_for_one {
+        let index = pool.ticks.partition_point(|word| {
+            if include_tick {
+                word.tick <= tick
+            } else {
+                word.tick < tick
+            }
+        });
+        if index == 0 {
+            None
+        } else {
+            Some(pool.ticks[index - 1].tick)
+        }
+    } else {
+        let index = pool.ticks.partition_point(|word| word.tick <= tick);
+        pool.ticks.get(index).map(|word| word.tick)
+    }
+}
+
+pub(super) fn net_on_cross(
+    pool: &Concentrated,
+    tick: i32,
+    zero_for_one: bool,
+    ordered: bool,
+) -> i128 {
+    let net = if ordered {
+        let index = pool.ticks.partition_point(|word| word.tick < tick);
+        pool.ticks
+            .get(index)
+            .filter(|word| word.tick == tick)
+            .map(|word| word.liquidity_net)
+    } else {
+        pool.ticks
+            .iter()
+            .find(|word| word.tick == tick)
+            .map(|word| word.liquidity_net)
+    }
+    .unwrap_or(0);
     if zero_for_one {
         net.saturating_neg()
     } else {
@@ -281,7 +339,7 @@ pub(crate) fn sqrt_at_tick(tick: i32) -> Result<U256, String> {
     let mut ratio = if abs & 1 == 0 {
         U256::from(1u8) << 128
     } else {
-        u256_hex("fffcb933bd6fad37aa2d162d1a594001")
+        odd_ratio()
     };
     for bit in 1..20 {
         if abs & (1 << bit) != 0 {
@@ -300,37 +358,47 @@ pub(crate) fn sqrt_at_tick(tick: i32) -> Result<U256, String> {
     Ok(rounded)
 }
 
+fn odd_ratio() -> U256 {
+    static VALUE: LazyLock<U256> = LazyLock::new(|| u256_hex("fffcb933bd6fad37aa2d162d1a594001"));
+    *VALUE
+}
+
 pub(super) fn tick_factor(bit: u32) -> U256 {
-    let hex = match bit {
-        1 => "fff97272373d413259a46990580e213a",
-        2 => "fff2e50f5f656932ef12357cf3c7fdcc",
-        3 => "ffe5caca7e10e4e61c3624eaa0941cd0",
-        4 => "ffcb9843d60f6159c9db58835c926644",
-        5 => "ff973b41fa98c081472e6896dfb254c0",
-        6 => "ff2ea16466c96a3843ec78b326b52861",
-        7 => "fe5dee046a99a2a811c461f1969c3053",
-        8 => "fcbe86c7900a88aedcffc83b479aa3a4",
-        9 => "f987a7253ac413176f2b074cf7815e54",
-        10 => "f3392b0822b70005940c7a398e4b70f3",
-        11 => "e7159475a2c29b7443b29c7fa6e889d9",
-        12 => "d097f3bdfd2022b8845ad8f792aa5825",
-        13 => "a9f746462d870fdf8a65dc1f90e061e5",
-        14 => "70d869a156d2a1b890bb3df62baf32f7",
-        15 => "31be135f97d08fd981231505542fcfa6",
-        16 => "9aa508b5b7a84e1c677de54f3e99bc9",
-        17 => "5d6af8dedb81196699c329225ee604",
-        18 => "2216e584f5fa1ea926041bedfe98",
-        _ => "48a170391f7dc42444e8fa2",
-    };
-    u256_hex(hex)
+    static FACTORS: LazyLock<[U256; 19]> = LazyLock::new(|| {
+        [
+            "fff97272373d413259a46990580e213a",
+            "fff2e50f5f656932ef12357cf3c7fdcc",
+            "ffe5caca7e10e4e61c3624eaa0941cd0",
+            "ffcb9843d60f6159c9db58835c926644",
+            "ff973b41fa98c081472e6896dfb254c0",
+            "ff2ea16466c96a3843ec78b326b52861",
+            "fe5dee046a99a2a811c461f1969c3053",
+            "fcbe86c7900a88aedcffc83b479aa3a4",
+            "f987a7253ac413176f2b074cf7815e54",
+            "f3392b0822b70005940c7a398e4b70f3",
+            "e7159475a2c29b7443b29c7fa6e889d9",
+            "d097f3bdfd2022b8845ad8f792aa5825",
+            "a9f746462d870fdf8a65dc1f90e061e5",
+            "70d869a156d2a1b890bb3df62baf32f7",
+            "31be135f97d08fd981231505542fcfa6",
+            "9aa508b5b7a84e1c677de54f3e99bc9",
+            "5d6af8dedb81196699c329225ee604",
+            "2216e584f5fa1ea926041bedfe98",
+            "48a170391f7dc42444e8fa2",
+        ]
+        .map(u256_hex)
+    });
+    FACTORS[(bit.saturating_sub(1).min(18)) as usize]
 }
 
 pub(super) fn min_sqrt() -> U256 {
-    U256::from_str(MIN_SQRT).expect("min sqrt")
+    static VALUE: LazyLock<U256> = LazyLock::new(|| U256::from_str(MIN_SQRT).expect("min sqrt"));
+    *VALUE
 }
 
 pub(super) fn max_sqrt() -> U256 {
-    U256::from_str(MAX_SQRT).expect("max sqrt")
+    static VALUE: LazyLock<U256> = LazyLock::new(|| U256::from_str(MAX_SQRT).expect("max sqrt"));
+    *VALUE
 }
 
 pub(super) fn u256_hex(text: &str) -> U256 {
@@ -369,6 +437,12 @@ pub fn concentrated_ladder(pool: &Concentrated) -> Result<ConcentratedLadder, St
         zero_for_one: walk_ladder(pool, true)?,
         one_for_zero: walk_ladder(pool, false)?,
     })
+}
+
+/// Cumulative input of the last step in one direction. Zero when that side has no step.
+pub fn concentrated_end(pool: &Concentrated, zero_for_one: bool) -> Result<U256, String> {
+    let steps = walk_ladder(pool, zero_for_one)?;
+    Ok(steps.last().map(|step| step.input).unwrap_or(U256::ZERO))
 }
 
 // The stored curve no longer embeds the ladder. The concentrated quote test
@@ -465,9 +539,10 @@ pub(super) fn walk_ladder(
     let mut output = U256::ZERO;
     let mut fee_paid = U256::ZERO;
     let mut steps = Vec::new();
+    let ordered = ticks_are_ordered(pool);
     let limit = pool.ticks.len() + 1;
     for _ in 0..=limit {
-        let boundary = next_initialized(pool, tick, zero_for_one, include_tick);
+        let boundary = next_initialized(pool, tick, zero_for_one, include_tick, ordered);
         include_tick = false;
         let (target, tick_end) = match boundary {
             Some(next) => (sqrt_at_tick(next)?, next),
@@ -484,7 +559,10 @@ pub(super) fn walk_ladder(
             let Some(crossed) = boundary else {
                 break;
             };
-            liquidity = add_liquidity(liquidity, net_on_cross(pool, crossed, zero_for_one))?;
+            liquidity = add_liquidity(
+                liquidity,
+                net_on_cross(pool, crossed, zero_for_one, ordered),
+            )?;
             tick = crossed;
             continue;
         }
@@ -492,7 +570,10 @@ pub(super) fn walk_ladder(
             let Some(crossed) = boundary else {
                 break;
             };
-            liquidity = add_liquidity(liquidity, net_on_cross(pool, crossed, zero_for_one))?;
+            liquidity = add_liquidity(
+                liquidity,
+                net_on_cross(pool, crossed, zero_for_one, ordered),
+            )?;
             sqrt = target;
             tick = crossed;
             continue;
@@ -514,7 +595,10 @@ pub(super) fn walk_ladder(
         let Some(crossed) = boundary else {
             break;
         };
-        liquidity = add_liquidity(liquidity, net_on_cross(pool, crossed, zero_for_one))?;
+        liquidity = add_liquidity(
+            liquidity,
+            net_on_cross(pool, crossed, zero_for_one, ordered),
+        )?;
         sqrt = target;
         tick = crossed;
     }

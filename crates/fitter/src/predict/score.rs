@@ -5,7 +5,7 @@ use num_bigint::BigInt;
 use num_traits::{Signed, ToPrimitive};
 
 pub(crate) fn worst_bps(
-    predict: &dyn Fn(BigInt) -> Option<BigInt>,
+    predict: &dyn Fn(&BigInt) -> Option<BigInt>,
     rows: &[(BigInt, BigInt)],
 ) -> Option<i64> {
     let mut best: Option<i64> = None;
@@ -13,7 +13,7 @@ pub(crate) fn worst_bps(
         if !label.is_positive() {
             return None;
         }
-        let pred = predict(amount.clone())?;
+        let pred = predict(amount)?;
         if pred.is_negative() {
             return None;
         }

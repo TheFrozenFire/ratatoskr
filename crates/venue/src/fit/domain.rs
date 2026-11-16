@@ -9,7 +9,7 @@ use alloy_primitives::{Address, U256};
 use chain::detail::{product_fee_pips, PoolDetail, Quote};
 
 /// Fractions of the priced input, as a label and `num/den`.
-pub(super) const GRID: &[(&str, u32, u32)] = &[
+pub const GRID: &[(&str, u32, u32)] = &[
     ("0.0001", 1, 10_000),
     ("0.001", 1, 1_000),
     ("0.01", 1, 100),
@@ -22,7 +22,7 @@ pub(super) const GRID: &[(&str, u32, u32)] = &[
     ("1", 1, 1),
 ];
 
-pub(super) fn domain_max(
+pub fn domain_max(
     detail: &PoolDetail,
     token_in: Address,
     token_out: Address,
@@ -84,17 +84,13 @@ pub(super) fn concentrated_max(
     if pool.sqrt_price_x96.is_zero() {
         return (U256::ZERO, "uninitialized");
     }
-    let Ok(ladder) = chain::detail::concentrated_ladder(pool) else {
+    let Ok(end) = chain::detail::concentrated_end(pool, zero_for_one) else {
         return (U256::ZERO, "uninitialized");
     };
-    let steps = if zero_for_one {
-        &ladder.zero_for_one
+    if end.is_zero() {
+        (U256::ZERO, "empty_book")
     } else {
-        &ladder.one_for_zero
-    };
-    match steps.last() {
-        Some(step) if !step.input.is_zero() => (step.input, "ladder"),
-        _ => (U256::ZERO, "empty_book"),
+        (end, "ladder")
     }
 }
 
@@ -220,7 +216,7 @@ pub(super) fn bisect_local(
     best
 }
 
-pub(super) fn grid_amounts(max_in: U256) -> Vec<(&'static str, U256)> {
+pub fn grid_amounts(max_in: U256) -> Vec<(&'static str, U256)> {
     let mut out: Vec<(&'static str, U256)> = Vec::new();
     for &(fraction, num, den) in GRID {
         let amount = match max_in.checked_mul(U256::from(num)) {

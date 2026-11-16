@@ -75,13 +75,26 @@ fn fee_paid_of(formula: &fitter::Formula, amount: &BigInt) -> BigInt {
 }
 
 fn bigint_from_u256(value: U256) -> BigInt {
-    BigInt::from_bytes_be(Sign::Plus, &value.to_be_bytes::<32>())
+    match u128::try_from(value) {
+        Ok(small) => BigInt::from(small),
+        Err(_) => BigInt::from_bytes_le(Sign::Plus, &value.to_le_bytes::<32>()),
+    }
+}
+
+pub(super) fn accept_output(value: &BigInt) -> Result<(), String> {
+    u256_from_bigint(value).map(|_| ())
 }
 
 fn u256_from_bigint(value: &BigInt) -> Result<U256, String> {
-    let (sign, bytes) = value.to_bytes_be();
-    if sign == Sign::Minus || bytes.len() > 32 {
+    if value.sign() == Sign::Minus {
         return Err("quote".into());
     }
-    Ok(U256::from_be_slice(&bytes))
+    let mut limbs = [0u64; 4];
+    for (index, digit) in value.magnitude().iter_u64_digits().enumerate() {
+        if index == 4 {
+            return Err("quote".into());
+        }
+        limbs[index] = digit;
+    }
+    Ok(U256::from_limbs(limbs))
 }
