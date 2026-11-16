@@ -3602,7 +3602,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "oracles"
+name = "oracle"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
@@ -3805,7 +3805,7 @@ dependencies = [
  "store",
  "store-model",
  "tokio",
- "venues",
+ "venue",
 ]
 
 [[package]]
@@ -4180,16 +4180,16 @@ dependencies = [
  "eth-p2p",
  "eyre",
  "observability",
- "oracles",
+ "oracle",
  "peer",
  "pipeline",
  "ratatui",
  "serde_json",
- "spots",
+ "spot",
  "store",
  "store-model",
  "tokio",
- "venues",
+ "venue",
 ]
 
 [[package]]
@@ -5399,7 +5399,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "spots"
+name = "spot"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
@@ -5448,7 +5448,7 @@ dependencies = [
  "eyre",
  "num-bigint",
  "observability",
- "oracles",
+ "oracle",
  "redb",
  "reth-network-peers",
  "routing",
@@ -5522,7 +5522,7 @@ dependencies = [
  "simulate",
  "store",
  "trade",
- "venues",
+ "venue",
 ]
 
 [[package]]
@@ -6136,7 +6136,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
-name = "venues"
+name = "venue"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",

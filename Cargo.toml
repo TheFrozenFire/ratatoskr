@@ -13,12 +13,12 @@ members = [
     "crates/store",
     "crates/pipeline",
     "crates/observability",
-    "crates/venues",
+    "crates/venue",
     "crates/routing",
     "crates/searcher",
     "crates/optimizer",
-    "crates/oracles",
-    "crates/spots",
+    "crates/oracle",
+    "crates/spot",
     "crates/action",
     "crates/trade",
     "crates/survey",
@@ -60,13 +60,13 @@ peer = { path = "crates/peer" }
 routing = { path = "crates/routing" }
 searcher = { path = "crates/searcher" }
 optimizer = { path = "crates/optimizer" }
-oracles = { path = "crates/oracles" }
-spots = { path = "crates/spots" }
+oracle = { path = "crates/oracle" }
+spot = { path = "crates/spot" }
 action = { path = "crates/action" }
 trade = { path = "crates/trade" }
 survey = { path = "crates/survey" }
 simulate = { path = "crates/simulate" }
-venues = { path = "crates/venues" }
+venue = { path = "crates/venue" }
 # Libraries for one outbound devp2p socket. Not the reth node.
 reth-chainspec = { git = "https://github.com/paradigmxyz/reth", tag = "v2.10.0" }
 reth-discv4 = { git = "https://github.com/paradigmxyz/reth", tag = "v2.10.0" }

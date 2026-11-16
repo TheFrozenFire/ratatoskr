@@ -5,7 +5,7 @@ use std::time::Instant;
 use alloy_primitives::{Address, B256};
 use routing::SlopeSegment;
 use searcher::{Conduits, Token};
-use venues::{root_address, VenueRow, BALANCER_V2, BALANCER_V3, UNI_V4};
+use venue::{root_address, VenueRow, BALANCER_V2, BALANCER_V3, UNI_V4};
 
 use crate::graph::{Graph, PathEnds};
 use crate::source::Source;
@@ -35,7 +35,7 @@ impl<'a, S> VenueMemory<'a, S> {
 }
 
 impl<S: Source> Source for VenueMemory<'_, S> {
-    fn tokens(&self) -> eyre::Result<Vec<venues::TokenRecord>> {
+    fn tokens(&self) -> eyre::Result<Vec<venue::TokenRecord>> {
         self.inner.tokens()
     }
 

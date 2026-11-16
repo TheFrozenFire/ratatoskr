@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use num_bigint::BigUint;
 use searcher::{Token, NATIVE};
-use venues::kind_name;
+use venue::kind_name;
 
 use super::{defined, multi, single, Class, Scenario};
 use crate::graph::{Deep, PathEnds};

@@ -14,7 +14,7 @@ mod supervise;
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
-    venues::install_catalog_hooks();
+    venue::install_catalog_hooks();
     let cli = cli::Cli::parse();
     let loaded = config::load(&cli.config_dir)?;
     observability::init(&loaded.process.log);

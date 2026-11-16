@@ -81,11 +81,11 @@ fn read_headers(stream: &mut TcpStream) -> io::Result<String> {
 fn respond(method: &str, path: &str) -> (&'static str, String) {
     match (method, path) {
         ("POST", "/pause") => {
-            venues::pause_work();
+            venue::pause_work();
             ("application/json", observability::status_json())
         }
         ("POST", "/resume") => {
-            venues::resume_work();
+            venue::resume_work();
             ("application/json", observability::status_json())
         }
         (_, "/metrics") => (
@@ -123,7 +123,7 @@ mod tests {
     struct ResumeOnDrop;
     impl Drop for ResumeOnDrop {
         fn drop(&mut self) {
-            venues::resume_work();
+            venue::resume_work();
         }
     }
 
@@ -147,27 +147,27 @@ mod tests {
     fn post_pause_and_resume_round_trip() {
         let _one = one_at_a_time();
         let _guard = ResumeOnDrop;
-        venues::resume_work();
+        venue::resume_work();
         let paused = exchange(
             "POST /pause HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
         );
         assert!(paused.starts_with("HTTP/1.1 200 "));
         assert!(paused.contains("\"paused\":true"));
-        assert!(venues::work_paused());
+        assert!(venue::work_paused());
         let resumed = exchange(
             "POST /resume HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
         );
         assert!(resumed.contains("\"paused\":false"));
-        assert!(!venues::work_paused());
+        assert!(!venue::work_paused());
     }
 
     #[test]
     fn get_status_leaves_work_running() {
         let _one = one_at_a_time();
         let _guard = ResumeOnDrop;
-        venues::resume_work();
+        venue::resume_work();
         let body = exchange("GET /status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
         assert!(body.contains("\"paused\":false"));
-        assert!(!venues::work_paused());
+        assert!(!venue::work_paused());
     }
 }

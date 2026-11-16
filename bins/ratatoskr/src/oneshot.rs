@@ -96,7 +96,7 @@ async fn refit(paths: &Paths, caches: &config::Store) -> eyre::Result<()> {
     let caches = caches.clone();
     let wrote = tokio::task::spawn_blocking(move || {
         let catalog = store::service::Catalog::open_with(&venues_path, &caches)?;
-        venues::refit_curves(&catalog)
+        venue::refit_curves(&catalog)
     })
     .await
     .wrap_err("refit task")??;
@@ -118,8 +118,8 @@ async fn refresh(
     let (report, built) = tokio::task::spawn_blocking(move || {
         let catalog = store::service::Catalog::open_with(&venues_path, &caches)?;
         let rpc = chain::Rpc::new(urls)?;
-        let report = venues::refresh_kinds(&catalog, &rpc, &kinds)?;
-        let built = venues::drain_conduits(&catalog)?;
+        let report = venue::refresh_kinds(&catalog, &rpc, &kinds)?;
+        let built = venue::drain_conduits(&catalog)?;
         Ok::<_, eyre::Report>((report, built))
     })
     .await
@@ -142,11 +142,11 @@ async fn reshape(args: &Args, paths: &Paths, caches: &config::Store) -> eyre::Re
         let caches = caches.clone();
         let dropped = tokio::task::spawn_blocking(move || {
             let catalog = store::service::Catalog::open_with(&venues_path, &caches)?;
-            venues::drop_empty_pools(&catalog)
+            venue::drop_empty_pools(&catalog)
         })
         .await
         .wrap_err("drop empty")??;
-        venues::append_dropped_ids(&sample_dir, &dropped)?;
+        venue::append_dropped_ids(&sample_dir, &dropped)?;
         println!("dropped_empty {}", dropped.len());
     }
     if let Some(add) = args.fill {
@@ -154,27 +154,27 @@ async fn reshape(args: &Args, paths: &Paths, caches: &config::Store) -> eyre::Re
         let venues_path = paths.venues.clone();
         let caches = caches.clone();
         let report = tokio::task::spawn_blocking(move || {
-            venues::fill_identities(&src, &venues_path, add, &caches)
+            venue::fill_identities(&src, &venues_path, add, &caches)
         })
         .await
         .wrap_err("fill identities")??;
-        venues::append_fill_ids(&sample_dir, &report.ids)?;
+        venue::append_fill_ids(&sample_dir, &report.ids)?;
         println!("filled {}", report.copied);
         for (kind, count) in &report.by_kind {
-            println!("filled {} {count}", venues::kind_name(*kind));
+            println!("filled {} {count}", venue::kind_name(*kind));
         }
     }
     if let Some(target) = args.trim_to {
         let venues_path = paths.venues.clone();
-        let listed = venues::read_fill_ids(&sample_dir)?;
+        let listed = venue::read_fill_ids(&sample_dir)?;
         let caches = caches.clone();
         let (removed, left) = tokio::task::spawn_blocking(move || {
             let catalog = store::service::Catalog::open_with(&venues_path, &caches)?;
-            venues::trim_listed(&catalog, target, &listed)
+            venue::trim_listed(&catalog, target, &listed)
         })
         .await
         .wrap_err("trim sample")??;
-        venues::write_fill_ids(&sample_dir, &left)?;
+        venue::write_fill_ids(&sample_dir, &left)?;
         println!("trimmed {removed}");
     }
     Ok(())
@@ -186,14 +186,14 @@ fn sample(
     sample_size: u64,
     caches: &config::Store,
 ) -> eyre::Result<()> {
-    let report = venues::sample_identities(src, venues_path, sample_size, caches)?;
+    let report = venue::sample_identities(src, venues_path, sample_size, caches)?;
     observability::info!(
         copied = report.copied,
         anchor = report.anchor,
         "identity sample"
     );
     for (kind, count) in &report.by_kind {
-        observability::info!(kind = venues::kind_name(*kind), count, "sample kind");
+        observability::info!(kind = venue::kind_name(*kind), count, "sample kind");
     }
     if !report.anchor {
         observability::warn!("sample did not include the USDC/WETH 0.3% pool");

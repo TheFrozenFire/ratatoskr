@@ -7,7 +7,7 @@ process:
     - headers
     - venues
     - state
-  log: ratatoskr=info,store=info,pipeline=info,peer=info,eth_p2p=info,venues=info,headers=info,oracles=info,spots=info
+  log: ratatoskr=info,store=info,pipeline=info,peer=info,eth_p2p=info,venue=info,headers=info,oracle=info,spot=info
   metrics: 127.0.0.1:9737
   status_url: http://127.0.0.1:9737
   sample_size: 10000

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use store::LocalStore;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
-use venues::{RunOpts, RunPhase};
+use venue::{RunOpts, RunPhase};
 
 pub(crate) async fn supervise(args: Args, loaded: config::Config) -> eyre::Result<()> {
     let metrics = args
@@ -173,8 +173,8 @@ fn spawn_pipelines(
         let spot_settings = loaded.spots.clone();
         tasks.spawn_local(async move {
             let book = store::service::Spots::open_with(&spots_path, spot_cache)?;
-            spots::run(book, stop, spot_settings, move || {
-                spots::conduit_edges(&store)
+            spot::run(book, stop, spot_settings, move || {
+                spot::conduit_edges(&store)
             })
             .await
         });
@@ -198,7 +198,7 @@ fn spawn_pipelines(
         let oracle_settings = loaded.oracles.clone();
         tasks.spawn_local(async move {
             let book = store::service::Feeds::open_with(&feeds, feed_cache)?;
-            oracles::run(book, rpcs, oracle_settings, stop).await
+            oracle::run(book, rpcs, oracle_settings, stop).await
         });
     }
     tasks
@@ -308,8 +308,8 @@ async fn pause_signal() -> eyre::Result<()> {
     let mut resume = signal(SignalKind::user_defined2())?;
     loop {
         tokio::select! {
-            _ = pause.recv() => venues::pause_work(),
-            _ = resume.recv() => venues::resume_work(),
+            _ = pause.recv() => venue::pause_work(),
+            _ = resume.recv() => venue::resume_work(),
         }
     }
 }

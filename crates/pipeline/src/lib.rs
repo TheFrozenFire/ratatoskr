@@ -10,13 +10,13 @@ mod venue;
 pub use header::HeaderSource;
 pub use venue::VenueSource;
 
+use ::venue::{Put, ReceiptBody, VenueRow};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use store::{ChainStore, CorpusStore, DiscoveryStore, LocalStore};
 use store_model::{BlockRecord, HeaderRecord};
 use tokio::sync::mpsc;
-use venues::{Put, ReceiptBody, VenueRow};
 
 /// One commit. Cloning clones the `Arc`s, not the payloads.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -214,6 +214,7 @@ fn source_retries(err: &eyre::Report) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{Fanout, RecordBatch, Sink, SinkReply, Source, StoreSink};
+    use ::venue::{Put, VenueRow};
     use alloy_primitives::{address, b256, Address, B256};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -222,7 +223,6 @@ mod tests {
     use store::{ChainStore, CorpusStore, DiscoveryStore, LocalStore};
     use store_model::{BlockRecord, HeaderRecord, MAINNET_GENESIS_HASH};
     use tokio::sync::watch;
-    use venues::{Put, VenueRow};
 
     struct TempDir(PathBuf);
 

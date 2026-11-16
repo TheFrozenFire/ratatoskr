@@ -13,7 +13,7 @@ peer.workspace = true
 store-model.workspace = true
 store.workspace = true
 tokio.workspace = true
-venues.workspace = true
+venue.workspace = true
 
 [dev-dependencies]
 alloy-primitives.workspace = true

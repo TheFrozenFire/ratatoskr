@@ -20,4 +20,4 @@ tokio.workspace = true
 
 [dev-dependencies]
 config.workspace = true
-oracles.workspace = true
+oracle.workspace = true

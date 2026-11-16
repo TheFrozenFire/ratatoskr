@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use searcher::{Conduits, Curve, Route, RouteSet, Token, NEIGHBOR_LIMIT, WALK_DEPTH};
-use venues::kind_name;
+use venue::kind_name;
 
 use crate::graph::{Graph, HubCensus, HubReach, Selection};
 use crate::kinds::{curve_kinds, curve_label, kind_list};

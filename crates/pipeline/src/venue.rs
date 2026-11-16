@@ -7,10 +7,10 @@
 //! repeated here.
 
 use crate::{Sink, Source};
+use ::venue::{execute, RunOpts, RunPhase, RunReport};
 use peer::HistoryPeer;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use venues::{execute, RunOpts, RunPhase, RunReport};
 
 pub struct VenueSource<S, P> {
     store: S,
@@ -43,12 +43,12 @@ impl<S, P> VenueSource<S, P> {
 
 impl<S, P> Source for VenueSource<S, P>
 where
-    S: venues::ChainStore
-        + venues::CorpusStore
-        + venues::DiscoveryStore
-        + venues::VenueStore
-        + venues::ConduitStore
-        + venues::TokenStore
+    S: ::venue::ChainStore
+        + ::venue::CorpusStore
+        + ::venue::DiscoveryStore
+        + ::venue::VenueStore
+        + ::venue::ConduitStore
+        + ::venue::TokenStore
         + Clone
         + 'static,
     P: HistoryPeer + Clone + 'static,
@@ -71,7 +71,7 @@ where
         }
         let mut opts = self.opts.clone();
         loop {
-            if venues::hold_for_pause(&stop).await {
+            if ::venue::hold_for_pause(&stop).await {
                 return Ok(());
             }
             let report = execute(&self.store, self.peer.as_ref(), &opts, stop.clone()).await?;
@@ -83,7 +83,7 @@ where
             if !corpus_error {
                 opts.no_corpus = true;
             }
-            if venues::hold_for_pause(&stop).await {
+            if ::venue::hold_for_pause(&stop).await {
                 return Ok(());
             }
             tokio::select! {

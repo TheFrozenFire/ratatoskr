@@ -1,7 +1,7 @@
 use alloy_primitives::{Address, B256};
 use routing::SlopeSegment;
 use store::service::{Catalog, EntityRead};
-use venues::{TokenRecord, VenueRow};
+use venue::{TokenRecord, VenueRow};
 
 /// Reads the entity file. The writer and a read-only follower both implement it.
 pub(crate) trait Source {

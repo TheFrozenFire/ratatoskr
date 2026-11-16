@@ -2,7 +2,7 @@ use alloy_primitives::Address;
 use num_bigint::BigUint;
 use num_traits::Pow;
 use searcher::{Token, NATIVE};
-use venues::TokenRecord;
+use venue::TokenRecord;
 
 pub(crate) struct Known {
     pub(crate) name: String,

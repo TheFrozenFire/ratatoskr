@@ -24,6 +24,6 @@ serde_json.workspace = true
 store.workspace = true
 store-model.workspace = true
 tokio = { workspace = true, features = ["signal"] }
-venues.workspace = true
-oracles.workspace = true
-spots.workspace = true
+venue.workspace = true
+oracle.workspace = true
+spot.workspace = true

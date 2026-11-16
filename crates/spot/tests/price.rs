@@ -3,7 +3,7 @@
 use alloy_primitives::Address;
 use num_bigint::BigInt;
 use routing::{Action, SlopeSegment};
-use spots::{price, rank_hubs, CustodialWrap, Edge, Numeraire, Spot};
+use spot::{price, rank_hubs, CustodialWrap, Edge, Numeraire, Spot};
 
 fn addr(byte: u8) -> Address {
     let mut raw = [0_u8; 20];
@@ -313,8 +313,8 @@ fn hubs_keep_the_lower_token_when_the_counts_match() {
 
 #[test]
 fn the_mainnet_sizes_are_a_hundredth_a_tenth_and_one_of_each_numeraire() {
-    let numeraires = spots::mainnet_numeraires();
-    assert_eq!(numeraires[0].token, spots::WETH);
+    let numeraires = spot::mainnet_numeraires();
+    assert_eq!(numeraires[0].token, spot::WETH);
     assert_eq!(
         numeraires[0].sizes,
         vec![
@@ -323,7 +323,7 @@ fn the_mainnet_sizes_are_a_hundredth_a_tenth_and_one_of_each_numeraire() {
             BigInt::from(10u64.pow(18))
         ]
     );
-    assert_eq!(numeraires[1].token, spots::USDC);
+    assert_eq!(numeraires[1].token, spot::USDC);
     assert_eq!(
         numeraires[1].sizes,
         vec![

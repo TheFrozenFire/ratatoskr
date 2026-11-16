@@ -56,7 +56,7 @@ impl Default for Process {
             data_dir: "data/ratatoskr".into(),
             services: vec!["db".into(), "peer".into()],
             pipelines: vec!["headers".into(), "venues".into(), "state".into()],
-            log: "ratatoskr=info,store=info,pipeline=info,peer=info,eth_p2p=info,venues=info,headers=info,oracles=info,spots=info".into(),
+            log: "ratatoskr=info,store=info,pipeline=info,peer=info,eth_p2p=info,venue=info,headers=info,oracle=info,spot=info".into(),
             metrics: "127.0.0.1:9737".into(),
             status_url: "http://127.0.0.1:9737".into(),
             sample_size: 10_000,

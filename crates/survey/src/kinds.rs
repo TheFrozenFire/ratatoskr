@@ -1,6 +1,6 @@
 use num_bigint::{BigInt, Sign};
 use searcher::Curve;
-use venues::kind_name;
+use venue::kind_name;
 
 pub(crate) fn curve_label(curve: &Curve) -> String {
     match curve {

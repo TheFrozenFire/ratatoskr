@@ -315,7 +315,7 @@ fn one<S: Source>(
     lines.join("\n") + "\n"
 }
 
-fn token_decimals(records: &[venues::TokenRecord]) -> BTreeMap<Token, u8> {
+fn token_decimals(records: &[venue::TokenRecord]) -> BTreeMap<Token, u8> {
     let mut places = BTreeMap::new();
     for row in records {
         let Some(decimals) = row.decimals else {
@@ -351,7 +351,7 @@ fn token_count(stage: &Stage) -> usize {
     tokens.len()
 }
 
-fn wrapper_decimals(records: &[venues::TokenRecord], wrapped: Token) -> u32 {
+fn wrapper_decimals(records: &[venue::TokenRecord], wrapped: Token) -> u32 {
     records
         .iter()
         .find(|row| token::token_of(row.address) == wrapped)
