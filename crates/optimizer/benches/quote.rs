@@ -47,13 +47,17 @@ fn chords() -> Vec<Chord> {
 }
 
 fn swap(pool: u8) -> Action {
+    swap_pair(pool, 1, 2)
+}
+
+fn swap_pair(pool: u8, token_in: u8, token_out: u8) -> Action {
     let contract = action::Address::new([pool; 20]).expect("contract");
     Action::Swap(
         action::Swap::new(
             contract,
             contract.pool_id(),
-            action::Token([1; 20]),
-            action::Token([2; 20]),
+            action::Token([token_in; 20]),
+            action::Token([token_out; 20]),
             action::Invariant::Product,
         )
         .expect("swap"),
@@ -145,6 +149,99 @@ fn fat_curve() -> Curve {
     )
 }
 
+/// One fat conduit per leg. Leg `i` spends token `i + 1` and pays token `i + 2`.
+fn fat_leg(leg: u8) -> Edge {
+    let token_in = leg + 1;
+    let token_out = leg + 2;
+    let curve = fat_curve();
+    let Curve::Chords(chords) = curve else {
+        unreachable!("fat conduit");
+    };
+    let chords = chords
+        .into_iter()
+        .enumerate()
+        .map(|(index, mut chord)| {
+            chord.action = swap_pair(
+                leg.saturating_mul(16).saturating_add(index as u8 + 1),
+                token_in,
+                token_out,
+            );
+            chord
+        })
+        .collect();
+    Edge {
+        action: swap_pair(
+            leg.saturating_mul(16).saturating_add(1),
+            token_in,
+            token_out,
+        ),
+        curve: Curve::Chords(chords),
+    }
+}
+
+fn route_problem(legs: u8) -> Problem {
+    let edges: Vec<Edge> = (0..legs).map(fat_leg).collect();
+    let width: BigInt = match &edges[0].curve {
+        Curve::Chords(chords) => chords.iter().map(|chord| &chord.width).sum(),
+        Curve::Unlimited => BigInt::from(0),
+    };
+    Problem {
+        inputs: vec![Input {
+            token: action::Token([1; 20]),
+            amount: width,
+        }],
+        outputs: vec![Output {
+            token: action::Token([legs + 1; 20]),
+            weight: BigInt::from(1),
+        }],
+        routes: vec![Route {
+            edges: (0..edges.len()).collect(),
+        }],
+        edges,
+        hubs: Vec::new(),
+        gas: BTreeMap::new(),
+        gas_ceiling: None,
+    }
+}
+
+fn quote_route(problem: &Problem, input: &BigInt) -> BigInt {
+    let mut flow = input.clone();
+    for index in &problem.routes[0].edges {
+        flow = quote_curve(&problem.edges[*index].curve, &flow);
+    }
+    flow
+}
+
+fn fat_route(c: &mut Criterion) {
+    let two = route_problem(2);
+    let three = route_problem(3);
+    let width = two.inputs[0].amount.clone();
+    let mid = &width / 2;
+    let mut quote_group = c.benchmark_group("route_quote");
+    quote_group.sample_size(10);
+    quote_group.warm_up_time(Duration::from_millis(200));
+    quote_group.measurement_time(Duration::from_millis(400));
+    quote_group.bench_function("two_mid", |b| {
+        b.iter(|| quote_route(black_box(&two), black_box(&mid)))
+    });
+    quote_group.bench_function("three_mid", |b| {
+        b.iter(|| quote_route(black_box(&three), black_box(&mid)))
+    });
+    quote_group.finish();
+
+    let mut solve_group = c.benchmark_group("route_solve");
+    solve_group.sample_size(10);
+    solve_group.warm_up_time(Duration::from_millis(200));
+    solve_group.measurement_time(Duration::from_secs(2));
+    solve_group.bench_function("two_fat", |b| {
+        b.iter(|| optimize(black_box(&two)).expect("plan"))
+    });
+    solve_group.bench_function("three_fat", |b| {
+        b.iter(|| optimize(black_box(&three)).expect("plan"))
+    });
+    solve_group.finish();
+}
+
 fn fat_solve(c: &mut Criterion) {
     let curve = fat_curve();
     let width: BigInt = match &curve {
@@ -180,5 +277,5 @@ fn fat_solve(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, quote, fat_solve);
+criterion_group!(benches, quote, fat_solve, fat_route);
 criterion_main!(benches);

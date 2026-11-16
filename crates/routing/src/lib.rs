@@ -10,11 +10,13 @@
 
 pub mod basket;
 mod book;
+mod course;
 pub mod hub;
 pub mod latency;
 mod pay;
 
 pub use book::{At, Seat, SlopeBook, Spot};
+pub use course::Course;
 pub use pay::{chord_pay, quote_marginals};
 
 use num_bigint::BigInt;

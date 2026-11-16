@@ -335,6 +335,39 @@ fn two_legs_pay_more_than_the_direct_conduit() {
 }
 
 #[test]
+fn an_equal_slope_across_two_chords_beats_the_shorter_direct_edge() {
+    let problem = problem(
+        &[(1, 20_000)],
+        &[(3, 1)],
+        vec![
+            conduit(
+                1,
+                2,
+                vec![segment(10_000, 3_000, 2), segment(10_000, 3_000, 2)],
+            ),
+            conduit(2, 3, vec![segment(20_000, 20_000, 3)]),
+            conduit(1, 3, vec![segment(20_000, 6_000, 1)]),
+        ],
+        vec![vec![0, 1], vec![2]],
+    );
+    let plan = optimize(&problem).expect("curves");
+    funded(&problem, &plan);
+    assert_eq!(plan.count, z(6_000));
+    assert_eq!(spent(&plan, 1), z(20_000));
+    assert_eq!(received(&plan, 3), z(6_000));
+    let wide = plan
+        .tenders
+        .iter()
+        .find(|tender| is_pool(&tender.action, 2))
+        .expect("equal slope");
+    assert_eq!(wide.input, z(20_000));
+    assert!(plan
+        .tenders
+        .iter()
+        .all(|tender| !is_pool(&tender.action, 1)));
+}
+
+#[test]
 fn a_wide_multi_edge_piece_is_taken_whole() {
     let problem = problem(
         &[(1, 2_000_000)],

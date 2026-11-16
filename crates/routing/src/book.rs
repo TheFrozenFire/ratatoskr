@@ -39,6 +39,26 @@ pub enum Spot {
     Other,
 }
 
+/// An open integer rate, or why that run is not available.
+pub(crate) enum Run {
+    /// The prefix is not native, or the tender is negative.
+    Wide,
+    /// The open chord does not pay a positive integer rate.
+    Break,
+    /// `allow` input stays on `rate` output per input.
+    Rate { rate: u128, allow: u128 },
+}
+
+/// Whether a native slope can fund an added output.
+pub(crate) enum Cover {
+    /// The prefix is not native, or the tender is negative.
+    Wide,
+    /// The open width pays less than the asked output.
+    Short,
+    /// Least input whose added output meets the ask.
+    Take(u128),
+}
+
 enum Body {
     Native {
         cum_w: Vec<u128>,
@@ -261,6 +281,239 @@ impl SlopeBook {
             Some(total - input)
         }
     }
+
+    /// Least input after `tender` whose added output is at least `need`.
+    pub(crate) fn least_input(&self, tender: &BigInt, need: &BigInt) -> Cover {
+        if need.sign() == Sign::Minus || need.is_zero() {
+            return Cover::Take(0);
+        }
+        let Body::Native { cum_w, cum_out, .. } = &self.body else {
+            return Cover::Wide;
+        };
+        if tender.sign() == Sign::Minus {
+            return Cover::Wide;
+        }
+        let Some(mut need) = u128_of(need) else {
+            return Cover::Short;
+        };
+        let (mut index, mut offset) = match self.spot(tender) {
+            Spot::Here(seat) => (seat.index, seat.offset),
+            Spot::Past => return Cover::Short,
+            Spot::Other => return Cover::Wide,
+        };
+        let mut spent = 0u128;
+        while index + 1 < cum_w.len() {
+            let width = cum_w[index + 1] - cum_w[index];
+            let output = cum_out[index + 1] - cum_out[index];
+            if width == 0 {
+                index += 1;
+                continue;
+            }
+            if offset >= width {
+                offset -= width;
+                index += 1;
+                continue;
+            }
+            let rem_w = width - offset;
+            let paid = mul_div(output, offset, width);
+            if paid >= output {
+                let Some(next) = spent.checked_add(rem_w) else {
+                    return Cover::Wide;
+                };
+                spent = next;
+                offset = 0;
+                index += 1;
+                continue;
+            }
+            let rem_out = output - paid;
+            if need <= rem_out {
+                let Some(take) = ceil_take(output, width, offset, need) else {
+                    return Cover::Short;
+                };
+                let Some(total) = spent.checked_add(take) else {
+                    return Cover::Wide;
+                };
+                return Cover::Take(total);
+            }
+            need -= rem_out;
+            let Some(next) = spent.checked_add(rem_w) else {
+                return Cover::Wide;
+            };
+            spent = next;
+            offset = 0;
+            index += 1;
+        }
+        Cover::Short
+    }
+
+    /// Width of the open chord that still pays output.
+    ///
+    /// `Some(None)` when `tender` is on the prefix and that chord is already
+    /// spent. `None` when the prefix is not native or `tender` is negative.
+    pub(crate) fn paying_width(&self, tender: &BigInt) -> Option<Option<u128>> {
+        let Body::Native { .. } = &self.body else {
+            return None;
+        };
+        if tender.sign() == Sign::Minus {
+            return None;
+        }
+        match self.spot(tender) {
+            Spot::Other => None,
+            Spot::Past => Some(None),
+            Spot::Here(seat) => {
+                if seat.width == 0 || seat.rem_w == 0 || seat.output == 0 {
+                    return Some(None);
+                }
+                let paid = mul_div(seat.output, seat.offset, seat.width);
+                if paid >= seat.output {
+                    Some(None)
+                } else {
+                    Some(Some(seat.rem_w))
+                }
+            }
+        }
+    }
+
+    /// Consecutive input that stays on the open chord's integer rate.
+    pub(crate) fn integer_run(&self, tender: &BigInt) -> Run {
+        let Body::Native { cum_w, cum_out, .. } = &self.body else {
+            return Run::Wide;
+        };
+        if tender.sign() == Sign::Minus {
+            return Run::Wide;
+        }
+        let Spot::Here(seat) = self.spot(tender) else {
+            return Run::Break;
+        };
+        if seat.width == 0 || seat.output == 0 || seat.rem_w == 0 || seat.output % seat.width != 0 {
+            return Run::Break;
+        }
+        let paid = mul_div(seat.output, seat.offset, seat.width);
+        if paid >= seat.output {
+            return Run::Break;
+        }
+        let rate = seat.output / seat.width;
+        let mut allow = seat.rem_w;
+        let mut index = seat.index + 1;
+        while index + 1 < cum_w.len() {
+            let width = cum_w[index + 1] - cum_w[index];
+            let output = cum_out[index + 1] - cum_out[index];
+            if width == 0 || output % width != 0 || output / width != rate {
+                break;
+            }
+            let Some(sum) = allow.checked_add(width) else {
+                return Run::Wide;
+            };
+            allow = sum;
+            index += 1;
+        }
+        Run::Rate { rate, allow }
+    }
+
+    /// Input from `tender` that reaches the end of the chord holding `tender + take`.
+    ///
+    /// `None` when `take` is not a positive native amount.
+    pub(crate) fn landing_room(&self, tender: &BigInt, take: &BigInt) -> Option<u128> {
+        if take.sign() != Sign::Plus {
+            return None;
+        }
+        let Body::Native { cum_w, .. } = &self.body else {
+            return None;
+        };
+        let start = u128_of(tender)?;
+        let take = u128_of(take)?;
+        let pos = start.checked_add(take)?;
+        let total = *cum_w.last().unwrap_or(&0);
+        if start >= total {
+            return Some(0);
+        }
+        if pos >= total {
+            return Some(total - start);
+        }
+        let end = cum_w.partition_point(|width| *width < pos);
+        Some(cum_w[end] - start)
+    }
+
+    /// `take` after `tender` stays on one output-per-width.
+    ///
+    /// `None` when the prefix is not native or an amount does not fit in `u128`.
+    pub(crate) fn one_rate(&self, tender: &BigInt, take: &BigInt) -> Option<bool> {
+        if take.sign() != Sign::Plus {
+            return Some(false);
+        }
+        let Body::Native { cum_w, cum_out, .. } = &self.body else {
+            return None;
+        };
+        let start = u128_of(tender)?;
+        let take = u128_of(take)?;
+        let total = *cum_w.last().unwrap_or(&0);
+        if start >= total {
+            return Some(false);
+        }
+        let mut index = cum_w.partition_point(|width| *width <= start) - 1;
+        let mut offset = start - cum_w[index];
+        let width0 = cum_w[index + 1] - cum_w[index];
+        let output0 = cum_out[index + 1] - cum_out[index];
+        if width0 == 0 || offset >= width0 {
+            return Some(false);
+        }
+        let paid = mul_div(output0, offset, width0);
+        if output0 == 0 || paid >= output0 {
+            return Some(false);
+        }
+        let mut left = take;
+        let mut first = true;
+        while left > 0 && index + 1 < cum_w.len() {
+            let width = cum_w[index + 1] - cum_w[index];
+            let output = cum_out[index + 1] - cum_out[index];
+            if width == 0 || offset >= width {
+                offset = offset.saturating_sub(width);
+                index += 1;
+                continue;
+            }
+            if !first && !same_ratio(output, width, output0, width0) {
+                return Some(false);
+            }
+            first = false;
+            let room = width - offset;
+            if left <= room {
+                return Some(true);
+            }
+            left -= room;
+            offset = 0;
+            index += 1;
+        }
+        Some(false)
+    }
+}
+
+fn same_ratio(output: u128, width: u128, output0: u128, width0: u128) -> bool {
+    U256::from(output) * U256::from(width0) == U256::from(output0) * U256::from(width)
+}
+
+fn ceil_take(output: u128, width: u128, offset: u128, need: u128) -> Option<u128> {
+    if need == 0 {
+        return Some(0);
+    }
+    if output == 0 {
+        return None;
+    }
+    let paid = mul_div(output, offset, width);
+    let target = paid.checked_add(need)?;
+    if target > output {
+        return None;
+    }
+    let numer = U256::from(target) * U256::from(width) + U256::from(output - 1);
+    let (end, _) = numer.div_rem(U256::from(output));
+    let end = u128::try_from(end).ok()?;
+    if end <= offset {
+        return None;
+    }
+    let take = end - offset;
+    if take > width - offset {
+        return None;
+    }
+    Some(take)
 }
 
 fn quote_native(cum_w: &[u128], cum_out: &[u128], input: u128) -> u128 {

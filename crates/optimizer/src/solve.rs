@@ -14,13 +14,14 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use action::Action;
 use num_bigint::{BigInt, Sign};
 use num_traits::{ToPrimitive, Zero};
-use routing::{At, Seat, SlopeBook, Spot};
+use routing::{At, Course, Seat, SlopeBook, Spot};
 
 use crate::{quote_curve, Chord, Curve, Edge, Flow, Plan, Problem, Route, Tender, Token};
 
 struct Active {
     keys: Vec<usize>,
     books: Vec<SlopeBook>,
+    courses: Vec<Option<Course>>,
 }
 
 thread_local! {
@@ -45,15 +46,52 @@ impl Bound {
             keys.push(chords.as_ptr() as usize);
             books.push(book);
         }
-        BOUND.with(|slot| *slot.borrow_mut() = Some(Active { keys, books }));
+        let courses = problem
+            .routes
+            .iter()
+            .map(|route| course_of(route, problem))
+            .collect();
+        BOUND.with(|slot| {
+            *slot.borrow_mut() = Some(Active {
+                keys,
+                books,
+                courses,
+            })
+        });
         Self
     }
+}
+
+fn course_of(route: &Route, problem: &Problem) -> Option<Course> {
+    if route.edges.len() < 2 {
+        return None;
+    }
+    let mut legs = Vec::with_capacity(route.edges.len());
+    for index in &route.edges {
+        let Curve::Chords(chords) = &problem.edges.get(*index)?.curve else {
+            return None;
+        };
+        legs.push(SlopeBook::prepare(
+            chords.iter().map(|chord| (&chord.width, &chord.output)),
+        )?);
+    }
+    Course::new(legs)
 }
 
 impl Drop for Bound {
     fn drop(&mut self) {
         BOUND.with(|slot| *slot.borrow_mut() = None);
     }
+}
+
+fn with_course<T>(route_index: usize, read: impl FnOnce(Option<&Course>) -> T) -> T {
+    BOUND.with(|slot| {
+        let active = slot.borrow();
+        let course = active
+            .as_ref()
+            .and_then(|active| active.courses.get(route_index).and_then(Option::as_ref));
+        read(course)
+    })
 }
 
 fn with_book<T>(chords: &[Chord], read: impl FnOnce(Option<&SlopeBook>) -> T) -> T {
@@ -96,6 +134,7 @@ fn quoted(chords: &[Chord], input: &BigInt) -> Option<BigInt> {
 }
 
 pub(crate) fn output_bound(problem: &Problem) -> BigInt {
+    let _bound = Bound::install(problem);
     let budgets: HashMap<Token, BigInt> = problem
         .inputs
         .iter()
@@ -574,6 +613,11 @@ fn paid_offer(
     need: &BigInt,
     room: Option<&BigInt>,
 ) -> Option<Step> {
+    if room.is_none() {
+        if let Some(step) = course_offer(problem, state, route_index, need) {
+            return Some(step);
+        }
+    }
     let budget = source_budget(problem, state, route_index)?;
     if budget.is_zero() {
         return None;
@@ -596,6 +640,97 @@ fn paid_offer(
     } else {
         Some(step)
     }
+}
+
+fn course_offer(
+    problem: &Problem,
+    state: &Live,
+    route_index: usize,
+    need: &BigInt,
+) -> Option<Step> {
+    let route = &problem.routes[route_index];
+    if route.edges.len() < 2 || need.sign() != num_bigint::Sign::Plus {
+        return None;
+    }
+    for edge_index in route.edges.iter().skip(1) {
+        let edge = &problem.edges[*edge_index];
+        if !state.excess(&spent(edge)).is_zero() {
+            return None;
+        }
+    }
+    let edge_index = route.edges[0];
+    let budget = state.budget.get(&spent(&problem.edges[edge_index]))?;
+    let tenders: Vec<&BigInt> = route
+        .edges
+        .iter()
+        .map(|index| &state.tender[*index])
+        .collect();
+    let (takes, gain) = with_course(route_index, |course| {
+        let course = course?;
+        let limit = course.useful(&tenders, budget)?;
+        if limit <= BigInt::from(SCAN_LIMIT) || limit.to_u128().is_none() {
+            return None;
+        }
+        let (takes, gain) = match course.linear_take(&tenders, &limit) {
+            Some(None) => return None,
+            Some(Some(take)) => course.same_rate(&tenders, &take)?,
+            None => match course.open_span(&tenders, &limit) {
+                Some(span) => course_span(course, &tenders, &limit, span)?,
+                None => course_landing(course, &tenders, &limit)?,
+            },
+        };
+        if &gain >= need {
+            course.least_push(&tenders, need, budget)
+        } else {
+            Some((takes, gain))
+        }
+    })?;
+    let gas = step_gas(problem, state, route, &takes);
+    Some(stamp(takes, gain, gas))
+}
+
+fn course_span(
+    course: &Course,
+    tenders: &[&BigInt],
+    limit: &BigInt,
+    span: BigInt,
+) -> Option<(Vec<BigInt>, BigInt)> {
+    let (takes, gain) = course.drive(tenders, &span)?;
+    if span < *limit {
+        if let Some((flat_takes, flat_gain)) = course.same_rate(tenders, limit) {
+            if ratio_beats(&flat_gain, limit, &gain, Some(&span)) {
+                return Some((flat_takes, flat_gain));
+            }
+        }
+    }
+    Some((takes, gain))
+}
+
+fn course_landing(
+    course: &Course,
+    tenders: &[&BigInt],
+    limit: &BigInt,
+) -> Option<(Vec<BigInt>, BigInt)> {
+    let one = BigInt::from(1);
+    let (mut takes, mut gain) = course.push(tenders, &one)?;
+    let mut span = one;
+    if let Some(land) = course.landing(tenders, limit) {
+        if let Some((land_takes, land_gain)) = course.push(tenders, &land) {
+            if ratio_beats(&land_gain, &land, &gain, Some(&span)) {
+                span = land;
+                takes = land_takes;
+                gain = land_gain;
+            }
+        }
+    }
+    if span < *limit {
+        if let Some((flat_takes, flat_gain)) = course.same_rate(tenders, limit) {
+            if ratio_beats(&flat_gain, limit, &gain, Some(&span)) {
+                return Some((flat_takes, flat_gain));
+            }
+        }
+    }
+    Some((takes, gain))
 }
 
 fn best_prefix(
@@ -2011,7 +2146,18 @@ fn forward(problem: &Problem, route: &Route, budget: &BigInt) -> BigInt {
         let Some(edge) = problem.edges.get(*index) else {
             return BigInt::from(0);
         };
-        flow = quote_curve(&edge.curve, &flow);
+        if flow.sign() != num_bigint::Sign::Plus {
+            return BigInt::from(0);
+        }
+        flow = if let Curve::Chords(chords) = &edge.curve {
+            with_book(chords, |book| {
+                book.and_then(|book| book.delta_u128(&BigInt::from(0), &flow))
+                    .map(BigInt::from)
+            })
+            .unwrap_or_else(|| quote_curve(&edge.curve, &flow))
+        } else {
+            quote_curve(&edge.curve, &flow)
+        };
     }
     flow
 }
