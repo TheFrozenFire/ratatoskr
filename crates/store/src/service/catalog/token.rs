@@ -136,6 +136,13 @@ pub(crate) fn read_token_row(
     address: Address,
 ) -> eyre::Result<Option<TokenRecord>> {
     let read = db.begin_read()?;
+    token_row(&read, address)
+}
+
+pub(crate) fn token_row(
+    read: &redb::ReadTransaction,
+    address: Address,
+) -> eyre::Result<Option<TokenRecord>> {
     let table = match read.open_table(TOKENS) {
         Ok(table) => table,
         Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
@@ -149,6 +156,10 @@ pub(crate) fn read_token_row(
 
 pub(crate) fn read_token_rows(db: &impl crate::storage::Handle) -> eyre::Result<Vec<TokenRecord>> {
     let read = db.begin_read()?;
+    token_rows(&read)
+}
+
+pub(crate) fn token_rows(read: &redb::ReadTransaction) -> eyre::Result<Vec<TokenRecord>> {
     let table = match read.open_table(TOKENS) {
         Ok(table) => table,
         Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),

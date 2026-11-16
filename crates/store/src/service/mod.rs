@@ -13,6 +13,7 @@ mod headers;
 mod hooks;
 mod peers;
 mod pools;
+mod query;
 mod spots;
 mod state;
 
@@ -28,5 +29,6 @@ pub use headers::HeaderChain;
 pub use hooks::{install_capacity, Capacity};
 pub use peers::Peers;
 pub use pools::Pools;
+pub use query::{ConduitPoint, ConduitRead, ConduitScan, TokenRows, VenuePoint};
 pub use spots::Error as SpotError;
 pub use spots::Spots;

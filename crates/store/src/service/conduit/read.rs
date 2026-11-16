@@ -40,9 +40,31 @@ pub(crate) fn read_conduit_at(
     token_out: Address,
 ) -> eyre::Result<Option<StoredConduit>> {
     let read = db.begin_read()?;
-    let Some(table) = open_conduits(&read)? else {
+    conduit_point(&read, token_in, token_out)
+}
+
+pub(crate) fn conduit_point(
+    read: &redb::ReadTransaction,
+    token_in: Address,
+    token_out: Address,
+) -> eyre::Result<Option<StoredConduit>> {
+    let Some(table) = open_conduit_table(read)? else {
         return Ok(None);
     };
+    conduit_get(&table, token_in, token_out)
+}
+
+pub(crate) fn open_conduit_table(
+    read: &redb::ReadTransaction,
+) -> eyre::Result<Option<redb::ReadOnlyTable<&'static [u8], &'static [u8]>>> {
+    open_conduits(read)
+}
+
+pub(crate) fn conduit_get(
+    table: &redb::ReadOnlyTable<&'static [u8], &'static [u8]>,
+    token_in: Address,
+    token_out: Address,
+) -> eyre::Result<Option<StoredConduit>> {
     let key = pair_key(token_in, token_out);
     match table.get(key.as_slice())? {
         Some(value) => Ok(Some(decode_conduit(value.value())?)),
@@ -61,10 +83,17 @@ pub(crate) fn visit_conduits_at(
 
 pub(crate) fn visit_conduit_rows(
     db: &impl crate::storage::Handle,
-    mut visit: impl FnMut(Address, Address, u64, &[SlopeSegment]) -> eyre::Result<()>,
+    visit: impl FnMut(Address, Address, u64, &[SlopeSegment]) -> eyre::Result<()>,
 ) -> eyre::Result<()> {
     let read = db.begin_read()?;
-    let Some(table) = open_conduits(&read)? else {
+    conduit_rows(&read, visit)
+}
+
+pub(crate) fn conduit_rows(
+    read: &redb::ReadTransaction,
+    mut visit: impl FnMut(Address, Address, u64, &[SlopeSegment]) -> eyre::Result<()>,
+) -> eyre::Result<()> {
+    let Some(table) = open_conduit_table(read)? else {
         return Ok(());
     };
     for item in table.iter()? {

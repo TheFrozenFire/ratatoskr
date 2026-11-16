@@ -152,6 +152,14 @@ pub(crate) fn read_venue_row(
     id: B256,
 ) -> eyre::Result<Option<VenueRow>> {
     let read = db.begin_read()?;
+    venue_row(&read, kind, id)
+}
+
+pub(crate) fn venue_row(
+    read: &redb::ReadTransaction,
+    kind: u8,
+    id: B256,
+) -> eyre::Result<Option<VenueRow>> {
     let table = match read.open_table(VENUES) {
         Ok(table) => table,
         Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),

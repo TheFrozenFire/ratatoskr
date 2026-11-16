@@ -14,14 +14,15 @@ mod identity;
 mod sample;
 mod token;
 
-pub(crate) use identity::read_venue_row;
+pub(crate) use identity::{read_venue_row, venue_row};
 pub use sample::{
     append_dropped_ids, append_fill_ids, fill_identities, read_fill_ids, sample_identities,
     write_fill_ids, FillReport, SampleReport,
 };
+pub(crate) use token::token_rows;
 
 use crate::storage::{Database, ReadDatabase};
-use redb::TableDefinition;
+use redb::{ReadableDatabase, TableDefinition};
 use std::path::{Path, PathBuf};
 
 pub(crate) const VENUES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("venues");
@@ -98,6 +99,18 @@ impl EntityRead {
         Ok(Self {
             entities: ReadDatabase::open(&file, cache)?,
         })
+    }
+
+    /// One snapshot of `entities.redb`. Queries on it share the transaction.
+    pub fn begin_read(&self) -> eyre::Result<redb::ReadTransaction> {
+        Ok(self.entities.begin_read()?)
+    }
+}
+
+impl Catalog {
+    /// One snapshot of `entities.redb`. Queries on it share the transaction.
+    pub fn begin_read(&self) -> eyre::Result<redb::ReadTransaction> {
+        Ok(self.entities.begin_read()?)
     }
 }
 

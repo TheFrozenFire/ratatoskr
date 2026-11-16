@@ -13,6 +13,7 @@ mod member;
 mod read;
 
 pub(crate) use job::account_jobs;
+pub(crate) use read::{conduit_get, conduit_point, conduit_rows, open_conduit_table};
 
 use alloy_primitives::{Address, B256};
 use redb::{ReadableDatabase, ReadableTableMetadata, TableDefinition};
