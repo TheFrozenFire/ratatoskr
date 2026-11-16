@@ -25,7 +25,11 @@ pub(crate) struct Stage {
     pub(crate) cache: CurveCache,
 }
 
-pub(crate) fn load<S: Source>(source: &S, spots: &config::Spots) -> eyre::Result<Stage> {
+pub(crate) fn load<S: Source>(
+    source: &S,
+    spots: &config::Spots,
+    reach: bool,
+) -> eyre::Result<Stage> {
     let records = source.tokens().wrap_err("tokens")?;
     let wrapped = venue::native_wrapper(&records)
         .map(token::token_of)
@@ -49,19 +53,21 @@ pub(crate) fn load<S: Source>(source: &S, spots: &config::Spots) -> eyre::Result
     crate::report::note_degrees(&survey.graph, &known);
     crate::report::note_hubs(&census, &known, spots.hub_limit);
     let mut reach_rows = Vec::new();
-    for limit in HUB_LIMITS {
-        let slice: Vec<Token> = census
-            .ranked
-            .iter()
-            .take(limit)
-            .map(|hub| hub.token)
-            .collect();
-        let reach = graph::reach_of(&survey.graph, &incoming, &slice);
-        eprintln!(
-            "reach K={limit} both {} toward {} from {} outside {}",
-            reach.both, reach.toward, reach.from_hub, reach.outside
-        );
-        reach_rows.push((limit, reach));
+    if reach {
+        for limit in HUB_LIMITS {
+            let slice: Vec<Token> = census
+                .ranked
+                .iter()
+                .take(limit)
+                .map(|hub| hub.token)
+                .collect();
+            let reach = graph::reach_of(&survey.graph, &incoming, &slice);
+            eprintln!(
+                "reach K={limit} both {} toward {} from {} outside {}",
+                reach.both, reach.toward, reach.from_hub, reach.outside
+            );
+            reach_rows.push((limit, reach));
+        }
     }
     eprintln!("choosing paths through {} hubs", hubs.len());
     let selection = graph::select(&survey.graph, &hubs);

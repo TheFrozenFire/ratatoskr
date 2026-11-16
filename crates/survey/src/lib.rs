@@ -58,12 +58,12 @@ pub fn measure(
     let catalog =
         store::service::EntityRead::open_with(data_dir, caches.read).wrap_err("open catalog")?;
     let snapshot = catalog.snapshot().wrap_err("entity snapshot")?;
-    let mut stage = stage::load(&snapshot, spots)?;
+    let mut stage = stage::load(&snapshot, spots, false)?;
     measure::run(&snapshot, &mut stage, limit)
 }
 
 fn print_search(catalog: &impl Source, spots: &config::Spots) -> eyre::Result<()> {
-    let mut stage = stage::load(catalog, spots)?;
+    let mut stage = stage::load(catalog, spots, true)?;
     let reader = Reader {
         source: catalog,
         cache: RefCell::new(std::mem::take(&mut stage.cache)),
