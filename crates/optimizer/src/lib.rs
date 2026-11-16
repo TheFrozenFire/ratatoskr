@@ -8,9 +8,10 @@
 //! in, at any size. A route is a sequence of these edges.
 //!
 //! [`optimize`] searches the basket count. One output asks for the forward
-//! bound, and keeps that plan when the bound is met. Any other trade bisects
-//! the ask. A count `Q` asks each output for `Q` times its weight. The
-//! search walks routes from the outputs back to
+//! bound. It keeps that plan when the bound is met, and also when the half
+//! ask funds the same count. Otherwise it bisects. A count `Q` asks each
+//! output for `Q` times its weight. The search walks routes from the outputs
+//! back to
 //! the inputs and books one net input on each edge. Two routes that share an
 //! edge book one tender, and the quote is [`routing::quote`] on that net.
 //! The count is the largest one whose inputs fit the amounts.
@@ -195,12 +196,22 @@ pub fn optimize(problem: &Problem) -> Result<Plan, OptimizeError> {
     }
     if problem.outputs.len() == 1 {
         if let Some(plan) = solve::meet(problem, &bound) {
-            if plan.count >= bound {
+            if plan.count >= bound || shortfall_holds(problem, &bound, &plan.count) {
                 return Ok(plan);
             }
         }
     }
     Ok(search_bisect(problem, &bound))
+}
+
+/// A one-output shortfall at the bound is the bisect's result when the half ask
+/// funds that same count. A smaller ask can fund more, and then the bisect runs.
+fn shortfall_holds(problem: &Problem, bound: &BigInt, count: &BigInt) -> bool {
+    let half: BigInt = bound / 2;
+    if half.is_zero() {
+        return true;
+    }
+    solve::meet(problem, &half).is_some_and(|plan| plan.count == *count)
 }
 
 /// Bisect the ask. A one-output probe that falls short has run the routes out.
