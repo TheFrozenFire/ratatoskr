@@ -8,8 +8,8 @@
 //! in, at any size. A route is a sequence of these edges.
 //!
 //! [`optimize`] searches the basket count. One output asks for the forward
-//! bound. A basket doubles the ask until a probe falls short, then bisects
-//! that bracket. A count `Q` asks each output for `Q` times its weight. The
+//! bound, and keeps that plan when the bound is met. Any other trade bisects
+//! the ask. A count `Q` asks each output for `Q` times its weight. The
 //! search walks routes from the outputs back to
 //! the inputs and books one net input on each edge. Two routes that share an
 //! edge book one tender, and the quote is [`routing::quote`] on that net.
@@ -194,56 +194,22 @@ pub fn optimize(problem: &Problem) -> Result<Plan, OptimizeError> {
         return Ok(zero_plan(problem));
     }
     if problem.outputs.len() == 1 {
-        // The routes of one output run out on a short probe, so the bound's
-        // plan is the largest count.
-        return Ok(solve::meet(problem, &bound).unwrap_or_else(|| zero_plan(problem)));
-    }
-    Ok(search_basket(problem, &bound))
-}
-
-/// Double the ask until a probe falls short, then bisect the bracket.
-///
-/// A short basket probe only lowers the high end. A smaller ask can fund a
-/// larger count, so the search keeps the greatest count it has seen.
-fn search_basket(problem: &Problem, bound: &BigInt) -> Plan {
-    let mut lo = BigInt::from(0);
-    let mut hi = bound + 1;
-    let mut best = zero_plan(problem);
-    let mut ask = BigInt::from(1);
-    while ask < hi {
-        match solve::meet(problem, &ask) {
-            Some(plan) if plan.count >= ask => {
-                if plan.count > lo {
-                    lo = plan.count.clone();
-                    best = plan;
-                }
-                if &lo + 1 >= hi {
-                    return best;
-                }
-                if &ask >= bound {
-                    break;
-                }
-                let doubled = &ask * 2;
-                ask = if &doubled > bound {
-                    bound.clone()
-                } else {
-                    doubled
-                };
-            }
-            Some(plan) => {
-                if plan.count > lo {
-                    lo = plan.count.clone();
-                    best = plan;
-                }
-                hi = ask;
-                break;
-            }
-            None => {
-                hi = ask;
-                break;
+        if let Some(plan) = solve::meet(problem, &bound) {
+            if plan.count >= bound {
+                return Ok(plan);
             }
         }
     }
+    Ok(search_bisect(problem, &bound))
+}
+
+/// Bisect the ask. A one-output probe that falls short has run the routes out.
+/// A basket probe that falls short only lowers the high end, because a smaller
+/// ask can fund a larger count.
+fn search_bisect(problem: &Problem, bound: &BigInt) -> Plan {
+    let mut lo = BigInt::from(0);
+    let mut hi = bound + 1;
+    let mut best = zero_plan(problem);
     while &lo + 1 < hi {
         let mid = (&lo + &hi) / 2;
         let Some(plan) = solve::meet(problem, &mid) else {
@@ -251,18 +217,22 @@ fn search_basket(problem: &Problem, bound: &BigInt) -> Plan {
             continue;
         };
         if plan.count >= mid {
-            if plan.count > lo {
-                lo = plan.count.clone();
-                best = plan;
-            }
+            lo = plan.count.clone();
             if lo >= hi {
                 hi = &lo + 1;
             }
-        } else {
+            best = plan;
+        } else if problem.outputs.len() == 1 {
             if plan.count > lo {
                 lo = plan.count.clone();
                 best = plan;
             }
+            hi = &lo + 1;
+        } else if plan.count > lo {
+            lo = plan.count.clone();
+            best = plan;
+            hi = mid;
+        } else {
             hi = mid;
         }
     }
