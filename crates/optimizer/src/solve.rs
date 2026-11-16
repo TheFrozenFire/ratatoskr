@@ -9,7 +9,7 @@
 //! edge add to one tender, and the output of that edge is the quote of the sum.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use action::Action;
 use num_bigint::{BigInt, Sign};
@@ -367,7 +367,7 @@ struct Live {
     tender: Vec<BigInt>,
     route_in: Vec<BigInt>,
     route_out: Vec<BigInt>,
-    opened: BTreeSet<Action>,
+    opened: HashSet<Action>,
     gas: BigInt,
 }
 
@@ -388,7 +388,7 @@ impl Live {
             tender: vec![BigInt::from(0); problem.edges.len()],
             route_in: vec![BigInt::from(0); problem.routes.len()],
             route_out: vec![BigInt::from(0); problem.routes.len()],
-            opened: BTreeSet::new(),
+            opened: HashSet::new(),
             gas: BigInt::from(0),
         }
     }
@@ -443,13 +443,14 @@ impl Live {
                 debug_assert!(*got >= *take);
                 *got -= take;
             }
-            let old = self.tender[*edge_index].clone();
-            self.tender[*edge_index] += take;
-            let actual = produce(edge, &old, take);
-            *self.got.entry(token_out).or_default() += &actual;
-            for (action, _) in paid_shares(edge, &old, take) {
-                self.opened.insert(action);
+            let actual = produce(edge, &self.tender[*edge_index], take);
+            if !problem.gas.is_empty() {
+                for (action, _) in paid_shares(edge, &self.tender[*edge_index], take) {
+                    self.opened.insert(action);
+                }
             }
+            self.tender[*edge_index] += take;
+            *self.got.entry(token_out).or_default() += &actual;
         }
         self.route_in[route_index] += &step.takes[0];
         self.route_out[route_index] += &step.delivered;
@@ -613,8 +614,8 @@ fn paid_offer(
     need: &BigInt,
     room: Option<&BigInt>,
 ) -> Option<Step> {
-    if room.is_none() {
-        if let Some(step) = course_offer(problem, state, route_index, need) {
+    if let Some(step) = course_offer(problem, state, route_index, need) {
+        if room.is_none_or(|room| &step.gas <= room) {
             return Some(step);
         }
     }
@@ -1990,8 +1991,11 @@ fn produce(edge: &Edge, tender: &BigInt, take: &BigInt) -> BigInt {
 }
 
 fn step_gas(problem: &Problem, state: &Live, route: &Route, takes: &[BigInt]) -> BigInt {
+    if problem.gas.is_empty() {
+        return BigInt::from(0);
+    }
     let mut gas = BigInt::from(0);
-    let mut seen = BTreeSet::new();
+    let mut seen = HashSet::new();
     for (index, take) in takes.iter().enumerate() {
         if take.is_zero() {
             continue;

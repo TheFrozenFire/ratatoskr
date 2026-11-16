@@ -720,6 +720,60 @@ fn a_larger_basket_keeps_the_action_with_more_gas() {
 }
 
 #[test]
+fn a_loose_ceiling_funds_the_same_wide_route() {
+    let mut problem = problem(
+        &[(1, 100_000)],
+        &[(3, 1)],
+        vec![
+            conduit(
+                1,
+                2,
+                vec![segment(40_000, 40_000, 1), segment(60_000, 60_000, 2)],
+            ),
+            conduit(2, 3, vec![segment(100_000, 100_000, 3)]),
+        ],
+        vec![vec![0, 1]],
+    );
+    set_gas(&mut problem, 1, 10);
+    set_gas(&mut problem, 2, 50);
+    set_gas(&mut problem, 3, 1);
+    let open = optimize(&problem).expect("curves");
+    funded(&problem, &open);
+    problem.gas_ceiling = Some(open.gas.clone());
+    let capped = optimize(&problem).expect("curves");
+    funded(&problem, &capped);
+    assert_eq!(capped.count, open.count);
+    assert_eq!(capped.gas, open.gas);
+    assert_eq!(capped.flows, open.flows);
+}
+
+#[test]
+fn a_ceiling_stops_before_the_next_action_on_a_wide_route() {
+    let mut problem = problem(
+        &[(1, 100_000)],
+        &[(3, 1)],
+        vec![
+            conduit(
+                1,
+                2,
+                vec![segment(40_000, 40_000, 1), segment(60_000, 60_000, 2)],
+            ),
+            conduit(2, 3, vec![segment(100_000, 100_000, 3)]),
+        ],
+        vec![vec![0, 1]],
+    );
+    set_gas(&mut problem, 1, 10);
+    set_gas(&mut problem, 2, 50);
+    set_gas(&mut problem, 3, 1);
+    problem.gas_ceiling = Some(z(11));
+    let plan = optimize(&problem).expect("curves");
+    funded(&problem, &plan);
+    assert_eq!(plan.count, z(40_000));
+    assert_eq!(plan.gas, z(11));
+    assert_eq!(spent(&plan, 1), z(40_000));
+}
+
+#[test]
 fn a_gas_ceiling_leaves_the_larger_action_closed() {
     let mut problem = problem(
         &[(1, 10)],

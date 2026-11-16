@@ -277,5 +277,162 @@ fn fat_solve(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, quote, fat_solve, fat_route);
+fn retarget(curve: Curve, token_in: u8, token_out: u8, pool_base: u8) -> Curve {
+    let Curve::Chords(chords) = curve else {
+        return curve;
+    };
+    Curve::Chords(
+        chords
+            .into_iter()
+            .map(|mut chord| {
+                let pool = match &chord.action {
+                    action::Action::Swap(swap) => pool_base.saturating_add(swap.contract.0[0]),
+                    _ => pool_base,
+                };
+                chord.action = swap_pair(pool, token_in, token_out);
+                chord
+            })
+            .collect(),
+    )
+}
+
+fn curve_width(curve: &Curve) -> BigInt {
+    match curve {
+        Curve::Chords(chords) => chords.iter().map(|chord| &chord.width).sum(),
+        Curve::Unlimited => BigInt::from(0),
+    }
+}
+
+/// `routes` private one-for-one legs spend token 1 and pay the shared fat conduit.
+fn shared_problem(routes: u8) -> Problem {
+    let shared = retarget(fat_curve(), 2, 3, 0);
+    let width = curve_width(&shared);
+    let each = &width / BigInt::from(routes);
+    let mut edges = vec![Edge {
+        action: swap_pair(1, 2, 3),
+        curve: shared,
+    }];
+    let mut route_list = Vec::new();
+    for leg in 0..routes {
+        let pool = 40 + leg;
+        edges.push(Edge {
+            action: swap_pair(pool, 1, 2),
+            curve: Curve::Chords(vec![Chord {
+                width: each.clone(),
+                output: each.clone(),
+                action: swap_pair(pool, 1, 2),
+            }]),
+        });
+        route_list.push(Route {
+            edges: vec![edges.len() - 1, 0],
+        });
+    }
+    Problem {
+        inputs: vec![Input {
+            token: action::Token([1; 20]),
+            amount: &each * BigInt::from(routes),
+        }],
+        outputs: vec![Output {
+            token: action::Token([3; 20]),
+            weight: BigInt::from(1),
+        }],
+        edges,
+        routes: route_list,
+        hubs: Vec::new(),
+        gas: BTreeMap::new(),
+        gas_ceiling: None,
+    }
+}
+
+fn with_gas(mut problem: Problem, per_action: i64) -> Problem {
+    let mut keys = Vec::new();
+    for edge in &problem.edges {
+        keys.push(edge.action.clone());
+        if let Curve::Chords(chords) = &edge.curve {
+            for chord in chords {
+                keys.push(chord.action.clone());
+            }
+        }
+    }
+    keys.sort();
+    keys.dedup();
+    for key in keys {
+        problem.gas.insert(key, BigInt::from(per_action));
+    }
+    problem
+}
+
+fn two_fat_shared() -> Problem {
+    let left = retarget(fat_curve(), 1, 2, 0);
+    let right = retarget(fat_curve(), 1, 2, 32);
+    let shared = retarget(fat_curve(), 2, 3, 64);
+    let width = curve_width(&left);
+    Problem {
+        inputs: vec![Input {
+            token: action::Token([1; 20]),
+            amount: width,
+        }],
+        outputs: vec![Output {
+            token: action::Token([3; 20]),
+            weight: BigInt::from(1),
+        }],
+        edges: vec![
+            Edge {
+                action: swap_pair(1, 1, 2),
+                curve: left,
+            },
+            Edge {
+                action: swap_pair(33, 1, 2),
+                curve: right,
+            },
+            Edge {
+                action: swap_pair(65, 2, 3),
+                curve: shared,
+            },
+        ],
+        routes: vec![Route { edges: vec![0, 2] }, Route { edges: vec![1, 2] }],
+        hubs: Vec::new(),
+        gas: BTreeMap::new(),
+        gas_ceiling: None,
+    }
+}
+
+fn ledger(c: &mut Criterion) {
+    let shared = shared_problem(8);
+    let fat_shared = two_fat_shared();
+    let mut group = c.benchmark_group("depletion_solve");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(200));
+    group.measurement_time(Duration::from_secs(2));
+    group.bench_function("eight_shared", |b| {
+        b.iter(|| optimize(black_box(&shared)).expect("plan"))
+    });
+    group.bench_function("two_fat_shared", |b| {
+        b.iter(|| optimize(black_box(&fat_shared)).expect("plan"))
+    });
+    group.finish();
+
+    let open = with_gas(route_problem(2), 10);
+    let mut loose = open.clone();
+    let full: BigInt = loose.gas.values().sum();
+    loose.gas_ceiling = Some(full);
+    let mut tight = open.clone();
+    tight.gas_ceiling = Some(BigInt::from(80));
+    let mut gas_group = c.benchmark_group("gas_solve");
+    gas_group.sample_size(10);
+    gas_group.warm_up_time(Duration::from_millis(200));
+    gas_group.measurement_time(Duration::from_secs(2));
+    gas_group.bench_function("priced", |b| {
+        b.iter(|| optimize(black_box(&open)).expect("plan"))
+    });
+    gas_group.bench_function("loose_ceiling", |b| {
+        b.iter(|| optimize(black_box(&loose)).expect("plan"))
+    });
+    gas_group.bench_function("tight_ceiling", |b| {
+        b.iter(|| optimize(black_box(&tight)).expect("plan"))
+    });
+    gas_group.finish();
+}
+
+criterion_group!(benches, quote, fat_solve, fat_route, ledger);
 criterion_main!(benches);
