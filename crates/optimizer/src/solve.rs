@@ -24,41 +24,58 @@ struct Active {
     courses: Vec<Option<Course>>,
 }
 
+struct Installed {
+    depth: usize,
+    active: Active,
+}
+
 thread_local! {
-    static BOUND: RefCell<Option<Active>> = const { RefCell::new(None) };
+    static BOUND: RefCell<Option<Installed>> = const { RefCell::new(None) };
 }
 
 struct Bound;
 
 impl Bound {
     fn install(problem: &Problem) -> Self {
-        let mut keys = Vec::new();
-        let mut books = Vec::new();
-        for edge in &problem.edges {
-            let Curve::Chords(chords) = &edge.curve else {
-                continue;
-            };
-            let Some(book) =
-                SlopeBook::prepare(chords.iter().map(|chord| (&chord.width, &chord.output)))
-            else {
-                continue;
-            };
-            keys.push(chords.as_ptr() as usize);
-            books.push(book);
-        }
-        let courses = problem
-            .routes
-            .iter()
-            .map(|route| course_of(route, problem))
-            .collect();
         BOUND.with(|slot| {
-            *slot.borrow_mut() = Some(Active {
-                keys,
-                books,
-                courses,
-            })
+            let mut slot = slot.borrow_mut();
+            if let Some(installed) = slot.as_mut() {
+                installed.depth += 1;
+            } else {
+                *slot = Some(Installed {
+                    depth: 1,
+                    active: prepare(problem),
+                });
+            }
         });
         Self
+    }
+}
+
+fn prepare(problem: &Problem) -> Active {
+    let mut keys = Vec::new();
+    let mut books = Vec::new();
+    for edge in &problem.edges {
+        let Curve::Chords(chords) = &edge.curve else {
+            continue;
+        };
+        let Some(book) =
+            SlopeBook::prepare(chords.iter().map(|chord| (&chord.width, &chord.output)))
+        else {
+            continue;
+        };
+        keys.push(chords.as_ptr() as usize);
+        books.push(book);
+    }
+    let courses = problem
+        .routes
+        .iter()
+        .map(|route| course_of(route, problem))
+        .collect();
+    Active {
+        keys,
+        books,
+        courses,
     }
 }
 
@@ -80,16 +97,29 @@ fn course_of(route: &Route, problem: &Problem) -> Option<Course> {
 
 impl Drop for Bound {
     fn drop(&mut self) {
-        BOUND.with(|slot| *slot.borrow_mut() = None);
+        BOUND.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let Some(installed) = slot.as_mut() else {
+                return;
+            };
+            installed.depth -= 1;
+            if installed.depth == 0 {
+                *slot = None;
+            }
+        });
     }
 }
 
 fn with_course<T>(route_index: usize, read: impl FnOnce(Option<&Course>) -> T) -> T {
     BOUND.with(|slot| {
         let active = slot.borrow();
-        let course = active
-            .as_ref()
-            .and_then(|active| active.courses.get(route_index).and_then(Option::as_ref));
+        let course = active.as_ref().and_then(|installed| {
+            installed
+                .active
+                .courses
+                .get(route_index)
+                .and_then(Option::as_ref)
+        });
         read(course)
     })
 }
@@ -97,13 +127,14 @@ fn with_course<T>(route_index: usize, read: impl FnOnce(Option<&Course>) -> T) -
 fn with_book<T>(chords: &[Chord], read: impl FnOnce(Option<&SlopeBook>) -> T) -> T {
     BOUND.with(|slot| {
         let active = slot.borrow();
-        let book = active.as_ref().and_then(|active| {
+        let book = active.as_ref().and_then(|installed| {
             let key = chords.as_ptr() as usize;
-            active
+            installed
+                .active
                 .keys
                 .iter()
                 .position(|stored| *stored == key)
-                .map(|index| &active.books[index])
+                .map(|index| &installed.active.books[index])
         });
         read(book)
     })
@@ -164,6 +195,11 @@ pub(crate) fn output_bound(problem: &Problem) -> BigInt {
     bound.unwrap_or_else(BigInt::zero)
 }
 
+/// Prepare the slope books for every probe this search will run.
+pub(crate) fn hold(problem: &Problem) -> impl Drop {
+    Bound::install(problem)
+}
+
 pub(crate) fn meet(problem: &Problem, count: &BigInt) -> Option<Plan> {
     meet_ranked(problem, count)
 }
@@ -183,6 +219,11 @@ fn meet_ranked(problem: &Problem, count: &BigInt) -> Option<Plan> {
     let _bound = Bound::install(problem);
     let mut state = Live::open(problem, count);
     let hubs: HashSet<Token> = problem.hubs.iter().copied().collect();
+    let hub_of: Vec<bool> = problem
+        .routes
+        .iter()
+        .map(|route| route_touches(route, problem, &hubs))
+        .collect();
     let mut saved: Vec<Option<Saved>> = vec![None; problem.routes.len()];
     loop {
         if state.met() {
@@ -197,53 +238,57 @@ fn meet_ranked(problem: &Problem, count: &BigInt) -> Option<Plan> {
                 continue;
             }
             let budget = source_budget(problem, &state, index).unwrap_or_else(BigInt::zero);
-            let step = if let Some(step) = reused_step(
-                saved[index].as_ref(),
-                problem,
-                &state,
-                index,
-                &need,
-                &budget,
-                room.as_ref(),
-            ) {
-                step
-            } else {
+            let kept = saved[index].as_mut().is_some_and(|saved| {
+                accept_saved(saved, problem, &state, index, &need, &budget, room.as_ref())
+            });
+            if !kept {
                 let Some(step) = offer(problem, &state, index, &need, room.as_ref()) else {
                     saved[index] = None;
                     continue;
                 };
                 saved[index] = Some(Saved {
                     take: step.takes.first().cloned().unwrap_or_else(BigInt::zero),
-                    need: need.clone(),
+                    need,
                     tenders: route
                         .edges
                         .iter()
                         .map(|edge| state.tender[*edge].clone())
                         .collect(),
-                    step: step.clone(),
+                    step,
                 });
-                step
-            };
-            open.push(Candidate {
-                index,
-                hub: route_touches(route, problem, &hubs),
-                step,
-            });
+            }
+            open.push(index);
         }
-        let mut best: Option<Candidate> = None;
-        for candidate in &open {
-            if best
-                .as_ref()
-                .map(|held| candidate.beats(held))
-                .unwrap_or(true)
-            {
-                best = Some(candidate.clone());
+        let mut best: Option<usize> = None;
+        for index in &open {
+            let wins = match best {
+                None => true,
+                Some(held) => step_beats(
+                    &saved[*index].as_ref().expect("open route has a step").step,
+                    hub_of[*index],
+                    *index,
+                    &saved[held].as_ref().expect("open route has a step").step,
+                    hub_of[held],
+                    held,
+                ),
+            };
+            if wins {
+                best = Some(*index);
             }
         }
-        let Some(mut candidate) = best else {
+        let Some(index) = best else {
             break;
         };
-        candidate = widen_opening(problem, &state, candidate, &open, room.as_ref());
+        let runner = runner_up(&open, index, &saved, &hub_of);
+        let mut candidate = Candidate {
+            index,
+            step: saved[index]
+                .as_ref()
+                .expect("the winner has a step")
+                .step
+                .clone(),
+        };
+        candidate = widen_opening(problem, &state, candidate, runner, room.as_ref());
         let touched = touched_tokens(problem, candidate.index, &candidate.step);
         let before: Vec<BigInt> = touched
             .iter()
@@ -263,42 +308,64 @@ fn meet_ranked(problem: &Problem, count: &BigInt) -> Option<Plan> {
     Some(state.plan(problem))
 }
 
-fn reused_step(
-    saved: Option<&Saved>,
+fn accept_saved(
+    saved: &mut Saved,
     problem: &Problem,
     state: &Live,
     route_index: usize,
     need: &BigInt,
     budget: &BigInt,
     room: Option<&BigInt>,
-) -> Option<Step> {
-    let saved = saved?;
+) -> bool {
     if &saved.need != need && &saved.step.delivered >= need {
-        return None;
+        return false;
     }
     let route = &problem.routes[route_index];
     if saved.tenders.len() != route.edges.len() {
-        return None;
+        return false;
     }
     for (tender, edge_index) in saved.tenders.iter().zip(&route.edges) {
         if tender != &state.tender[*edge_index] {
-            return None;
+            return false;
         }
     }
     if &saved.take > budget {
-        return None;
+        return false;
     }
-    let mut step = saved.step.clone();
-    step.gas = step_gas(problem, state, route, &step.takes);
+    let gas = step_gas(problem, state, route, &saved.step.takes);
     if let Some(room) = room {
-        if &step.gas > room {
-            return None;
+        if &gas > room {
+            return false;
         }
     }
-    if problem.gas_ceiling.is_some() && step.gas < saved.step.gas {
-        return None;
+    if problem.gas_ceiling.is_some() && gas < saved.step.gas {
+        return false;
     }
-    Some(step)
+    saved.step.gas = gas;
+    true
+}
+
+fn step_beats(
+    left: &Step,
+    left_hub: bool,
+    left_index: usize,
+    right: &Step,
+    right_hub: bool,
+    right_index: usize,
+) -> bool {
+    if left.eff.free != right.eff.free {
+        return left.eff.free;
+    }
+    if !same_slope(&left.eff, &right.eff) {
+        return steeper(&left.eff, &right.eff);
+    }
+    if left_hub != right_hub {
+        return left_hub;
+    }
+    if left.delivered != right.delivered {
+        return left.delivered > right.delivered;
+    }
+    left_index < right_index
 }
 
 fn touched_tokens(problem: &Problem, route_index: usize, step: &Step) -> Vec<Token> {
@@ -523,38 +590,60 @@ fn basket(outputs: &[crate::Output], received: &[(Token, BigInt)]) -> BigInt {
 #[derive(Clone)]
 struct Candidate {
     index: usize,
-    hub: bool,
     step: Step,
 }
 
-impl Candidate {
-    fn beats(&self, other: &Self) -> bool {
-        if self.step.eff.free != other.step.eff.free {
-            return self.step.eff.free;
-        }
-        if !self.same_slope(other) {
-            return self.steeper_than(other);
-        }
-        self.tie_beats(other)
-    }
+fn same_slope(left: &Eff, right: &Eff) -> bool {
+    cross_eq(&left.num, &right.den, &right.num, &left.den)
+}
 
-    fn same_slope(&self, other: &Self) -> bool {
-        &self.step.eff.num * &other.step.eff.den == &other.step.eff.num * &self.step.eff.den
-    }
+fn steeper(left: &Eff, right: &Eff) -> bool {
+    cross_gt(&left.num, &right.den, &right.num, &left.den)
+}
 
-    fn steeper_than(&self, other: &Self) -> bool {
-        &self.step.eff.num * &other.step.eff.den > &other.step.eff.num * &self.step.eff.den
+/// `left_num * left_den > right_num * right_den`.
+fn cross_gt(left_num: &BigInt, left_den: &BigInt, right_num: &BigInt, right_den: &BigInt) -> bool {
+    match (
+        left_num.to_u128(),
+        left_den.to_u128(),
+        right_num.to_u128(),
+        right_den.to_u128(),
+    ) {
+        (Some(left_num), Some(left_den), Some(right_num), Some(right_den)) => {
+            widening_mul(left_num, left_den) > widening_mul(right_num, right_den)
+        }
+        _ => left_num * left_den > right_num * right_den,
     }
+}
 
-    fn tie_beats(&self, other: &Self) -> bool {
-        if self.hub != other.hub {
-            return self.hub;
+fn cross_eq(left_num: &BigInt, left_den: &BigInt, right_num: &BigInt, right_den: &BigInt) -> bool {
+    match (
+        left_num.to_u128(),
+        left_den.to_u128(),
+        right_num.to_u128(),
+        right_den.to_u128(),
+    ) {
+        (Some(left_num), Some(left_den), Some(right_num), Some(right_den)) => {
+            widening_mul(left_num, left_den) == widening_mul(right_num, right_den)
         }
-        if self.step.delivered != other.step.delivered {
-            return self.step.delivered > other.step.delivered;
-        }
-        self.index < other.index
+        _ => (left_num * left_den) == (right_num * right_den),
     }
+}
+
+fn widening_mul(left: u128, right: u128) -> (u128, u128) {
+    let left_lo = left as u64 as u128;
+    let left_hi = left >> 64;
+    let right_lo = right as u64 as u128;
+    let right_hi = right >> 64;
+    let low_low = left_lo * right_lo;
+    let low_high = left_lo * right_hi;
+    let high_low = left_hi * right_lo;
+    let high_high = left_hi * right_hi;
+    let mid =
+        (low_low >> 64) + (low_high & 0xffff_ffff_ffff_ffff) + (high_low & 0xffff_ffff_ffff_ffff);
+    let lo = (low_low & 0xffff_ffff_ffff_ffff) | (mid << 64);
+    let hi = high_high + (low_high >> 64) + (high_low >> 64) + (mid >> 64);
+    (hi, lo)
 }
 
 #[derive(Clone)]
@@ -999,13 +1088,13 @@ fn widen_opening(
     problem: &Problem,
     state: &Live,
     mut candidate: Candidate,
-    open: &[Candidate],
+    runner: Option<&Step>,
     room: Option<&BigInt>,
 ) -> Candidate {
-    let Some(runner) = runner_up(open, candidate.index) else {
+    let Some(runner) = runner else {
         return candidate;
     };
-    if runner.step.eff.free || candidate.step.eff.free {
+    if runner.eff.free || candidate.step.eff.free {
         return candidate;
     }
     if candidate.step.takes.first() != Some(&BigInt::from(1)) {
@@ -1067,22 +1156,37 @@ fn widen_opening(
     candidate
 }
 
-fn runner_up(open: &[Candidate], winner: usize) -> Option<&Candidate> {
-    let mut best: Option<&Candidate> = None;
-    for candidate in open {
-        if candidate.index == winner {
+fn runner_up<'a>(
+    open: &[usize],
+    winner: usize,
+    saved: &'a [Option<Saved>],
+    hub_of: &[bool],
+) -> Option<&'a Step> {
+    let mut best: Option<usize> = None;
+    for index in open {
+        if *index == winner {
             continue;
         }
-        if best.is_some_and(|held| !candidate.beats(held)) {
-            continue;
+        let wins = match best {
+            None => true,
+            Some(held) => step_beats(
+                &saved[*index].as_ref().expect("open route has a step").step,
+                hub_of[*index],
+                *index,
+                &saved[held].as_ref().expect("open route").step,
+                hub_of[held],
+                held,
+            ),
+        };
+        if wins {
+            best = Some(*index);
         }
-        best = Some(candidate);
     }
-    best
+    best.map(|index| &saved[index].as_ref().expect("the runner has a step").step)
 }
 
-fn steeper_than_rate(marginal: &BigInt, runner: &Candidate) -> bool {
-    marginal * &runner.step.eff.den > runner.step.eff.num
+fn steeper_than_rate(marginal: &BigInt, runner: &Step) -> bool {
+    cross_gt(marginal, &runner.eff.den, &runner.eff.num, &BigInt::from(1))
 }
 
 fn unit_marginal(

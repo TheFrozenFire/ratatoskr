@@ -1917,6 +1917,239 @@ impl Conduits for Catalog {
     }
 }
 
+fn amount(text: &str) -> BigInt {
+    text.parse().expect("amount")
+}
+
+fn wide_chord(token_in: u8, token_out: u8, width: &str, output: &str, pool: u8) -> Edge {
+    Edge {
+        action: swap_action(token(token_in), token(token_out), pool),
+        curve: Curve::Chords(vec![Chord {
+            width: amount(width),
+            output: amount(output),
+            action: swap_action(token(token_in), token(token_out), pool),
+        }]),
+    }
+}
+
+/// One chord pays two output per input. The whole budget fits on it.
+#[test]
+fn one_output_at_ten_to_the_twenty_one_pays_the_full_chord() {
+    let budget = "1000000000000000000000";
+    let problem = Problem {
+        inputs: vec![Input {
+            token: token(1),
+            amount: amount(budget),
+        }],
+        outputs: vec![Output {
+            token: token(2),
+            weight: z(1),
+        }],
+        edges: vec![wide_chord(1, 2, budget, "2000000000000000000000", 1)],
+        routes: vec![Route { edges: vec![0] }],
+        hubs: Vec::new(),
+        gas: BTreeMap::new(),
+        gas_ceiling: None,
+    };
+    let plan = optimize(&problem).expect("curve");
+    funded(&problem, &plan);
+    assert_eq!(plan.count, amount("2000000000000000000000"));
+    assert_eq!(plan.flows.len(), 1);
+    assert_eq!(plan.flows[0].input, amount(budget));
+    assert_eq!(plan.flows[0].output, plan.count);
+    assert_eq!(plan.gas, z(0));
+    assert_eq!(plan.tenders.len(), 1);
+    assert_eq!(plan.tenders[0].input, amount(budget));
+}
+
+/// The budget covers part of a wider chord. The pay is the truncating quote.
+#[test]
+fn one_output_inside_a_wide_chord_pays_the_truncating_quote() {
+    let problem = Problem {
+        inputs: vec![Input {
+            token: token(1),
+            amount: amount("1000000000000000000"),
+        }],
+        outputs: vec![Output {
+            token: token(2),
+            weight: z(1),
+        }],
+        edges: vec![wide_chord(
+            1,
+            2,
+            "1000000000000000000000",
+            "2000000000000000000000",
+            1,
+        )],
+        routes: vec![Route { edges: vec![0] }],
+        hubs: Vec::new(),
+        gas: BTreeMap::new(),
+        gas_ceiling: None,
+    };
+    let plan = optimize(&problem).expect("curve");
+    funded(&problem, &plan);
+    assert_eq!(plan.count, amount("2000000000000000000"));
+    assert_eq!(plan.flows.len(), 1);
+    assert_eq!(plan.flows[0].input, amount("1000000000000000000"));
+    assert_eq!(plan.flows[0].output, plan.count);
+    assert_eq!(plan.gas, z(0));
+}
+
+/// Two routes share one budget. The forward bound sums both full quotes.
+/// The plan spends the steeper route first and the rest on the other.
+#[test]
+fn one_output_with_a_shared_budget_keeps_the_exhausted_flows() {
+    let problem = problem(
+        &[(1, 10)],
+        &[(2, 1)],
+        vec![
+            conduit(1, 2, vec![segment(4, 12, 1)]),
+            conduit(1, 2, vec![segment(10, 10, 2)]),
+        ],
+        vec![vec![0], vec![1]],
+    );
+    let plan = optimize(&problem).expect("curve");
+    funded(&problem, &plan);
+    assert_eq!(plan.count, z(18));
+    assert_eq!(spent(&plan, 1), z(10));
+    assert_eq!(plan.flows.len(), 2);
+    assert_eq!(plan.flows[0].route, 0);
+    assert_eq!(plan.flows[0].input, z(4));
+    assert_eq!(plan.flows[0].output, z(12));
+    assert_eq!(plan.flows[1].route, 1);
+    assert_eq!(plan.flows[1].input, z(6));
+    assert_eq!(plan.flows[1].output, z(6));
+    assert_eq!(plan.gas, z(0));
+}
+
+/// Asking for both outputs at once spends the steeper leg and leaves the other at zero.
+/// A smaller ask cuts that leg and funds both. The count is the smaller ask.
+#[test]
+fn a_lower_ask_funds_more_of_the_basket() {
+    let problem = problem(
+        &[(1, 10)],
+        &[(2, 1), (3, 1)],
+        vec![
+            conduit(1, 2, vec![segment(10, 100, 1)]),
+            conduit(1, 3, vec![segment(10, 50, 2)]),
+        ],
+        vec![vec![0], vec![1]],
+    );
+    let high = crate::solve::meet(&problem, &z(100)).expect("high");
+    let low = crate::solve::meet(&problem, &z(30)).expect("low");
+    assert!(low.count > high.count);
+    let plan = optimize(&problem).expect("basket");
+    funded(&problem, &plan);
+    assert_eq!(plan.count, z(30));
+    assert_eq!(spent(&plan, 1), z(10));
+    assert_eq!(received(&plan, 2), z(40));
+    assert_eq!(received(&plan, 3), z(30));
+    assert_eq!(plan.gas, z(0));
+    assert_eq!(plan.flows.len(), 2);
+    assert_eq!(plan.flows[0].route, 0);
+    assert_eq!(plan.flows[0].input, z(4));
+    assert_eq!(plan.flows[0].output, z(40));
+    assert_eq!(plan.flows[1].route, 1);
+    assert_eq!(plan.flows[1].input, z(6));
+    assert_eq!(plan.flows[1].output, z(30));
+    assert_eq!(plan.tenders.len(), 2);
+    assert_eq!(plan.tenders[0].input, z(4));
+    assert_eq!(plan.tenders[1].input, z(6));
+}
+
+/// Forty direct routes. The budget covers two full chords and half of the next.
+#[test]
+fn the_steepest_of_many_routes_is_filled_first() {
+    let mut edges = Vec::new();
+    let mut routes = Vec::new();
+    for index in 0..40_u8 {
+        edges.push(conduit(
+            1,
+            2,
+            vec![segment(10, 1000 - i64::from(index), index + 1)],
+        ));
+        routes.push(vec![usize::from(index)]);
+    }
+    let problem = problem(&[(1, 25)], &[(2, 1)], edges, routes);
+    let plan = optimize(&problem).expect("wide");
+    funded(&problem, &plan);
+    assert_eq!(plan.count, z(2498));
+    assert_eq!(spent(&plan, 1), z(25));
+    assert_eq!(plan.flows.len(), 3);
+    assert_eq!(plan.flows[0].route, 0);
+    assert_eq!(plan.flows[0].input, z(10));
+    assert_eq!(plan.flows[0].output, z(1000));
+    assert_eq!(plan.flows[1].route, 1);
+    assert_eq!(plan.flows[1].input, z(10));
+    assert_eq!(plan.flows[1].output, z(999));
+    assert_eq!(plan.flows[2].route, 2);
+    assert_eq!(plan.flows[2].input, z(5));
+    assert_eq!(plan.flows[2].output, z(499));
+    assert_eq!(plan.gas, z(0));
+}
+
+/// Both slopes fit in `u128` and their product does not. The steeper chord wins.
+#[test]
+fn a_wide_slope_product_prefers_the_steeper_chord() {
+    let width = "1000000000000000000000";
+    let problem = Problem {
+        inputs: vec![Input {
+            token: token(1),
+            amount: amount(width),
+        }],
+        outputs: vec![Output {
+            token: token(2),
+            weight: z(1),
+        }],
+        edges: vec![
+            wide_chord(1, 2, width, "2000000000000000000000", 1),
+            wide_chord(1, 2, width, "3000000000000000000000", 2),
+        ],
+        routes: vec![Route { edges: vec![0] }, Route { edges: vec![1] }],
+        hubs: Vec::new(),
+        gas: BTreeMap::new(),
+        gas_ceiling: None,
+    };
+    let plan = optimize(&problem).expect("curve");
+    funded(&problem, &plan);
+    assert_eq!(plan.count, amount("3000000000000000000000"));
+    assert_eq!(plan.flows.len(), 1);
+    assert_eq!(plan.flows[0].route, 1);
+    assert_eq!(plan.flows[0].input, amount(width));
+}
+
+/// A chord past `u128` uses the general quote and the same steeper-first order.
+#[test]
+fn a_slope_past_u128_prefers_the_steeper_chord() {
+    let width = "10000000000000000000000000000000000000000";
+    let problem = Problem {
+        inputs: vec![Input {
+            token: token(1),
+            amount: amount(width),
+        }],
+        outputs: vec![Output {
+            token: token(2),
+            weight: z(1),
+        }],
+        edges: vec![
+            wide_chord(1, 2, width, "20000000000000000000000000000000000000000", 1),
+            wide_chord(1, 2, width, "30000000000000000000000000000000000000000", 2),
+        ],
+        routes: vec![Route { edges: vec![0] }, Route { edges: vec![1] }],
+        hubs: Vec::new(),
+        gas: BTreeMap::new(),
+        gas_ceiling: None,
+    };
+    let plan = optimize(&problem).expect("curve");
+    funded(&problem, &plan);
+    assert_eq!(
+        plan.count,
+        amount("30000000000000000000000000000000000000000")
+    );
+    assert_eq!(plan.flows.len(), 1);
+    assert_eq!(plan.flows[0].route, 1);
+}
+
 fn from_route_set(set: &searcher::RouteSet) -> Problem {
     let mut edges = Vec::new();
     for edge in &set.edges {

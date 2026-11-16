@@ -7,8 +7,10 @@
 //! input. A custodial wrap has no chords: it pays one token out for one token
 //! in, at any size. A route is a sequence of these edges.
 //!
-//! [`optimize`] bisects the basket count. A count `Q` asks each output for
-//! `Q` times its weight. The search walks routes from the outputs back to
+//! [`optimize`] searches the basket count. One output asks for the forward
+//! bound. A basket doubles the ask until a probe falls short, then bisects
+//! that bracket. A count `Q` asks each output for `Q` times its weight. The
+//! search walks routes from the outputs back to
 //! the inputs and books one net input on each edge. Two routes that share an
 //! edge book one tender, and the quote is [`routing::quote`] on that net.
 //! The count is the largest one whose inputs fit the amounts.
@@ -186,13 +188,62 @@ impl std::error::Error for OptimizeError {}
 /// Largest basket the routes can fund inside the output weights.
 pub fn optimize(problem: &Problem) -> Result<Plan, OptimizeError> {
     check(problem)?;
+    let _books = solve::hold(problem);
     let bound = solve::output_bound(problem);
     if bound.is_zero() {
         return Ok(zero_plan(problem));
     }
+    if problem.outputs.len() == 1 {
+        // The routes of one output run out on a short probe, so the bound's
+        // plan is the largest count.
+        return Ok(solve::meet(problem, &bound).unwrap_or_else(|| zero_plan(problem)));
+    }
+    Ok(search_basket(problem, &bound))
+}
+
+/// Double the ask until a probe falls short, then bisect the bracket.
+///
+/// A short basket probe only lowers the high end. A smaller ask can fund a
+/// larger count, so the search keeps the greatest count it has seen.
+fn search_basket(problem: &Problem, bound: &BigInt) -> Plan {
     let mut lo = BigInt::from(0);
-    let mut hi = &bound + 1;
+    let mut hi = bound + 1;
     let mut best = zero_plan(problem);
+    let mut ask = BigInt::from(1);
+    while ask < hi {
+        match solve::meet(problem, &ask) {
+            Some(plan) if plan.count >= ask => {
+                if plan.count > lo {
+                    lo = plan.count.clone();
+                    best = plan;
+                }
+                if &lo + 1 >= hi {
+                    return best;
+                }
+                if &ask >= bound {
+                    break;
+                }
+                let doubled = &ask * 2;
+                ask = if &doubled > bound {
+                    bound.clone()
+                } else {
+                    doubled
+                };
+            }
+            Some(plan) => {
+                if plan.count > lo {
+                    lo = plan.count.clone();
+                    best = plan;
+                }
+                hi = ask;
+                break;
+            }
+            None => {
+                hi = ask;
+                break;
+            }
+        }
+    }
     while &lo + 1 < hi {
         let mid = (&lo + &hi) / 2;
         let Some(plan) = solve::meet(problem, &mid) else {
@@ -200,20 +251,14 @@ pub fn optimize(problem: &Problem) -> Result<Plan, OptimizeError> {
             continue;
         };
         if plan.count >= mid {
-            lo = plan.count.clone();
-            if lo >= hi {
-                hi = &lo + 1;
-            }
-            best = plan;
-        } else if problem.outputs.len() == 1 {
-            // One output, and the routes ran out. That plan is the largest count.
             if plan.count > lo {
                 lo = plan.count.clone();
                 best = plan;
             }
-            hi = &lo + 1;
+            if lo >= hi {
+                hi = &lo + 1;
+            }
         } else {
-            // A basket can fund a larger count at a smaller ask. Keep searching.
             if plan.count > lo {
                 lo = plan.count.clone();
                 best = plan;
@@ -221,7 +266,7 @@ pub fn optimize(problem: &Problem) -> Result<Plan, OptimizeError> {
             hi = mid;
         }
     }
-    Ok(best)
+    best
 }
 
 fn zero_plan(problem: &Problem) -> Plan {
