@@ -7,7 +7,8 @@
 //! routes, and a bounded walk from an endpoint that names few conduits.
 //!
 //! [`measure`] opens the entity file read-only, allocates each trade, and
-//! scores the plan. Prices are applied after the allocation.
+//! scores the plan. The token scan, the conduit scan, and the later point
+//! gets share one snapshot. Prices are applied after the allocation.
 
 mod check;
 mod graph;
@@ -40,7 +41,8 @@ pub(crate) const HUB_LIMITS: [usize; 4] = [8, 16, 32, 64];
 pub fn run(data_dir: &Path, spots: &config::Spots, caches: &config::Store) -> eyre::Result<()> {
     eprintln!("opening {}", data_dir.display());
     let catalog = Catalog::open_with(data_dir, caches).wrap_err("open catalog")?;
-    print_search(&catalog, spots)
+    let snapshot = catalog.snapshot().wrap_err("entity snapshot")?;
+    print_search(&snapshot, spots)
 }
 
 /// Open the entity file read-only, allocate the trades, and print each score.
@@ -55,8 +57,9 @@ pub fn measure(
     eprintln!("opening {} read-only", data_dir.display());
     let catalog =
         store::service::EntityRead::open_with(data_dir, caches.read).wrap_err("open catalog")?;
-    let mut stage = stage::load(&catalog, spots)?;
-    measure::run(&catalog, &mut stage, limit)
+    let snapshot = catalog.snapshot().wrap_err("entity snapshot")?;
+    let mut stage = stage::load(&snapshot, spots)?;
+    measure::run(&snapshot, &mut stage, limit)
 }
 
 fn print_search(catalog: &impl Source, spots: &config::Spots) -> eyre::Result<()> {

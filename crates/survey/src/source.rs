@@ -1,9 +1,9 @@
 use alloy_primitives::{Address, B256};
 use routing::SlopeSegment;
-use store::service::{Catalog, EntityRead};
+use store::service::Snapshot;
 use venue::{TokenRecord, VenueRow};
 
-/// Reads the entity file. The writer and a read-only follower both implement it.
+/// Reads one snapshot of the entity file.
 pub(crate) trait Source {
     fn tokens(&self) -> eyre::Result<Vec<TokenRecord>>;
     fn visit_conduits(
@@ -18,18 +18,16 @@ pub(crate) trait Source {
     fn read_venue(&self, kind: u8, id: B256) -> eyre::Result<Option<VenueRow>>;
 }
 
-impl Source for Catalog {
+impl Source for Snapshot {
     fn tokens(&self) -> eyre::Result<Vec<TokenRecord>> {
-        Catalog::tokens(self)
+        self.token_rows()
     }
 
     fn visit_conduits(
         &self,
         visit: &mut dyn FnMut(Address, Address, &[SlopeSegment]) -> eyre::Result<()>,
     ) -> eyre::Result<()> {
-        Catalog::visit_conduits(self, |token_in, token_out, segments| {
-            visit(token_in, token_out, segments)
-        })
+        self.each_conduit(|token_in, token_out, segments| visit(token_in, token_out, segments))
     }
 
     fn conduit_segments(
@@ -37,41 +35,13 @@ impl Source for Catalog {
         token_in: Address,
         token_out: Address,
     ) -> eyre::Result<Option<Vec<SlopeSegment>>> {
-        Ok(Catalog::read_conduit(self, token_in, token_out)?
+        Ok(self
+            .conduit_at(token_in, token_out)?
             .map(|stored| stored.segments)
             .filter(|segments| !segments.is_empty()))
     }
 
     fn read_venue(&self, kind: u8, id: B256) -> eyre::Result<Option<VenueRow>> {
-        Catalog::read_venue(self, kind, id)
-    }
-}
-
-impl Source for EntityRead {
-    fn tokens(&self) -> eyre::Result<Vec<TokenRecord>> {
-        EntityRead::tokens(self)
-    }
-
-    fn visit_conduits(
-        &self,
-        visit: &mut dyn FnMut(Address, Address, &[SlopeSegment]) -> eyre::Result<()>,
-    ) -> eyre::Result<()> {
-        EntityRead::visit_conduits(self, |token_in, token_out, segments| {
-            visit(token_in, token_out, segments)
-        })
-    }
-
-    fn conduit_segments(
-        &self,
-        token_in: Address,
-        token_out: Address,
-    ) -> eyre::Result<Option<Vec<SlopeSegment>>> {
-        Ok(EntityRead::read_conduit(self, token_in, token_out)?
-            .map(|stored| stored.segments)
-            .filter(|segments| !segments.is_empty()))
-    }
-
-    fn read_venue(&self, kind: u8, id: B256) -> eyre::Result<Option<VenueRow>> {
-        EntityRead::read_venue(self, kind, id)
+        self.venue_row(kind, id)
     }
 }

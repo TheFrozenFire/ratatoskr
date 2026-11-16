@@ -1,8 +1,8 @@
 //! The reads a search runs against one snapshot of `entities.redb`.
 //!
 //! Each query names its parameter and its return. The caller opens the
-//! transaction. [`Catalog`] and [`EntityRead`] open one transaction per call
-//! and then run the same query.
+//! transaction. [`Snapshot`] keeps that transaction and the conduit table.
+//! [`Catalog`] and [`EntityRead`] still open one transaction per call.
 
 use alloy_primitives::{Address, B256};
 use routing::SlopeSegment;
@@ -48,6 +48,73 @@ impl ConduitRead {
         token_out: Address,
     ) -> eyre::Result<Option<StoredConduit>> {
         conduit::conduit_get(&self.table, token_in, token_out)
+    }
+
+    pub fn visit(
+        &self,
+        mut visit: impl FnMut(Address, Address, &[SlopeSegment]) -> eyre::Result<()>,
+    ) -> eyre::Result<()> {
+        conduit::visit_conduit_table(&self.table, |token_in, token_out, _block, segments| {
+            visit(token_in, token_out, segments)
+        })
+    }
+}
+
+/// One snapshot of `entities.redb` for every read in a search.
+///
+/// The conduit table stays open. Dropping the snapshot releases the read.
+pub struct Snapshot {
+    read: redb::ReadTransaction,
+    conduits: Option<ConduitRead>,
+}
+
+impl Snapshot {
+    fn open(read: redb::ReadTransaction) -> eyre::Result<Self> {
+        let conduits = ConduitRead::open(&read)?;
+        Ok(Self { read, conduits })
+    }
+
+    pub fn token_rows(&self) -> eyre::Result<Vec<TokenRecord>> {
+        TokenRows::run(&self.read)
+    }
+
+    pub fn conduit_at(
+        &self,
+        token_in: Address,
+        token_out: Address,
+    ) -> eyre::Result<Option<StoredConduit>> {
+        let Some(table) = &self.conduits else {
+            return Ok(None);
+        };
+        table.get(token_in, token_out)
+    }
+
+    pub fn each_conduit(
+        &self,
+        visit: impl FnMut(Address, Address, &[SlopeSegment]) -> eyre::Result<()>,
+    ) -> eyre::Result<()> {
+        let Some(table) = &self.conduits else {
+            return Ok(());
+        };
+        table.visit(visit)
+    }
+
+    pub fn venue_row(&self, kind: u8, id: B256) -> eyre::Result<Option<VenueRow>> {
+        VenuePoint { kind, id }.run(&self.read)
+    }
+}
+
+impl super::catalog::Catalog {
+    /// One snapshot for a search. Later commits are not visible on it.
+    pub fn snapshot(&self) -> eyre::Result<Snapshot> {
+        Snapshot::open(self.begin_read()?)
+    }
+}
+
+impl super::catalog::EntityRead {
+    /// One snapshot for a search. The writer may commit while it is open.
+    pub fn snapshot(&self) -> eyre::Result<Snapshot> {
+        Snapshot::open(self.begin_read()?)
     }
 }
 
@@ -179,7 +246,7 @@ mod tests {
             .run(&read)
             .unwrap()
             .expect("priced");
-            assert_eq!(priced_row.segments, vec![segment]);
+            assert_eq!(priced_row.segments, vec![segment.clone()]);
             assert_eq!(
                 priced_row,
                 catalog
@@ -247,6 +314,39 @@ mod tests {
             .run(&read)
             .unwrap()
             .is_none());
+
+            let snapshot = catalog.snapshot().unwrap();
+            assert_eq!(snapshot.token_rows().unwrap(), vec![token.clone()]);
+            assert_eq!(
+                snapshot
+                    .conduit_at(priced_in, priced_out)
+                    .unwrap()
+                    .expect("priced")
+                    .segments,
+                vec![segment.clone()]
+            );
+            assert!(snapshot
+                .conduit_at(empty_in, empty_out)
+                .unwrap()
+                .expect("empty")
+                .segments
+                .is_empty());
+            let mut snap_seen = Vec::new();
+            snapshot
+                .each_conduit(|token_in, token_out, segments| {
+                    snap_seen.push((token_in, token_out, segments.is_empty()));
+                    Ok(())
+                })
+                .unwrap();
+            snap_seen.sort_by_key(|(token_in, _, _)| *token_in);
+            assert_eq!(snap_seen, seen);
+            assert_eq!(
+                snapshot
+                    .venue_row(venue.kind, venue.id)
+                    .unwrap()
+                    .expect("venue"),
+                venue
+            );
         }
         let reader = EntityRead::open_with(&dir.0, small().read).unwrap();
         let read = reader.begin_read().unwrap();

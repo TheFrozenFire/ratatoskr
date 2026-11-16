@@ -91,11 +91,18 @@ pub(crate) fn visit_conduit_rows(
 
 pub(crate) fn conduit_rows(
     read: &redb::ReadTransaction,
-    mut visit: impl FnMut(Address, Address, u64, &[SlopeSegment]) -> eyre::Result<()>,
+    visit: impl FnMut(Address, Address, u64, &[SlopeSegment]) -> eyre::Result<()>,
 ) -> eyre::Result<()> {
     let Some(table) = open_conduit_table(read)? else {
         return Ok(());
     };
+    visit_conduit_table(&table, visit)
+}
+
+pub(crate) fn visit_conduit_table(
+    table: &redb::ReadOnlyTable<&'static [u8], &'static [u8]>,
+    mut visit: impl FnMut(Address, Address, u64, &[SlopeSegment]) -> eyre::Result<()>,
+) -> eyre::Result<()> {
     for item in table.iter()? {
         let (key, value) = item?;
         let raw = key.value();
