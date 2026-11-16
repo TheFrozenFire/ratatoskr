@@ -1,14 +1,14 @@
 use alloy_primitives::{Address, B256};
 use routing::SlopeSegment;
-use store::service::Snapshot;
+use store::service::{ConduitMeta, Snapshot};
 use venue::{TokenRecord, VenueRow};
 
 /// Reads one snapshot of the entity file.
 pub(crate) trait Source {
     fn tokens(&self) -> eyre::Result<Vec<TokenRecord>>;
-    fn visit_conduits(
+    fn visit_meta(
         &self,
-        visit: &mut dyn FnMut(Address, Address, &[SlopeSegment]) -> eyre::Result<()>,
+        visit: &mut dyn FnMut(Address, Address, ConduitMeta) -> eyre::Result<()>,
     ) -> eyre::Result<()>;
     fn conduit_segments(
         &self,
@@ -23,11 +23,11 @@ impl Source for Snapshot {
         self.token_rows()
     }
 
-    fn visit_conduits(
+    fn visit_meta(
         &self,
-        visit: &mut dyn FnMut(Address, Address, &[SlopeSegment]) -> eyre::Result<()>,
+        visit: &mut dyn FnMut(Address, Address, ConduitMeta) -> eyre::Result<()>,
     ) -> eyre::Result<()> {
-        self.each_conduit(|token_in, token_out, segments| visit(token_in, token_out, segments))
+        self.each_meta(visit)
     }
 
     fn conduit_segments(

@@ -39,11 +39,11 @@ impl<S: Source> Source for VenueMemory<'_, S> {
         self.inner.tokens()
     }
 
-    fn visit_conduits(
+    fn visit_meta(
         &self,
-        visit: &mut dyn FnMut(Address, Address, &[SlopeSegment]) -> eyre::Result<()>,
+        visit: &mut dyn FnMut(Address, Address, store::service::ConduitMeta) -> eyre::Result<()>,
     ) -> eyre::Result<()> {
-        self.inner.visit_conduits(visit)
+        self.inner.visit_meta(visit)
     }
 
     fn conduit_segments(

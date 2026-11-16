@@ -9,6 +9,7 @@ use store_model::{decode_curve_record, entity_key};
 use super::super::catalog::Catalog;
 use super::codec::{decode_conduit, encode_conduit};
 use super::job::sync_jobs;
+use super::meta::{remove_meta, write_meta};
 use super::*;
 use super::{ConduitBody, ConduitMember, CurvePage, CurveRow, MemberTarget};
 
@@ -37,6 +38,7 @@ impl Catalog {
             {
                 let mut members = write.open_table(MEMBERS)?;
                 let mut conduits = write.open_table(CONDUITS)?;
+                let mut metas = write.open_table(META)?;
                 for pair in &pairs {
                     let key = member_key(&pair_key(pair.0, pair.1), kind, &id);
                     if new_pairs.contains(pair) {
@@ -53,6 +55,7 @@ impl Catalog {
                     let stored = pair_key(pair.0, pair.1);
                     if write_members(&members, &stored)?.is_empty() {
                         conduits.remove(stored.as_slice())?;
+                        remove_meta(&mut metas, &stored)?;
                         gone.push(*pair);
                     } else {
                         alive.push(*pair);
@@ -232,8 +235,11 @@ impl Catalog {
             write.set_durability(Durability::Immediate)?;
             {
                 let mut conduits = write.open_table(CONDUITS)?;
+                let mut metas = write.open_table(META)?;
                 for pair in &gone {
-                    conduits.remove(pair_key(pair.0, pair.1).as_slice())?;
+                    let key = pair_key(pair.0, pair.1);
+                    conduits.remove(key.as_slice())?;
+                    remove_meta(&mut metas, &key)?;
                 }
             }
             write.commit()?;
@@ -274,8 +280,10 @@ impl Catalog {
                     }
                 }
                 let mut conduits = write.open_table(CONDUITS)?;
+                let mut metas = write.open_table(META)?;
                 if body.kept.is_empty() {
                     conduits.remove(pair.as_slice())?;
+                    remove_meta(&mut metas, &pair)?;
                 } else {
                     let encoded = encode_conduit(
                         body.block,
@@ -284,6 +292,7 @@ impl Catalog {
                         &body.segments,
                     )?;
                     conduits.insert(pair.as_slice(), encoded.as_slice())?;
+                    write_meta(&mut metas, &pair, &body.segments)?;
                 }
                 false
             }

@@ -99,6 +99,17 @@ impl Snapshot {
         table.visit(visit)
     }
 
+    /// Kind mask and width sum of every stored conduit.
+    ///
+    /// When every conduit has a stored mask, this reads that table. Otherwise
+    /// it reads the mask from the curve bytes.
+    pub fn each_meta(
+        &self,
+        visit: impl FnMut(Address, Address, conduit::ConduitMeta) -> eyre::Result<()>,
+    ) -> eyre::Result<()> {
+        conduit::each_meta(&self.read, visit)
+    }
+
     pub fn venue_row(&self, kind: u8, id: B256) -> eyre::Result<Option<VenueRow>> {
         VenuePoint { kind, id }.run(&self.read)
     }
@@ -367,6 +378,109 @@ mod tests {
             Ok(())
         })
         .is_ok());
+    }
+
+    #[test]
+    fn the_stored_conduit_records_its_kind_mask_and_width_sum() {
+        let dir = TempDir::new();
+        let token_in = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let token_out = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        let segments = vec![
+            SlopeSegment {
+                width: BigInt::from(4),
+                output: BigInt::from(7),
+                action: Action {
+                    kind: 10,
+                    pool: [1_u8; 32],
+                },
+            },
+            SlopeSegment {
+                width: BigInt::from(5),
+                output: BigInt::from(1),
+                action: Action {
+                    kind: 2,
+                    pool: [2_u8; 32],
+                },
+            },
+        ];
+        let catalog = Catalog::open_with(&dir.0, &small()).unwrap();
+        assert!(!catalog
+            .store_conduit(&body(token_in, token_out, segments.clone()))
+            .unwrap());
+        let snapshot = catalog.snapshot().unwrap();
+        let mut found = Vec::new();
+        snapshot
+            .each_meta(|row_in, row_out, meta| {
+                found.push((row_in, row_out, meta));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            found,
+            vec![(
+                token_in,
+                token_out,
+                crate::service::ConduitMeta {
+                    kinds: (1_u32 << 9) | (1_u32 << 1),
+                    capacity: 9,
+                    segments: 2,
+                }
+            )]
+        );
+
+        catalog
+            .insert_conduit_without_meta_for_test(
+                address!("cccccccccccccccccccccccccccccccccccccccc"),
+                address!("dddddddddddddddddddddddddddddddddddddddd"),
+                &segments,
+            )
+            .unwrap();
+        let snapshot = catalog.snapshot().unwrap();
+        let mut derived = Vec::new();
+        snapshot
+            .each_meta(|row_in, row_out, meta| {
+                derived.push((row_in, row_out, meta));
+                Ok(())
+            })
+            .unwrap();
+        derived.sort_by_key(|(row_in, _, _)| *row_in);
+        assert_eq!(derived.len(), 2);
+        assert!(derived
+            .iter()
+            .all(|(_, _, meta)| meta.kinds == (1_u32 << 9) | (1_u32 << 1)
+                && meta.capacity == 9
+                && meta.segments == 2));
+        assert_eq!(catalog.fill_conduit_meta().unwrap(), 1);
+        assert_eq!(catalog.fill_conduit_meta().unwrap(), 0);
+        let snapshot = catalog.snapshot().unwrap();
+        let mut filled = Vec::new();
+        snapshot
+            .each_meta(|row_in, row_out, meta| {
+                filled.push((row_in, row_out, meta.segments));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(filled.len(), 2);
+
+        let remove = ConduitBody {
+            token_in,
+            token_out,
+            snapshot: Vec::new(),
+            kept: Vec::new(),
+            block: 7,
+            generation: 3,
+            segments: Vec::new(),
+        };
+        assert!(!catalog.store_conduit(&remove).unwrap());
+        let snapshot = catalog.snapshot().unwrap();
+        let mut after = 0_usize;
+        snapshot
+            .each_meta(|_, _, _| {
+                after += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(after, 1);
     }
 
     fn body(token_in: Address, token_out: Address, segments: Vec<SlopeSegment>) -> ConduitBody {

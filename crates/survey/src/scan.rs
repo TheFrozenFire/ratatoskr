@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use searcher::{Token, NATIVE};
 
 use crate::graph::Graph;
-use crate::kinds::{as_u128, kind_bit, only_kind};
+use crate::kinds::{kind_bit, only_kind};
 use crate::source::Source;
 use crate::token::token_of;
 
@@ -35,40 +35,34 @@ pub(crate) fn survey(source: &impl Source) -> eyre::Result<Survey> {
     let mut pure: HashMap<u8, Bag> = HashMap::new();
     let mut carrier: HashMap<u8, Example> = HashMap::new();
     let mut by_width: HashMap<u32, Example> = HashMap::new();
-    source.visit_conduits(&mut |token_in, token_out, segments| {
-        if segments.is_empty() {
+    source.visit_meta(&mut |token_in, token_out, meta| {
+        if meta.segments == 0 {
             return Ok(());
         }
         conduits += 1;
         if conduits.is_multiple_of(100_000) {
             eprintln!("scan {conduits}");
         }
-        let mut kinds = 0_u32;
-        let mut capacity = 0_u128;
-        for segment in segments {
-            kinds |= kind_bit(segment.action.kind);
-            capacity = capacity.saturating_add(as_u128(&segment.width));
-        }
         let from = token_of(token_in);
         let to = token_of(token_out);
-        graph.push(from, to, kinds, capacity);
-        if from == NATIVE || to == NATIVE || kinds == 0 {
+        graph.push(from, to, meta.kinds, meta.capacity);
+        if from == NATIVE || to == NATIVE || meta.kinds == 0 {
             return Ok(());
         }
         let example = Example {
             from,
             to,
-            kinds,
-            capacity,
-            segments: segments.len() as u32,
+            kinds: meta.kinds,
+            capacity: meta.capacity,
+            segments: meta.segments,
         };
         keep_width(&mut by_width, &example);
         for kind in 1..32_u8 {
-            if kinds & kind_bit(kind) != 0 {
+            if meta.kinds & kind_bit(kind) != 0 {
                 keep_carrier(&mut carrier, kind, &example);
             }
         }
-        if let Some(kind) = only_kind(kinds) {
+        if let Some(kind) = only_kind(meta.kinds) {
             let bag = pure.entry(kind).or_insert_with(|| Bag {
                 high: Vec::new(),
                 low: Vec::new(),
@@ -140,4 +134,75 @@ pub(crate) fn insert_low(bag: &mut Vec<Example>, example: Example) {
             .then(left.to.cmp(&right.to))
     });
     bag.truncate(12);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::{address, Address, B256};
+    use routing::SlopeSegment;
+    use store::service::ConduitMeta;
+    use venue::{TokenRecord, VenueRow};
+
+    use crate::token::token_of;
+
+    struct MetaOnly {
+        rows: Vec<(Address, Address, ConduitMeta)>,
+    }
+
+    impl Source for MetaOnly {
+        fn tokens(&self) -> eyre::Result<Vec<TokenRecord>> {
+            Ok(Vec::new())
+        }
+
+        fn visit_meta(
+            &self,
+            visit: &mut dyn FnMut(Address, Address, ConduitMeta) -> eyre::Result<()>,
+        ) -> eyre::Result<()> {
+            for (token_in, token_out, meta) in &self.rows {
+                visit(*token_in, *token_out, *meta)?;
+            }
+            Ok(())
+        }
+
+        fn conduit_segments(
+            &self,
+            _token_in: Address,
+            _token_out: Address,
+        ) -> eyre::Result<Option<Vec<SlopeSegment>>> {
+            Ok(None)
+        }
+
+        fn read_venue(&self, _kind: u8, _id: B256) -> eyre::Result<Option<VenueRow>> {
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn the_scan_reads_the_stored_mask_and_width_sum() {
+        let from = address!("1111111111111111111111111111111111111111");
+        let to = address!("2222222222222222222222222222222222222222");
+        let surveyed = survey(&MetaOnly {
+            rows: vec![(
+                from,
+                to,
+                ConduitMeta {
+                    kinds: 1 << 9,
+                    capacity: 12,
+                    segments: 3,
+                },
+            )],
+        })
+        .unwrap();
+        let edge = surveyed
+            .graph
+            .meta(token_of(from), token_of(to))
+            .expect("edge");
+        assert_eq!(edge.kinds, 1 << 9);
+        assert_eq!(edge.capacity, 12);
+        assert_eq!(surveyed.conduits, 1);
+        let kept = surveyed.by_width.get(&1).expect("pure");
+        assert_eq!(kept.capacity, 12);
+        assert_eq!(kept.segments, 3);
+    }
 }

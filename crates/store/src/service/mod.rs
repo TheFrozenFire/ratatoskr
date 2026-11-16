@@ -21,7 +21,9 @@ pub use catalog::{
     append_dropped_ids, append_fill_ids, fill_identities, read_fill_ids, sample_identities,
     write_fill_ids, Catalog, EntityRead, FillReport, SampleReport,
 };
-pub use conduit::{ConduitBody, ConduitMember, CurvePage, CurveRow, MemberTarget, StoredConduit};
+pub use conduit::{
+    ConduitBody, ConduitMember, ConduitMeta, CurvePage, CurveRow, MemberTarget, StoredConduit,
+};
 pub use corpus::Corpus;
 pub use feeds::Error as FeedError;
 pub use feeds::Feeds;

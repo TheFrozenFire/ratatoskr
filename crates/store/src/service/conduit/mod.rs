@@ -10,9 +10,11 @@
 mod codec;
 mod job;
 mod member;
+mod meta;
 mod read;
 
 pub(crate) use job::account_jobs;
+pub(crate) use meta::each_meta;
 pub(crate) use read::{
     conduit_get, conduit_point, conduit_rows, open_conduit_table, visit_conduit_table,
 };
@@ -29,6 +31,17 @@ pub struct StoredConduit {
     pub generation: u64,
     pub members: u32,
     pub segments: Vec<SlopeSegment>,
+}
+
+/// Kind mask and width sum of one stored conduit.
+///
+/// `kinds` has one bit per venue kind, starting at kind 1. `capacity` is the
+/// saturating sum of the piece widths. `segments` is the number of pieces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConduitMeta {
+    pub kinds: u32,
+    pub capacity: u128,
+    pub segments: u32,
 }
 
 /// One priced direction the member index should hold.
@@ -79,6 +92,8 @@ pub struct ConduitBody {
 }
 
 const CONDUITS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("conduits");
+
+const META: TableDefinition<&[u8], &[u8]> = TableDefinition::new("conduit_meta");
 
 const MEMBERS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("conduit_members");
 
