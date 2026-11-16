@@ -78,6 +78,30 @@ fn segments(c: &mut Criterion) {
     group.bench_function("quote_past", |b| {
         b.iter(|| quote(black_box(&merged), black_box(&past)))
     });
+    let fat_members: Vec<Vec<SlopeSegment>> = (1..=16)
+        .map(|pool| {
+            segments_from_knots(&knots, action(pool))
+                .into_iter()
+                .map(|mut segment| {
+                    segment.output *= BigInt::from(pool as i64);
+                    segment
+                })
+                .collect()
+        })
+        .collect();
+    group.bench_function("fat_merge", |b| {
+        b.iter(|| routing::merge(black_box(&fat_members)))
+    });
+    let fat = routing::merge(&fat_members);
+    let fat_width: BigInt = fat.iter().map(|segment| &segment.width).sum();
+    let fat_mid = &fat_width / 2;
+    let fat_past = &fat_width + 1;
+    group.bench_function("fat_quote_mid", |b| {
+        b.iter(|| quote(black_box(&fat), black_box(&fat_mid)))
+    });
+    group.bench_function("fat_quote_past", |b| {
+        b.iter(|| quote(black_box(&fat), black_box(&fat_past)))
+    });
     group.finish();
 }
 

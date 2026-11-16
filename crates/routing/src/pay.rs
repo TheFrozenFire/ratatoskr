@@ -99,7 +99,7 @@ fn quote_u128<'a>(
     Some(BigInt::from(paid))
 }
 
-fn u128_of(value: &BigInt) -> Option<u128> {
+pub(crate) fn u128_of(value: &BigInt) -> Option<u128> {
     if value.sign() == Sign::Minus {
         return None;
     }

@@ -150,5 +150,54 @@ fn bigint(value: U256) -> BigInt {
     BigInt::from_bytes_be(Sign::Plus, &value.to_be_bytes::<32>())
 }
 
-criterion_group!(benches, ceiling, grid, closed_form, knots, through_slopes);
+/// Knots, secants, and the steepest-first merge for one ordered pair.
+fn conduit_slopes(c: &mut Criterion) {
+    let mut group = c.benchmark_group("conduit");
+    configure(&mut group, true);
+    let token_in = token0();
+    let token_out = token1();
+    let shape = shapes()
+        .into_iter()
+        .find(|shape| shape.name == "product")
+        .expect("product");
+    let curve = curve_for_snapshot(&shape.detail, 1).unwrap();
+    group.bench_function("fat_product", |b| {
+        b.iter(|| {
+            let mut parts = Vec::new();
+            for pool in 1..=16u8 {
+                let knots = direction_knots(
+                    black_box(&shape.detail),
+                    black_box(&curve),
+                    token_in,
+                    token_out,
+                );
+                let mut id = [0u8; 32];
+                id[31] = pool;
+                let mut segments = routing::segments_from_knots(
+                    &knots,
+                    routing::Action {
+                        kind: curve.kind,
+                        pool: id,
+                    },
+                );
+                for segment in &mut segments {
+                    segment.output *= BigInt::from(pool as i64);
+                }
+                parts.push(segments);
+            }
+            routing::merge(&parts)
+        })
+    });
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    ceiling,
+    grid,
+    closed_form,
+    knots,
+    through_slopes,
+    conduit_slopes
+);
 criterion_main!(benches);

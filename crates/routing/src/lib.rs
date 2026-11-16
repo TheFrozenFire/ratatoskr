@@ -9,10 +9,12 @@
 //! supports.
 
 pub mod basket;
+mod book;
 pub mod hub;
 pub mod latency;
 mod pay;
 
+pub use book::{At, SlopeBook};
 pub use pay::{chord_pay, quote_marginals};
 
 use num_bigint::BigInt;

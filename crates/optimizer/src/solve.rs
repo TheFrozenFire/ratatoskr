@@ -8,13 +8,92 @@
 //! above the next edge's take stays on that token. Two routes that share an
 //! edge add to one tender, and the output of that edge is the quote of the sum.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use action::Action;
 use num_bigint::BigInt;
 use num_traits::Zero;
+use routing::{At, SlopeBook};
 
 use crate::{quote_curve, Chord, Curve, Edge, Flow, Plan, Problem, Route, Tender, Token};
+
+struct Active {
+    keys: Vec<usize>,
+    books: Vec<SlopeBook>,
+}
+
+thread_local! {
+    static BOUND: RefCell<Option<Active>> = const { RefCell::new(None) };
+}
+
+struct Bound;
+
+impl Bound {
+    fn install(problem: &Problem) -> Self {
+        let mut keys = Vec::new();
+        let mut books = Vec::new();
+        for edge in &problem.edges {
+            let Curve::Chords(chords) = &edge.curve else {
+                continue;
+            };
+            let Some(book) =
+                SlopeBook::prepare(chords.iter().map(|chord| (&chord.width, &chord.output)))
+            else {
+                continue;
+            };
+            keys.push(chords.as_ptr() as usize);
+            books.push(book);
+        }
+        BOUND.with(|slot| *slot.borrow_mut() = Some(Active { keys, books }));
+        Self
+    }
+}
+
+impl Drop for Bound {
+    fn drop(&mut self) {
+        BOUND.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+fn with_book<T>(chords: &[Chord], read: impl FnOnce(Option<&SlopeBook>) -> T) -> T {
+    BOUND.with(|slot| {
+        let active = slot.borrow();
+        let book = active.as_ref().and_then(|active| {
+            let key = chords.as_ptr() as usize;
+            active
+                .keys
+                .iter()
+                .position(|stored| *stored == key)
+                .map(|index| &active.books[index])
+        });
+        read(book)
+    })
+}
+
+enum Resume {
+    At { index: usize, offset: BigInt },
+    Past,
+    Start,
+}
+
+fn resume(chords: &[Chord], tender: &BigInt) -> Resume {
+    match with_book(chords, |book| book.map(|book| book.at(tender))) {
+        Some(At::Here { index, offset }) => Resume::At { index, offset },
+        Some(At::Past) => Resume::Past,
+        Some(At::Unsupported) | None => Resume::Start,
+    }
+}
+
+fn quoted(chords: &[Chord], input: &BigInt) -> Option<BigInt> {
+    with_book(chords, |book| {
+        book.map(|book| {
+            book.quote_u128(input)
+                .map(BigInt::from)
+                .unwrap_or_else(|| book.quote(input))
+        })
+    })
+}
 
 pub(crate) fn output_bound(problem: &Problem) -> BigInt {
     let budgets: HashMap<Token, BigInt> = problem
@@ -62,6 +141,7 @@ fn meet_ranked(problem: &Problem, count: &BigInt) -> Option<Plan> {
     if count < &BigInt::from(0) {
         return None;
     }
+    let _bound = Bound::install(problem);
     let mut state = Live::open(problem, count);
     let hubs: HashSet<Token> = problem.hubs.iter().copied().collect();
     let mut saved: Vec<Option<Saved>> = vec![None; problem.routes.len()];
@@ -892,8 +972,12 @@ fn landing_room(edge: &Edge, tender: &BigInt, take: &BigInt) -> Option<BigInt> {
         return None;
     }
     let pos = tender + take;
-    let mut cursor = BigInt::from(0);
-    for segment in segments {
+    let (start, mut cursor) = match resume(segments, tender) {
+        Resume::Past => return remaining_input(edge, tender),
+        Resume::At { index, offset } => (index, tender - &offset),
+        Resume::Start => (0, BigInt::from(0)),
+    };
+    for segment in segments.iter().skip(start) {
         if segment.width.is_zero() {
             continue;
         }
@@ -939,10 +1023,14 @@ fn one_slope(edge: &Edge, tender: &BigInt, take: &BigInt) -> bool {
     let Some(head) = head(segments, tender) else {
         return false;
     };
-    let mut skip = tender.clone();
+    let (start, mut skip) = match resume(segments, tender) {
+        Resume::Past => return true,
+        Resume::At { index, offset } => (index, offset),
+        Resume::Start => (0, tender.clone()),
+    };
     let mut left = take.clone();
     let mut first = true;
-    for segment in segments {
+    for segment in segments.iter().skip(start) {
         if segment.width.is_zero() {
             continue;
         }
@@ -1167,9 +1255,13 @@ fn linear_source(
 }
 
 fn linear_input(segments: &[Chord], tender: &BigInt, rate: &BigInt) -> BigInt {
-    let mut skip = tender.clone();
+    let (start, mut skip) = match resume(segments, tender) {
+        Resume::Past => return BigInt::from(0),
+        Resume::At { index, offset } => (index, offset),
+        Resume::Start => (0, tender.clone()),
+    };
     let mut allow = BigInt::from(0);
-    for segment in segments {
+    for segment in segments.iter().skip(start) {
         if skip >= segment.width {
             skip -= &segment.width;
             continue;
@@ -1381,6 +1473,11 @@ fn remaining_input(edge: &Edge, tender: &BigInt) -> Option<BigInt> {
     match &edge.curve {
         Curve::Unlimited => None,
         Curve::Chords(segments) => {
+            if let Some(remaining) = with_book(segments, |book| {
+                book.and_then(|book| book.remaining(tender))
+            }) {
+                return Some(remaining);
+            }
             let total: BigInt = segments.iter().map(|segment| &segment.width).sum();
             if tender >= &total {
                 Some(BigInt::from(0))
@@ -1472,10 +1569,14 @@ fn least_take(edge: &Edge, tender: &BigInt, need: &BigInt) -> Option<BigInt> {
 }
 
 fn least_across(segments: &[Chord], tender: &BigInt, need: &BigInt) -> Option<BigInt> {
-    let mut skip = tender.clone();
+    let (start, mut skip) = match resume(segments, tender) {
+        Resume::Past => return None,
+        Resume::At { index, offset } => (index, offset),
+        Resume::Start => (0, tender.clone()),
+    };
     let mut need = need.clone();
     let mut spent = BigInt::from(0);
-    for segment in segments {
+    for segment in segments.iter().skip(start) {
         if skip >= segment.width {
             skip -= &segment.width;
             continue;
@@ -1513,6 +1614,24 @@ struct Head {
 }
 
 fn head(segments: &[Chord], tender: &BigInt) -> Option<Head> {
+    match resume(segments, tender) {
+        Resume::Past => return None,
+        Resume::At { index, offset } => {
+            let segment = &segments[index];
+            let paid = (&segment.output * &offset) / &segment.width;
+            let rem_w = &segment.width - &offset;
+            if paid >= segment.output || rem_w.is_zero() {
+                return None;
+            }
+            return Some(Head {
+                offset,
+                rem_w,
+                output: segment.output.clone(),
+                width: segment.width.clone(),
+            });
+        }
+        Resume::Start => {}
+    }
     let mut left = tender.clone();
     for segment in segments {
         if left >= segment.width {
@@ -1560,6 +1679,19 @@ fn produce(edge: &Edge, tender: &BigInt, take: &BigInt) -> BigInt {
         return BigInt::from(0);
     }
     let next = tender + take;
+    if let Curve::Chords(chords) = &edge.curve {
+        if let Some(delta) = with_book(chords, |book| {
+            let book = book?;
+            let after = book.quote_u128(&next)?;
+            let before = book.quote_u128(tender)?;
+            Some(BigInt::from(after - before))
+        }) {
+            return delta;
+        }
+        if let (Some(after), Some(before)) = (quoted(chords, &next), quoted(chords, tender)) {
+            return after - before;
+        }
+    }
     quote_curve(&edge.curve, &next) - quote_curve(&edge.curve, tender)
 }
 
@@ -1592,10 +1724,14 @@ fn paid_shares(edge: &Edge, tender: &BigInt, take: &BigInt) -> Vec<(Action, BigI
     match &edge.curve {
         Curve::Unlimited => vec![(edge.action.clone(), take.clone())],
         Curve::Chords(chords) => {
+            let (start, mut skip) = match resume(chords, tender) {
+                Resume::Past => return Vec::new(),
+                Resume::At { index, offset } => (index, offset),
+                Resume::Start => (0, tender.clone()),
+            };
             let mut shares: Vec<(Action, BigInt)> = Vec::new();
-            let mut skip = tender.clone();
             let mut left = take.clone();
-            for chord in chords {
+            for chord in chords.iter().skip(start) {
                 if skip >= chord.width {
                     skip -= &chord.width;
                     continue;
