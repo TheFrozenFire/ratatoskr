@@ -26,7 +26,7 @@ members = [
     "crates/peer",
     "bins/ratatoskr",
     "bins/seek",
-    "bins/simulate",
+    "bins/survey",
 ]
 
 [workspace.package]

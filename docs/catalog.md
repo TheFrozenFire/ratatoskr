@@ -16,7 +16,7 @@ A check that needs quote inputs uses the writer: `venue::catalog::Catalog::read_
 
 ## Commands
 
-`seek` calls `survey::run` in `crates/survey/src/lib.rs`, which opens the catalog as a writer. `simulate` calls `survey::measure`, which opens `entities.redb` read-only. The read lock allows more than one reader. Run one `simulate` at a time so two allocations do not share the machine. Do not rebuild `target/release/ratatoskr` while that binary is the running writer. A measurement build is the `simulate` binary.
+`seek` calls `survey::run` in `crates/survey/src/lib.rs`, which opens the catalog as a writer. `survey` calls `survey::measure`, which opens `entities.redb` read-only. The read lock allows more than one reader. Run one `survey` at a time so two allocations do not share the machine. Do not rebuild `target/release/ratatoskr` while that binary is the running writer. A measurement build is the `survey` binary.
 
 `--until-idle` stops the state pipeline after the queue is quiet: two passes that claim nothing. It is not the tip-following process. Header sync plus the peer service are what let the watch see new blocks.
 

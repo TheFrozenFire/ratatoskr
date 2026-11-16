@@ -90,7 +90,7 @@ The stage runs after fit. A curve write queues the ordered pairs of its priced d
 
 `crates/simulate` marks a finished plan in one numeraire. The price of a token is the first slope segment of its pair conduit into the wrapped token, in the two tokens' raw units. When that conduit is absent, the price is the product of the first slope into one hub and the first slope from that hub into the wrapped token. Native ETH takes the wrap's one-for-one rate. The score is the numeraire value of the input, the numeraire value of the output, and the gas the plan opened. The gap is the input value minus the output value. The searcher and the optimizer quote in the tokens' own units. The prices are applied after the plan exists.
 
-`simulate` is the command. It opens `entities.redb` read-only in single-writer mode and follows the writer's commits. Discovery and the work queue stay closed. It prepares the same trades as `seek`, allocates each one, and prints the score. A pool that the plan spends in two directions is counted on the score. Each direction is still quoted from that direction's own curve.
+`survey` is the command. It opens `entities.redb` read-only in single-writer mode and follows the writer's commits. Discovery and the work queue stay closed. It prepares the same trades as `seek`, allocates each one, and prints the score. A pool that the plan spends in two directions is counted on the score. Each direction is still quoted from that direction's own curve.
 
 ## Basket
 

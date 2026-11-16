@@ -1,12 +1,12 @@
 [package]
-name = "simulate-bin"
+name = "survey-bin"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "simulate"
+name = "survey"
 path = "src/main.rs"
 
 [dependencies]

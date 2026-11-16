@@ -10,7 +10,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("simulate: {err:#}");
+            eprintln!("survey: {err:#}");
             ExitCode::FAILURE
         }
     }
@@ -20,7 +20,7 @@ fn run() -> eyre::Result<()> {
     let (config_dir, rest) = split_config(env::args().skip(1))?;
     if rest.len() > 2 {
         return Err(eyre::eyre!(
-            "usage: simulate [--config-dir DIR] [data-dir] [limit]"
+            "usage: survey [--config-dir DIR] [data-dir] [limit]"
         ));
     }
     let loaded = config::load(&config_dir)?;

@@ -346,7 +346,7 @@ impl Oracles {
     }
 }
 
-/// Log filter for the simulate binary.
+/// Log filter for the survey binary.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Simulate {

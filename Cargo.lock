@@ -5346,16 +5346,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "simulate-bin"
-version = "0.1.0"
-dependencies = [
- "config",
- "eyre",
- "observability",
- "survey",
-]
-
-[[package]]
 name = "siphasher"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5528,6 +5518,16 @@ dependencies = [
  "store",
  "trade",
  "venue",
+]
+
+[[package]]
+name = "survey-bin"
+version = "0.1.0"
+dependencies = [
+ "config",
+ "eyre",
+ "observability",
+ "survey",
 ]
 
 [[package]]

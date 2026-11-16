@@ -178,6 +178,10 @@ fn one<S: Source>(
     let gas_scan_us = gas_us.saturating_sub(gas_cost.us);
     let problem_other_us = problem_us.saturating_sub(name_cost.us);
     drop(_build);
+    let shape_started = Instant::now();
+    trace_shape(reader, scenario, &searched);
+    let shape_ms = shape_started.elapsed().as_millis();
+    stats.shape_ms += shape_ms;
     observability::info!(
         target: "survey::measure",
         gas_us,
@@ -197,9 +201,8 @@ fn one<S: Source>(
         problem_other_us,
         "build breakdown"
     );
-    trace_shape(reader, scenario, &searched);
     eprintln!(
-        "{} routes {} edges {} chords {} search_ms={search_ms} build_ms={build_ms} gas_us={gas_us} gas_scan_us={gas_scan_us} gas_swap_calls={} gas_swap_us={} gas_venue_calls={} gas_venue_us={} problem_us={problem_us} name_calls={} name_us={} name_venue_calls={} name_venue_us={} problem_other_us={problem_other_us}",
+        "{} routes {} edges {} chords {} search_ms={search_ms} build_ms={build_ms} shape_ms={shape_ms} gas_us={gas_us} gas_scan_us={gas_scan_us} gas_swap_calls={} gas_swap_us={} gas_venue_calls={} gas_venue_us={} problem_us={problem_us} name_calls={} name_us={} name_venue_calls={} name_venue_us={} problem_other_us={problem_other_us}",
         scenario.name,
         searched.routes.len(),
         problem.edges.len(),
@@ -229,6 +232,7 @@ fn one<S: Source>(
     };
     let optimize_ms = optimize_started.elapsed().as_millis();
     stats.optimize_ms += optimize_ms;
+    let score_started = Instant::now();
     stats.plans += 1;
     if plan.count.is_zero() {
         stats.zero += 1;
@@ -267,15 +271,17 @@ fn one<S: Source>(
     let value_in = simulate::whole_tokens(&scored.value_in, decimals, 6);
     let value_out = simulate::whole_tokens(&scored.value_out, decimals, 6);
     let gap = simulate::whole_tokens(&scored.value_in.sub(&scored.value_out), decimals, 6);
+    let score_ms = score_started.elapsed().as_millis();
+    stats.score_ms += score_ms;
     stats.last = Some(format!(
-        "search_ms={search_ms} build_ms={build_ms} optimize_ms={optimize_ms} routes={} edges={} chords={chords} count={} retained={retained_text} value_in={value_in} value_out={value_out} gap={gap} gas={}",
+        "search_ms={search_ms} build_ms={build_ms} shape_ms={shape_ms} optimize_ms={optimize_ms} score_ms={score_ms} routes={} edges={} chords={chords} count={} retained={retained_text} value_in={value_in} value_out={value_out} gap={gap} gas={}",
         searched.routes.len(),
         problem.edges.len(),
         plan.count,
         plan.gas
     ));
     lines.push(format!(
-        "search_ms {search_ms}\nbuild_ms {build_ms}\noptimize_ms {optimize_ms}"
+        "search_ms {search_ms}\nbuild_ms {build_ms}\nshape_ms {shape_ms}\noptimize_ms {optimize_ms}\nscore_ms {score_ms}"
     ));
     lines.push(format!(
         "routes {} edges {} chords {chords}",
@@ -719,7 +725,9 @@ struct Stats {
     shared: u64,
     search_ms: u128,
     build_ms: u128,
+    shape_ms: u128,
     optimize_ms: u128,
+    score_ms: u128,
     retained: Vec<Ratio>,
     last: Option<String>,
 }
@@ -748,7 +756,7 @@ impl Stats {
             )
         };
         format!(
-            "scenarios {}\nplans {}\nzero {}\nerrors {}\nunpriced {}\nshared {}\nsearch_ms {}\nbuild_ms {}\noptimize_ms {}\nretained {retained}\nnumeraire_decimals {decimals}\n",
+            "scenarios {}\nplans {}\nzero {}\nerrors {}\nunpriced {}\nshared {}\nsearch_ms {}\nbuild_ms {}\nshape_ms {}\noptimize_ms {}\nscore_ms {}\nretained {retained}\nnumeraire_decimals {decimals}\n",
             self.scenarios,
             self.plans,
             self.zero,
@@ -757,7 +765,9 @@ impl Stats {
             self.shared,
             self.search_ms,
             self.build_ms,
-            self.optimize_ms
+            self.shape_ms,
+            self.optimize_ms,
+            self.score_ms
         )
     }
 }
