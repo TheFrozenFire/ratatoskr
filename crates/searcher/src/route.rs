@@ -229,6 +229,37 @@ impl<C: Conduits> Build<'_, C> {
         if edges.is_empty() || !self.seen.insert(edges.clone()) {
             return;
         }
+        if !self.admissible(&edges) {
+            return;
+        }
         self.routes.push(Route { edges });
+    }
+
+    /// A route the allocator rejects would reject the whole trade.
+    fn admissible(&self, edges: &[usize]) -> bool {
+        let inputs: HashSet<Token> = self.query.inputs.iter().map(|(token, _)| *token).collect();
+        let outputs: HashSet<Token> = self.query.outputs.iter().copied().collect();
+        let mut seen = HashSet::new();
+        let last = edges.len() - 1;
+        for (index, edge_index) in edges.iter().enumerate() {
+            let Some(edge) = self.edges.get(*edge_index) else {
+                return false;
+            };
+            if edge.token_in == edge.token_out || !seen.insert(edge.token_in) {
+                return false;
+            }
+            if seen.contains(&edge.token_out) {
+                return false;
+            }
+            if index > 0 && inputs.contains(&edge.token_in) || inputs.contains(&edge.token_out) {
+                return false;
+            }
+            if outputs.contains(&edge.token_in)
+                || (outputs.contains(&edge.token_out) && index != last)
+            {
+                return false;
+            }
+        }
+        true
     }
 }

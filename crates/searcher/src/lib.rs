@@ -529,4 +529,105 @@ mod tests {
             vec![NATIVE, wrapped, token(2), token(3)]
         );
     }
+
+    #[test]
+    fn a_native_wrap_does_not_repeat_the_native_token() {
+        let wrapped = token(1);
+        let out = token(3);
+        let query = prepare(
+            Trade {
+                inputs: vec![(NATIVE, amount(10))],
+                outputs: vec![out],
+            },
+            &[NATIVE, wrapped, out],
+            Some(wrapped),
+        )
+        .unwrap();
+        let catalog = Catalog(HashMap::from([
+            ((NATIVE, out), vec![segment(1, 1, 1)]),
+            ((wrapped, out), vec![segment(1, 1, 2)]),
+        ]));
+        let set = execute(&query, &catalog);
+        let found: Vec<Vec<Token>> = set
+            .routes
+            .iter()
+            .map(|route| route_tokens(&set, route))
+            .collect();
+        assert!(
+            found.iter().any(|path| path == &vec![NATIVE, out]),
+            "{found:?}"
+        );
+        assert!(
+            found.iter().any(|path| path == &vec![NATIVE, wrapped, out]),
+            "{found:?}"
+        );
+        assert!(
+            found.iter().all(|path| {
+                let mut seen = std::collections::HashSet::new();
+                path.iter().all(|token| seen.insert(*token))
+            }),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn a_path_through_another_output_is_left_out() {
+        let query = prepare(trade(&[(1, 10)], &[2, 3]), &[token(2)], None).unwrap();
+        let catalog = Catalog(HashMap::from([
+            ((token(1), token(2)), vec![segment(1, 1, 1)]),
+            ((token(2), token(3)), vec![segment(1, 1, 2)]),
+            ((token(1), token(3)), vec![segment(1, 1, 3)]),
+        ]));
+        let set = execute(&query, &catalog);
+        let found: Vec<Vec<Token>> = set
+            .routes
+            .iter()
+            .map(|route| route_tokens(&set, route))
+            .collect();
+        assert!(
+            found.iter().any(|path| path == &vec![token(1), token(2)]),
+            "{found:?}"
+        );
+        assert!(
+            found.iter().any(|path| path == &vec![token(1), token(3)]),
+            "{found:?}"
+        );
+        assert!(
+            found
+                .iter()
+                .all(|path| path != &vec![token(1), token(2), token(3)]),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn a_path_through_another_input_is_left_out() {
+        let query = prepare(trade(&[(1, 10), (4, 10)], &[3]), &[token(4)], None).unwrap();
+        let catalog = Catalog(HashMap::from([
+            ((token(1), token(4)), vec![segment(1, 1, 1)]),
+            ((token(4), token(3)), vec![segment(1, 1, 2)]),
+            ((token(1), token(3)), vec![segment(1, 1, 3)]),
+            ((token(4), token(1)), vec![segment(1, 1, 4)]),
+        ]));
+        let set = execute(&query, &catalog);
+        let found: Vec<Vec<Token>> = set
+            .routes
+            .iter()
+            .map(|route| route_tokens(&set, route))
+            .collect();
+        assert!(
+            found.iter().any(|path| path == &vec![token(1), token(3)]),
+            "{found:?}"
+        );
+        assert!(
+            found.iter().any(|path| path == &vec![token(4), token(3)]),
+            "{found:?}"
+        );
+        assert!(
+            found
+                .iter()
+                .all(|path| path != &vec![token(1), token(4), token(3)]),
+            "{found:?}"
+        );
+    }
 }
