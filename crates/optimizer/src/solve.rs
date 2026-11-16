@@ -12,9 +12,9 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use action::Action;
-use num_bigint::BigInt;
-use num_traits::Zero;
-use routing::{At, SlopeBook};
+use num_bigint::{BigInt, Sign};
+use num_traits::{ToPrimitive, Zero};
+use routing::{At, Seat, SlopeBook, Spot};
 
 use crate::{quote_curve, Chord, Curve, Edge, Flow, Plan, Problem, Route, Tender, Token};
 
@@ -588,7 +588,8 @@ fn paid_offer(
         try_ask(problem, state, route_index, need, room)
             .or_else(|| push(problem, state, route_index, &take, room))
     } else {
-        push(problem, state, route_index, &take, room)
+        held_step(problem, state, route_index, &take, &gain, room)
+            .or_else(|| push(problem, state, route_index, &take, room))
     }?;
     if step.delivered.is_zero() {
         None
@@ -651,6 +652,11 @@ fn exact_chord(
     let Curve::Chords(segments) = &problem.edges.get(edge_index)?.curve else {
         return None;
     };
+    if let Some(take) = native_chord(segments, &state.tender[edge_index], limit) {
+        return take.and_then(|take| {
+            spent_gain(problem, state, route_index, &take).map(|gain| (take, gain))
+        });
+    }
     let head = head(segments, &state.tender[edge_index])?;
     if !head.offset.is_zero() {
         return None;
@@ -666,6 +672,46 @@ fn exact_chord(
     }
     let take = (&span / &step) * &step;
     spent_gain(problem, state, route_index, &take).map(|gain| (take, gain))
+}
+
+/// `Some(None)` when the native prefix has already decided there is no whole step.
+/// `None` when the prefix is not native and the wide division still has to run.
+fn native_chord(segments: &[Chord], tender: &BigInt, limit: &BigInt) -> Option<Option<BigInt>> {
+    with_book(segments, |book| {
+        let book = book?;
+        Some(match book.spot(tender) {
+            Spot::Here(seat) if seat.offset == 0 && seat.output > 0 && seat.width > 0 => {
+                chord_take(&seat, limit)
+            }
+            Spot::Here(_) | Spot::Past => None,
+            Spot::Other => return None,
+        })
+    })
+}
+
+fn chord_take(seat: &Seat, limit: &BigInt) -> Option<BigInt> {
+    let span = if limit.sign() == Sign::Minus {
+        return None;
+    } else {
+        match limit.to_u128() {
+            Some(limit) => limit.min(seat.rem_w),
+            None => seat.rem_w,
+        }
+    };
+    let step = seat.width / gcd_u128(seat.output, seat.width);
+    if step == 0 || step > span {
+        return None;
+    }
+    Some(BigInt::from((span / step) * step))
+}
+
+fn gcd_u128(mut left: u128, mut right: u128) -> u128 {
+    while right != 0 {
+        let rem = left % right;
+        left = right;
+        right = rem;
+    }
+    left
 }
 
 fn fallback_prefix(
@@ -1219,6 +1265,9 @@ fn linear_source(
     route_index: usize,
     limit: &BigInt,
 ) -> Option<BigInt> {
+    if slopes_break(problem, state, route_index) {
+        return None;
+    }
     let route = &problem.routes[route_index];
     let mut source_cap = limit.clone();
     let mut out_per_source = BigInt::from(1);
@@ -1252,6 +1301,40 @@ fn linear_source(
     } else {
         Some(source_cap)
     }
+}
+
+/// The open chord is not an integer rate, or the tender is past the prefix.
+fn slopes_break(problem: &Problem, state: &Live, route_index: usize) -> bool {
+    let route = &problem.routes[route_index];
+    for (index, edge_index) in route.edges.iter().enumerate() {
+        let edge = &problem.edges[*edge_index];
+        if index > 0 && !state.excess(&spent(edge)).is_zero() {
+            return true;
+        }
+        let Curve::Chords(segments) = &edge.curve else {
+            continue;
+        };
+        let breaks = with_book(segments, |book| {
+            let Some(book) = book else {
+                return false;
+            };
+            match book.spot(&state.tender[*edge_index]) {
+                Spot::Past => true,
+                Spot::Here(seat) => {
+                    seat.width == 0
+                        || seat.output == 0
+                        || seat.rem_w == 0
+                        || seat.output % seat.width != 0
+                }
+                Spot::Other => false,
+            }
+        });
+        if breaks {
+            return true;
+        }
+        return false;
+    }
+    false
 }
 
 fn linear_input(segments: &[Chord], tender: &BigInt, rate: &BigInt) -> BigInt {
@@ -1375,11 +1458,37 @@ fn spent_gain(
     route_index: usize,
     source: &BigInt,
 ) -> Option<BigInt> {
+    if problem.routes[route_index].edges.len() == 1 {
+        return one_edge_gain(problem, state, route_index, source);
+    }
     let sim = simulate(problem, state, route_index, source)?;
     if sim.takes.first() != Some(source) || sim.delivered.is_zero() {
         return None;
     }
     Some(sim.delivered)
+}
+
+fn one_edge_gain(
+    problem: &Problem,
+    state: &Live,
+    route_index: usize,
+    source: &BigInt,
+) -> Option<BigInt> {
+    let edge_index = problem.routes[route_index].edges[0];
+    let edge = &problem.edges[edge_index];
+    let budget = state.budget.get(&spent(edge))?;
+    if source > budget || source.is_zero() {
+        return None;
+    }
+    if !take_fits(edge, &state.tender[edge_index], source) {
+        return None;
+    }
+    let gain = produce(edge, &state.tender[edge_index], source);
+    if gain.is_zero() {
+        None
+    } else {
+        Some(gain)
+    }
 }
 
 fn sink_output(problem: &Problem, state: &Live, route_index: usize, source: &BigInt) -> BigInt {
@@ -1448,6 +1557,56 @@ fn push(
         }
     }
     Some(stamp(sim.takes, sim.delivered, gas))
+}
+
+/// The delivery of `take` is already known. One edge, still inside the budget and the open width.
+fn held_step(
+    problem: &Problem,
+    state: &Live,
+    route_index: usize,
+    take: &BigInt,
+    gain: &BigInt,
+    room: Option<&BigInt>,
+) -> Option<Step> {
+    let route = &problem.routes[route_index];
+    if route.edges.len() != 1 || gain.is_zero() || take.sign() != Sign::Plus {
+        return None;
+    }
+    let edge_index = route.edges[0];
+    let edge = &problem.edges[edge_index];
+    let budget = state.budget.get(&spent(edge))?;
+    if take > budget || !take_fits(edge, &state.tender[edge_index], take) {
+        return None;
+    }
+    let takes = vec![take.clone()];
+    let gas = step_gas(problem, state, route, &takes);
+    if let Some(room) = room {
+        if &gas > room {
+            return None;
+        }
+    }
+    Some(stamp(takes, gain.clone(), gas))
+}
+
+fn take_fits(edge: &Edge, tender: &BigInt, take: &BigInt) -> bool {
+    let Curve::Chords(chords) = &edge.curve else {
+        return true;
+    };
+    let native = with_book(chords, |book| {
+        let book = book?;
+        let room = book.remaining_u128(tender)?;
+        Some(match take.to_u128() {
+            Some(take) => take <= room,
+            None => false,
+        })
+    });
+    if let Some(fits) = native {
+        return fits;
+    }
+    match remaining_input(edge, tender) {
+        Some(cap) => take <= &cap,
+        None => true,
+    }
 }
 
 fn stamp(takes: Vec<BigInt>, delivered: BigInt, gas: BigInt) -> Step {
@@ -1678,16 +1837,16 @@ fn produce(edge: &Edge, tender: &BigInt, take: &BigInt) -> BigInt {
     if take.is_zero() {
         return BigInt::from(0);
     }
-    let next = tender + take;
     if let Curve::Chords(chords) = &edge.curve {
         if let Some(delta) = with_book(chords, |book| {
-            let book = book?;
-            let after = book.quote_u128(&next)?;
-            let before = book.quote_u128(tender)?;
-            Some(BigInt::from(after - before))
+            book.and_then(|book| book.delta_u128(tender, take))
+                .map(BigInt::from)
         }) {
             return delta;
         }
+    }
+    let next = tender + take;
+    if let Curve::Chords(chords) = &edge.curve {
         if let (Some(after), Some(before)) = (quoted(chords, &next), quoted(chords, tender)) {
             return after - before;
         }
@@ -1716,6 +1875,48 @@ fn step_gas(problem: &Problem, state: &Live, route: &Route, takes: &[BigInt]) ->
     gas
 }
 
+fn native_shares(
+    chords: &[Chord],
+    tender: &BigInt,
+    take: &BigInt,
+) -> Option<Vec<(Action, BigInt)>> {
+    let mut left = take.to_u128()?;
+    let spot = with_book(chords, |book| book.map(|book| book.spot(tender)))?;
+    let (mut index, mut offset) = match spot {
+        Spot::Here(seat) => (seat.index, seat.offset),
+        Spot::Past => return Some(Vec::new()),
+        Spot::Other => return None,
+    };
+    let mut shares: Vec<(Action, u128)> = Vec::new();
+    while left > 0 && index < chords.len() {
+        let chord = &chords[index];
+        let width = chord.width.to_u128()?;
+        if offset >= width {
+            offset -= width;
+            index += 1;
+            continue;
+        }
+        let used = left.min(width - offset);
+        if let Some((_, amount)) = shares
+            .iter_mut()
+            .find(|(action, _)| action == &chord.action)
+        {
+            *amount = amount.checked_add(used)?;
+        } else {
+            shares.push((chord.action.clone(), used));
+        }
+        left -= used;
+        offset = 0;
+        index += 1;
+    }
+    Some(
+        shares
+            .into_iter()
+            .map(|(action, amount)| (action, BigInt::from(amount)))
+            .collect(),
+    )
+}
+
 /// Input of `take` that lands on each action, starting after `tender`.
 fn paid_shares(edge: &Edge, tender: &BigInt, take: &BigInt) -> Vec<(Action, BigInt)> {
     if take.sign() != num_bigint::Sign::Plus {
@@ -1724,6 +1925,9 @@ fn paid_shares(edge: &Edge, tender: &BigInt, take: &BigInt) -> Vec<(Action, BigI
     match &edge.curve {
         Curve::Unlimited => vec![(edge.action.clone(), take.clone())],
         Curve::Chords(chords) => {
+            if let Some(shares) = native_shares(chords, tender, take) {
+                return shares;
+            }
             let (start, mut skip) = match resume(chords, tender) {
                 Resume::Past => return Vec::new(),
                 Resume::At { index, offset } => (index, offset),
