@@ -15,6 +15,7 @@ mod graph;
 mod kinds;
 mod measure;
 mod pick;
+mod quiet;
 mod reader;
 mod report;
 mod scan;
@@ -24,7 +25,15 @@ mod source;
 mod stage;
 mod token;
 
+pub use quiet::silence as silence_progress;
 pub use session::{Item, Session};
+
+macro_rules! progress {
+    ($($arg:tt)*) => {
+        crate::quiet::say(format_args!($($arg)*));
+    };
+}
+pub(crate) use progress;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -42,7 +51,7 @@ pub(crate) const HUB_LIMITS: [usize; 4] = [8, 16, 32, 64];
 
 /// Open the entity catalog at `data_dir` and print the search.
 pub fn run(data_dir: &Path, spots: &config::Spots, caches: &config::Store) -> eyre::Result<()> {
-    eprintln!("opening {}", data_dir.display());
+    progress!("opening {}", data_dir.display());
     let catalog = Catalog::open_with(data_dir, caches).wrap_err("open catalog")?;
     let snapshot = catalog.snapshot().wrap_err("entity snapshot")?;
     print_search(&snapshot, spots)
@@ -57,7 +66,7 @@ pub fn measure(
     spots: &config::Spots,
     caches: &config::Store,
 ) -> eyre::Result<()> {
-    eprintln!("opening {} read-only", data_dir.display());
+    progress!("opening {} read-only", data_dir.display());
     let catalog =
         store::service::EntityRead::open_with(data_dir, caches.read).wrap_err("open catalog")?;
     let snapshot = catalog.snapshot().wrap_err("entity snapshot")?;
@@ -98,7 +107,7 @@ fn print_search(catalog: &impl Source, spots: &config::Spots) -> eyre::Result<()
         deep: 0,
         long_lengths: BTreeMap::new(),
     };
-    eprintln!("running {} scenarios", stage.scenarios.len());
+    progress!("running {} scenarios", stage.scenarios.len());
     for scenario in &stage.scenarios {
         match trade::query(&scenario.trade, &scenario.hubs) {
             Ok(query) => {

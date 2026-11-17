@@ -5,6 +5,7 @@ use eyre::WrapErr;
 use searcher::Token;
 
 use crate::graph::{self, HubCensus, HubReach, Selection};
+use crate::progress;
 use crate::reader::{self, CurveCache, Reader};
 use crate::scan::{self, Survey};
 use crate::scenario::{self, Scenario};
@@ -35,9 +36,9 @@ pub(crate) fn load<S: Source>(
         .map(token::token_of)
         .ok_or_else(|| eyre::eyre!("the catalog has no wrapper token"))?;
     let known = token::labels(&records);
-    eprintln!("scanning conduits");
+    progress!("scanning conduits");
     let survey = scan::survey(source)?;
-    eprintln!(
+    progress!(
         "scanned {} conduits, {} tokens with an outgoing curve",
         survey.conduits,
         survey.graph.out.len()
@@ -62,16 +63,19 @@ pub(crate) fn load<S: Source>(
                 .map(|hub| hub.token)
                 .collect();
             let reach = graph::reach_of(&survey.graph, &incoming, &slice);
-            eprintln!(
+            progress!(
                 "reach K={limit} both {} toward {} from {} outside {}",
-                reach.both, reach.toward, reach.from_hub, reach.outside
+                reach.both,
+                reach.toward,
+                reach.from_hub,
+                reach.outside
             );
             reach_rows.push((limit, reach));
         }
     }
-    eprintln!("choosing paths through {} hubs", hubs.len());
+    progress!("choosing paths through {} hubs", hubs.len());
     let selection = graph::select(&survey.graph, &hubs);
-    eprintln!(
+    progress!(
         "candidates long {} via {} deep {} isolated {} wide-skips {}",
         selection.long.len(),
         selection.via_hub.len(),
@@ -85,11 +89,11 @@ pub(crate) fn load<S: Source>(
         graph: &survey.graph,
         incoming: &incoming,
     };
-    eprintln!("checking pool identity on the candidate paths");
+    progress!("checking pool identity on the candidate paths");
     let long = reader::keep_disjoint(&survey.graph, &incoming, &reader, &selection.long, 24);
     let via = reader::keep_disjoint(&survey.graph, &incoming, &reader, &selection.via_hub, 12);
     let isolated = reader::keep_disjoint(&survey.graph, &incoming, &reader, &selection.isolated, 4);
-    eprintln!(
+    progress!(
         "kept long {} via {} isolated {}",
         long.len(),
         via.len(),

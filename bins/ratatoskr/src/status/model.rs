@@ -1,10 +1,9 @@
 //! Key state for the status screens. The draw loop renders this. It does not
 //! read the catalog.
 
-use alloy_primitives::{Address, B256};
 use serde_json::Value;
 
-use super::ingest::{ingest_from, Ingest, Local};
+use super::ingest::{error_detail, ingest_from, peer_detail, Ingest, Local, Session};
 
 pub(crate) const VIEWS: [&str; 9] = [
     "ingestion",
@@ -21,19 +20,14 @@ pub(crate) const VIEWS: [&str; 9] = [
 pub(crate) const PAGE: usize = 32;
 
 const SURVEY: usize = 1;
+const PEERS: usize = 2;
 const WORK: usize = 3;
-const POOLS: usize = 4;
-const CONDUITS: usize = 5;
-const TOKENS: usize = 6;
-
-const WORK_STAGES: [Option<u8>; 6] = [None, Some(1), Some(2), Some(3), Some(4), Some(6)];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Focus {
     Nav,
     Body,
     Detail,
-    Filter,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,35 +36,6 @@ pub(crate) enum Order {
     Prepare,
     Reload,
     Measure(usize),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum RowKey {
-    Pool {
-        kind: u8,
-        id: B256,
-    },
-    Conduit {
-        token_in: Address,
-        token_out: Address,
-    },
-    Token(Address),
-    Feed(Address),
-    Spot {
-        token: Address,
-        numeraire: Address,
-    },
-    Peer(usize),
-    Work(usize),
-    ConduitWork(usize),
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct Row {
-    pub cells: Vec<String>,
-    pub key: RowKey,
-    pub detail: String,
-    pub resume: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -112,39 +77,19 @@ impl Default for SurveyCtl {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Nudge {
-    Stay,
-    Next,
-    Prev,
-}
-
 pub(crate) struct App {
     pub nav: usize,
     pub view: usize,
     pub focus: Focus,
     pub cursor: usize,
     pub scroll: u16,
-    pub rows: Vec<Row>,
-    pub page_full: bool,
-    pub nudge: Nudge,
-    pub reload: u64,
-    pub filter: String,
-    pub applied: String,
     pub ingest: Ingest,
     pub detail: String,
-    pub detail_pending: bool,
     pub quit: bool,
     pub control: Option<&'static str>,
     pub survey: SurveyCtl,
-    pub work_conduit: bool,
-    pub work_stage: Option<u8>,
-    pub work_step: usize,
-    pub pool_kind: Option<u8>,
-    pub pool_step: usize,
-    pub live_peers: Vec<String>,
+    pub live_peers: Vec<Session>,
     pub peer_down: bool,
-    pub sightings: Option<u64>,
     pub notice: String,
 }
 
@@ -156,26 +101,13 @@ impl App {
             focus: Focus::Nav,
             cursor: 0,
             scroll: 0,
-            rows: Vec::new(),
-            page_full: false,
-            nudge: Nudge::Stay,
-            reload: 0,
-            filter: String::new(),
-            applied: String::new(),
             ingest: Ingest::default(),
             detail: String::new(),
-            detail_pending: false,
             quit: false,
             control: None,
             survey: SurveyCtl::default(),
-            work_conduit: false,
-            work_stage: None,
-            work_step: 0,
-            pool_kind: None,
-            pool_step: 0,
             live_peers: Vec::new(),
             peer_down: false,
-            sightings: None,
             notice: String::new(),
         }
     }
@@ -186,40 +118,25 @@ impl App {
         }
         match key {
             Key::Char('q') => self.quit = true,
-            Key::Char(ch @ '1'..='4') if self.focus != Focus::Filter => {
-                self.jump(ch as usize - '1' as usize);
+            Key::Char(ch @ '1'..='9') => {
+                let index = ch as usize - '1' as usize;
+                if index < VIEWS.len() {
+                    self.jump(index);
+                }
             }
             Key::Esc => self.esc(),
             Key::Enter => self.enter(),
+            Key::Left | Key::Char('h') => self.left(),
+            Key::Right | Key::Char('l') => self.right(),
             Key::Up | Key::Char('k') => self.shift(-1),
             Key::Down | Key::Char('j') => self.shift(1),
-            Key::Char('h') if self.focus != Focus::Filter => self.focus = Focus::Nav,
-            Key::Char('p') if self.focus != Focus::Filter && self.view == 0 => {
+            Key::Char('p') if self.view == 0 => {
                 if let Some(paused) = self.ingest.paused {
                     self.control = Some(super::ingest::control_path(paused));
                 }
             }
-            Key::Char('s') if self.focus != Focus::Filter && self.view == WORK => self.cycle_work(),
-            Key::Char('s') if self.focus != Focus::Filter && self.view == POOLS => {
-                self.cycle_pools();
-            }
-            Key::Char('r') if self.focus != Focus::Filter && self.view == SURVEY => {
-                self.measure_one();
-            }
-            Key::Char('R') if self.focus != Focus::Filter && self.view == SURVEY => {
-                self.measure_all();
-            }
-            Key::Char('/')
-                if self.focus != Focus::Filter && matches!(self.view, CONDUITS | TOKENS) =>
-            {
-                self.focus = Focus::Filter;
-            }
-            Key::Backspace if self.focus == Focus::Filter => {
-                self.filter.pop();
-            }
-            Key::Char(ch) if self.focus == Focus::Filter && !ch.is_control() => {
-                self.filter.push(ch);
-            }
+            Key::Char('r') if self.view == SURVEY => self.measure_one(),
+            Key::Char('R') if self.view == SURVEY => self.measure_all(),
             _ => {}
         }
     }
@@ -286,21 +203,12 @@ impl App {
 
     pub(crate) fn apply_status(&mut self, snap: Option<&Value>, local: &Local, rates: &[f64]) {
         self.ingest = ingest_from(snap, local, rates);
-    }
-
-    pub(crate) fn ingestion_text(&self) -> String {
-        let mut lines = self.ingest.pipelines.clone();
-        if !self.ingest.notice.is_empty() {
-            lines.push(self.ingest.notice.clone());
+        let len = self.list_len();
+        if len == 0 {
+            self.cursor = 0;
+        } else if self.cursor >= len {
+            self.cursor = len - 1;
         }
-        lines.push(self.ingest.catalog.clone());
-        for stage in &self.ingest.stages {
-            lines.push(format!(
-                "{} queued {} batches {} jobs {} last {} rate {}",
-                stage.name, stage.queued, stage.batches, stage.jobs, stage.last, stage.rate
-            ));
-        }
-        lines.join("\n")
     }
 
     fn jump(&mut self, index: usize) {
@@ -316,8 +224,6 @@ impl App {
             self.cursor = 0;
             self.scroll = 0;
             self.detail.clear();
-            self.detail_pending = false;
-            self.reload = self.reload.wrapping_add(1);
         }
         if index == SURVEY
             && self.survey.items.is_empty()
@@ -329,41 +235,57 @@ impl App {
         }
     }
 
-    fn enter(&mut self) {
+    fn left(&mut self) {
+        self.survey.detail = false;
+        self.focus = Focus::Nav;
+    }
+
+    fn right(&mut self) {
         match self.focus {
             Focus::Nav => self.open_view(self.nav),
-            Focus::Filter => {
-                self.applied = self.filter.clone();
-                self.focus = Focus::Body;
-                self.cursor = 0;
-                self.reload = self.reload.wrapping_add(1);
-            }
-            Focus::Body if self.view == SURVEY => {
-                if self.survey.items.is_empty() {
-                    return;
-                }
-                self.survey.detail = true;
-                self.survey.scroll = 0;
-                self.focus = Focus::Detail;
-            }
-            Focus::Body => {
-                if self.rows.is_empty() {
-                    return;
-                }
-                self.focus = Focus::Detail;
-                self.scroll = 0;
-                self.detail_pending = true;
-            }
+            Focus::Body => self.open_detail(),
             Focus::Detail => {}
         }
     }
 
-    fn esc(&mut self) {
-        if self.focus == Focus::Filter {
-            self.filter = self.applied.clone();
-            self.focus = Focus::Body;
+    fn enter(&mut self) {
+        match self.focus {
+            Focus::Nav => self.open_view(self.nav),
+            Focus::Body => self.open_detail(),
+            Focus::Detail => {}
+        }
+    }
+
+    fn open_detail(&mut self) {
+        if self.view == SURVEY {
+            if self.survey.items.is_empty() {
+                return;
+            }
+            self.survey.detail = true;
+            self.survey.scroll = 0;
+            self.focus = Focus::Detail;
             return;
         }
+        if self.view == PEERS {
+            let Some(session) = self.live_peers.get(self.cursor) else {
+                return;
+            };
+            self.detail = peer_detail(session, &self.live_peers, self.ingest.chain_number);
+            self.scroll = 0;
+            self.focus = Focus::Detail;
+            return;
+        }
+        if self.view == WORK {
+            let Some((count, error)) = self.ingest.errors.get(self.cursor) else {
+                return;
+            };
+            self.detail = error_detail(*count, error);
+            self.scroll = 0;
+            self.focus = Focus::Detail;
+        }
+    }
+
+    fn esc(&mut self) {
         if self.focus == Focus::Detail {
             self.focus = Focus::Body;
             self.survey.detail = false;
@@ -399,15 +321,12 @@ impl App {
                 self.survey.cursor = move_index(self.survey.cursor, self.survey.items.len(), delta);
             }
             Focus::Body => {
-                if delta > 0 && self.cursor + 1 >= self.rows.len() && self.page_full {
-                    self.nudge = Nudge::Next;
+                let len = self.list_len();
+                if len == 0 {
+                    self.scroll = slide(self.scroll, delta);
                     return;
                 }
-                if delta < 0 && self.cursor == 0 {
-                    self.nudge = Nudge::Prev;
-                    return;
-                }
-                self.cursor = move_index(self.cursor, self.rows.len(), delta);
+                self.cursor = move_index(self.cursor, len, delta);
             }
             Focus::Detail if self.view == SURVEY && self.survey.detail => {
                 self.survey.scroll = slide(self.survey.scroll, delta);
@@ -415,7 +334,14 @@ impl App {
             Focus::Detail => {
                 self.scroll = slide(self.scroll, delta);
             }
-            Focus::Filter => {}
+        }
+    }
+
+    fn list_len(&self) -> usize {
+        match self.view {
+            PEERS => self.live_peers.len(),
+            WORK => self.ingest.errors.len(),
+            _ => 0,
         }
     }
 
@@ -453,30 +379,6 @@ impl App {
             self.survey.note = format!("measuring {}", row.name);
         }
     }
-
-    fn cycle_work(&mut self) {
-        self.work_step = (self.work_step + 1) % (WORK_STAGES.len() + 1);
-        if self.work_step == WORK_STAGES.len() {
-            self.work_conduit = true;
-            self.work_stage = None;
-        } else {
-            self.work_conduit = false;
-            self.work_stage = WORK_STAGES[self.work_step];
-        }
-        self.cursor = 0;
-        self.reload = self.reload.wrapping_add(1);
-    }
-
-    fn cycle_pools(&mut self) {
-        self.pool_step = (self.pool_step + 1) % 15;
-        self.pool_kind = if self.pool_step == 0 {
-            None
-        } else {
-            Some(self.pool_step as u8)
-        };
-        self.cursor = 0;
-        self.reload = self.reload.wrapping_add(1);
-    }
 }
 
 fn move_index(cursor: usize, len: usize, delta: isize) -> usize {
@@ -513,7 +415,8 @@ pub(crate) enum Key {
     Char(char),
     Enter,
     Esc,
-    Backspace,
+    Left,
+    Right,
     Up,
     Down,
 }
@@ -574,24 +477,19 @@ mod tests {
     fn the_status_names_the_token_lens_and_the_feeds() {
         let mut app = App::new();
         app.apply_status(Some(&snap()), &Local::default(), &[]);
-        let text = app.ingestion_text();
-        assert!(text.contains("header sync"), "{text}");
-        assert!(text.contains("cursor 5"), "{text}");
-        assert!(text.contains("behind 4"), "{text}");
-        assert!(text.contains("discovery"), "{text}");
-        assert!(text.contains("identities 10"), "{text}");
-        assert!(text.contains("token lens"), "{text}");
-        assert!(text.contains("4 stored"), "{text}");
-        assert!(text.contains("2 missing"), "{text}");
-        assert!(text.contains("reading"), "{text}");
-        assert!(text.contains("oracles"), "{text}");
-        assert!(text.contains("8 answers"), "{text}");
-        assert!(text.contains("spots"), "{text}");
-        assert!(text.contains("12 spots"), "{text}");
-        assert!(text.contains("following"), "{text}");
+        let text = super::super::ingest::overview_lines(&app.ingest).join("\n");
+        assert!(text.contains("  cursor          5"), "{text}");
+        assert!(text.contains("  behind          4"), "{text}");
+        assert!(text.contains("Discovery"), "{text}");
+        assert!(text.contains("  identities      10"), "{text}");
+        assert!(text.contains("  stored          4"), "{text}");
+        assert!(text.contains("  missing         2"), "{text}");
+        assert!(text.contains("  lens            reading"), "{text}");
+        assert!(text.contains("  answers         8"), "{text}");
+        assert!(text.contains("  spots           12"), "{text}");
+        assert!(text.contains("  mode            following"), "{text}");
         assert!(text.contains("2.0 KB"), "{text}");
-        assert!(text.contains("peer service"), "{text}");
-        assert!(text.contains("not running"), "{text}");
+        assert!(text.contains("  service         not running"), "{text}");
     }
 
     #[test]
@@ -605,7 +503,7 @@ mod tests {
         };
         let mut app = App::new();
         app.apply_status(None, &local, &[1.0, 2.0, 3.0, 4.0, 5.0]);
-        let text = app.ingestion_text();
+        let text = super::super::ingest::overview_lines(&app.ingest).join("\n");
         assert!(text.contains("exporter is down"), "{text}");
         assert!(text.contains("42"), "{text}");
         assert!(text.contains("list:test"), "{text}");
@@ -624,6 +522,11 @@ mod tests {
         assert_eq!(app.view, 1);
         assert_eq!(app.focus, Focus::Body);
         assert_eq!(app.take_order(), Order::Prepare);
+        app.press(Key::Left);
+        assert_eq!(app.focus, Focus::Nav);
+        assert_eq!(app.view, 1);
+        app.press(Key::Right);
+        assert_eq!(app.focus, Focus::Body);
         app.press(Key::Char('1'));
         assert_eq!(app.view, 0);
         app.press(Key::Esc);

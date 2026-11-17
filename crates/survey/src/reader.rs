@@ -8,6 +8,7 @@ use searcher::{Conduits, Token};
 use venue::{VenueRow, BALANCER_V2, UNI_V4};
 
 use crate::graph::{Graph, PathEnds};
+use crate::progress;
 use crate::source::Source;
 
 /// Time spent naming pool actions, including venue-row reads.
@@ -111,7 +112,7 @@ pub(crate) fn keep_disjoint<S: Source>(
             break;
         }
         if index.is_multiple_of(10) {
-            eprintln!("pool check {index}/{}", paths.len());
+            progress!("pool check {index}/{}", paths.len());
         }
         if path_pools_ok(graph, incoming, reader, &path.path) {
             kept.push(path.clone());

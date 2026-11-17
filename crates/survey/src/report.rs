@@ -5,6 +5,7 @@ use venue::kind_name;
 
 use crate::graph::{Graph, HubCensus, HubReach, Selection};
 use crate::kinds::{curve_kinds, curve_label, kind_list};
+use crate::progress;
 use crate::reader::Reader;
 use crate::scan::Survey;
 use crate::scenario::Scenario;
@@ -287,13 +288,13 @@ pub(crate) fn route_line(set: &RouteSet, route: &Route, known: &[Known]) -> Stri
 }
 
 pub(crate) fn note_hubs(census: &HubCensus, known: &[Known], hub_limit: usize) {
-    eprint!("ranked");
+    let mut ranked = String::from("ranked");
     for hub in census.ranked.iter().take(hub_limit) {
-        eprint!(" {}={}", label(hub.token, known), hub.conduits);
+        ranked.push_str(&format!(" {}={}", label(hub.token, known), hub.conduits));
     }
-    eprintln!();
+    progress!("{ranked}");
     for (floor, count) in &census.at_least {
-        eprintln!("tokens with at least {floor} conduits: {count}");
+        progress!("tokens with at least {floor} conduits: {count}");
     }
 }
 
@@ -305,9 +306,9 @@ pub(crate) fn note_degrees(graph: &Graph, known: &[Known]) {
         .collect();
     ranks.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
     ranks.truncate(12);
-    eprint!("widest");
+    let mut widest = String::from("widest");
     for (degree, token) in ranks {
-        eprint!(" {}={degree}", label(token, known));
+        widest.push_str(&format!(" {}={degree}", label(token, known)));
     }
-    eprintln!();
+    progress!("{widest}");
 }

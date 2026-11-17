@@ -4,6 +4,7 @@ use searcher::{Token, NATIVE};
 
 use crate::graph::Graph;
 use crate::kinds::{kind_bit, only_kind};
+use crate::progress;
 use crate::source::Source;
 use crate::token::token_of;
 
@@ -41,7 +42,7 @@ pub(crate) fn survey(source: &impl Source) -> eyre::Result<Survey> {
         }
         conduits += 1;
         if conduits.is_multiple_of(100_000) {
-            eprintln!("scan {conduits}");
+            progress!("scan {conduits}");
         }
         let from = token_of(token_in);
         let to = token_of(token_out);

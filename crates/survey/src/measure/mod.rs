@@ -15,6 +15,7 @@ use eyre::WrapErr;
 use std::io::{self, Write};
 use std::time::Instant;
 
+use crate::progress;
 use action::Action;
 use num_bigint::BigInt;
 use num_traits::{Signed, Zero};
@@ -50,7 +51,7 @@ pub(crate) fn run<S: Source>(
     let records = source.tokens()?;
     let decimals = wrapper_decimals(&records, stage.wrapped);
     let places = token_decimals(&records);
-    eprintln!(
+    progress!(
         "pricing {} scenario tokens from {}",
         token_count(stage),
         stage.scenarios.len()
@@ -61,7 +62,7 @@ pub(crate) fn run<S: Source>(
         Some(limit) => &stage.scenarios[..limit.min(stage.scenarios.len())],
         None => stage.scenarios.as_slice(),
     };
-    eprintln!(
+    progress!(
         "allocating {} of {} trades",
         scenarios.len(),
         stage.scenarios.len()
@@ -79,7 +80,7 @@ pub(crate) fn run<S: Source>(
         let block = one(source, &reader, stage, scenario, &mut ctx, &mut stats);
         writeln!(stdout, "{block}")?;
         stdout.flush()?;
-        eprintln!(
+        progress!(
             "{} {} wall_ms={}",
             scenario.name,
             stats.last.as_deref().unwrap_or("error"),
@@ -155,7 +156,7 @@ fn one<S: Source>(
     let places = ctx.places;
     stats.scenarios += 1;
     let mut lines = vec![format!("== {}", scenario.name), scenario.detail.clone()];
-    eprintln!("{} search", scenario.name);
+    progress!("{} search", scenario.name);
     let search_started = Instant::now();
     let searched = match trade::query(&scenario.trade, &scenario.hubs) {
         Ok(query) => searcher::execute(&query, reader),
@@ -255,7 +256,7 @@ fn one<S: Source>(
         problem_other_us,
         "build breakdown"
     );
-    eprintln!(
+    progress!(
         "{} routes {} edges {} chords {} search_ms={search_ms} build_ms={build_ms} shape_ms={shape_ms} gas_us={gas_us} gas_scan_us={gas_scan_us} gas_swap_calls={} gas_swap_us={} gas_venue_calls={} gas_venue_us={} problem_us={problem_us} name_calls={} name_us={} name_venue_calls={} name_venue_us={} problem_other_us={problem_other_us}",
         scenario.name,
         searched.routes.len(),

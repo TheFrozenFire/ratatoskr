@@ -41,11 +41,9 @@ pub fn run(
     thread::spawn(move || survey_thread(job_rx, reports_tx, dir, caches, spots));
     let mut screen = Screen::enter()?;
     let mut app = App::new();
-    let mut names = load::Names::new();
-    let mut browser = load::Browser::new();
     let mut rates = Pace::new(rate_window);
     let mut exporter_at = Instant::now() - Duration::from_secs(1);
-    let mut shelf_at = Instant::now() - Duration::from_secs(1);
+    let mut peer_at = Instant::now() - Duration::from_secs(1);
     let result = loop {
         if event::poll(Duration::from_millis(200))? {
             if let Event::Key(key) = event::read()? {
@@ -73,30 +71,27 @@ pub fn run(
                 Err(err) => app.notice = err,
             }
         }
-        if shelf_at.elapsed() >= Duration::from_secs(1) {
-            shelf_at = Instant::now();
-            app.sightings = shelf
-                .peers
-                .as_ref()
-                .and_then(|peers| peers.sightings().ok());
-            if app.view == 2 {
-                match load::live_peers(socket) {
-                    Ok(lines) => {
-                        app.live_peers = lines;
-                        app.peer_down = false;
-                    }
-                    Err(_) => {
-                        app.live_peers.clear();
-                        app.peer_down = true;
-                    }
+        if app.view == 2 && peer_at.elapsed() >= Duration::from_secs(1) {
+            peer_at = Instant::now();
+            match load::live_peers(socket) {
+                Ok(sessions) => {
+                    app.live_peers = sessions;
+                    app.peer_down = false;
+                    app.notice.clear();
+                }
+                Err(err) => {
+                    app.live_peers.clear();
+                    app.peer_down = true;
+                    app.notice = err;
                 }
             }
-            if !matches!(app.view, 0 | 1) {
-                browser.turn(&mut app);
-                load::refresh(&mut app, &shelf, &mut names, &browser.after);
+            let len = app.live_peers.len();
+            if len == 0 {
+                app.cursor = 0;
+            } else if app.cursor >= len {
+                app.cursor = len - 1;
             }
         }
-        load::fill_detail(&mut app, &shelf, &mut names);
         if exporter_at.elapsed() >= Duration::from_millis(400) {
             exporter_at = Instant::now();
             match net::fetch(&url) {
@@ -178,6 +173,7 @@ fn survey_thread(
     caches: config::Store,
     spots: config::Spots,
 ) {
+    survey::silence_progress();
     let mut session = None;
     while let Ok(job) = jobs.recv() {
         let report = match job {
@@ -322,7 +318,8 @@ fn key_of(code: KeyCode) -> Option<Key> {
         KeyCode::Char(ch) => Some(Key::Char(ch)),
         KeyCode::Enter => Some(Key::Enter),
         KeyCode::Esc => Some(Key::Esc),
-        KeyCode::Backspace => Some(Key::Backspace),
+        KeyCode::Left => Some(Key::Left),
+        KeyCode::Right => Some(Key::Right),
         KeyCode::Up => Some(Key::Up),
         KeyCode::Down => Some(Key::Down),
         _ => None,
