@@ -29,3 +29,21 @@ pub(super) fn spots<S: Source>(reader: &Reader<'_, S>, stage: &Stage) -> BTreeMa
     }
     prices
 }
+
+pub(super) fn ensure<S: Source>(
+    reader: &Reader<'_, S>,
+    stage: &Stage,
+    prices: &mut BTreeMap<Token, Price>,
+    missed: &mut BTreeSet<Token>,
+    token: Token,
+) {
+    if prices.contains_key(&token) || !missed.insert(token) {
+        return;
+    }
+    if let Some(price) = simulate::spot_price(token, stage.wrapped, &stage.hubs, |from, to| {
+        reader.conduit(from, to)
+    }) {
+        missed.remove(&token);
+        prices.insert(token, price);
+    }
+}

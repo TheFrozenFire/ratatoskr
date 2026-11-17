@@ -142,6 +142,73 @@ pub struct Score {
     pub unpriced: Vec<Token>,
 }
 
+/// Numeraire value of `units` of gas.
+///
+/// One gas unit costs `wei_per_gas` raw numeraire units. Native ETH is one raw
+/// unit of the numeraire per wei, so the product is the gas cost. The allocator
+/// does not read this figure.
+#[must_use]
+pub fn gas_value(units: &BigInt, wei_per_gas: u64) -> Ratio {
+    if units.is_zero() || wei_per_gas == 0 {
+        return Ratio::zero();
+    }
+    Ratio::new(units * BigInt::from(wei_per_gas), BigInt::from(1))
+}
+
+/// `value_out` minus the gas value.
+#[must_use]
+pub fn cumulative(value_out: &Ratio, gas: &Ratio) -> Ratio {
+    value_out.sub(gas)
+}
+
+/// Share of input value the output does not return: `1 - retained`.
+#[must_use]
+pub fn impact(retained: &Ratio) -> Ratio {
+    Ratio::new(BigInt::from(1), BigInt::from(1)).sub(retained)
+}
+
+/// Source value, sink value, and the spot of every token on one route.
+///
+/// The loss is the source spot times the input, minus the sink spot times the
+/// output. An unpriced end leaves the loss empty. A token in the middle is
+/// listed with its spot and does not change that difference.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MarkedRoute {
+    pub value_in: Option<Ratio>,
+    pub value_out: Option<Ratio>,
+    pub loss: Option<Ratio>,
+    pub spots: Vec<(Token, Option<Price>)>,
+}
+
+#[must_use]
+pub fn mark_route(
+    path: &[Token],
+    input: &BigInt,
+    output: &BigInt,
+    prices: &BTreeMap<Token, Price>,
+) -> MarkedRoute {
+    let spots = path
+        .iter()
+        .map(|token| (*token, quoted(*token, prices)))
+        .collect();
+    let value_in = path
+        .first()
+        .and_then(|token| priced_amount(*token, input, prices));
+    let value_out = path
+        .last()
+        .and_then(|token| priced_amount(*token, output, prices));
+    let loss = match (&value_in, &value_out) {
+        (Some(left), Some(right)) => Some(left.sub(right)),
+        _ => None,
+    };
+    MarkedRoute {
+        value_in,
+        value_out,
+        loss,
+        spots,
+    }
+}
+
 /// Mark `spent` and `received` with `prices`.
 ///
 /// A positive amount with no price, or a price whose denominator is not positive,
@@ -199,19 +266,31 @@ enum LegValue {
 }
 
 fn leg_value(leg: &Leg, prices: &BTreeMap<Token, Price>) -> LegValue {
-    if leg.amount.is_zero() {
-        return LegValue::Zero;
+    match priced_amount(leg.token, &leg.amount, prices) {
+        Some(value) if value.numer.is_zero() => LegValue::Zero,
+        Some(value) => LegValue::Priced(value),
+        None if leg.amount.is_zero() => LegValue::Zero,
+        None => LegValue::Missing,
     }
-    if leg.amount.is_negative() {
-        return LegValue::Missing;
+}
+
+fn priced_amount(token: Token, amount: &BigInt, prices: &BTreeMap<Token, Price>) -> Option<Ratio> {
+    if amount.is_zero() {
+        return Some(Ratio::zero());
     }
-    let Some(price) = prices.get(&leg.token) else {
-        return LegValue::Missing;
-    };
+    if amount.is_negative() {
+        return None;
+    }
+    let price = quoted(token, prices)?;
+    Some(Ratio::new(amount * &price.numer, price.denom.clone()))
+}
+
+fn quoted(token: Token, prices: &BTreeMap<Token, Price>) -> Option<Price> {
+    let price = prices.get(&token)?;
     if price.denom <= BigInt::from(0) || price.numer.is_negative() {
-        return LegValue::Missing;
+        return None;
     }
-    LegValue::Priced(Ratio::new(&leg.amount * &price.numer, price.denom.clone()))
+    Some(price.clone())
 }
 
 /// Whole numeraire tokens of `ratio`, with `places` digits after the point.
@@ -370,6 +449,90 @@ mod tests {
     fn whole_tokens_apply_the_numeraire_scale() {
         let ratio = Ratio::new(BigInt::from(1_500_000_000_000_000_000_i64), BigInt::from(1));
         assert_eq!(whole_tokens(&ratio, 18, 4), "1.5000");
+    }
+
+    #[test]
+    fn gas_value_is_units_times_wei_and_cumulative_is_output_minus_that_cost() {
+        let mut prices = BTreeMap::new();
+        prices.insert(token(1), price(1, 1));
+        prices.insert(token(2), price(1, 1));
+        let scored = score(
+            &[leg(1, 4_000_000_000_000_000_000)],
+            &[leg(2, 2_000_000_000_000_000_000)],
+            &prices,
+            &BigInt::from(210_000),
+        );
+        let gas = gas_value(&scored.gas, 300_000_000);
+        let net = cumulative(&scored.value_out, &gas);
+        assert_eq!(whole_tokens(&scored.value_out, 18, 6), "2.000000");
+        assert_eq!(whole_tokens(&gas, 18, 6), "0.000063");
+        assert_eq!(whole_tokens(&net, 18, 6), "1.999937");
+        assert_eq!(
+            scored.retained,
+            Some(Ratio::new(BigInt::from(1), BigInt::from(2)))
+        );
+        assert_eq!(
+            impact(scored.retained.as_ref().expect("retained")),
+            Ratio::new(BigInt::from(1), BigInt::from(2))
+        );
+        let untouched = score(
+            &[leg(1, 4_000_000_000_000_000_000)],
+            &[leg(2, 2_000_000_000_000_000_000)],
+            &prices,
+            &BigInt::from(0),
+        );
+        assert_eq!(untouched.retained, scored.retained);
+        assert_eq!(untouched.value_out, scored.value_out);
+    }
+
+    #[test]
+    fn a_route_loss_is_the_source_spot_times_input_minus_the_sink_spot_times_output() {
+        let mut prices = BTreeMap::new();
+        prices.insert(token(1), price(2, 1));
+        prices.insert(token(3), price(1, 1));
+        let marked = mark_route(
+            &[token(1), token(2), token(3)],
+            &BigInt::from(10),
+            &BigInt::from(9),
+            &prices,
+        );
+        assert_eq!(
+            marked.value_in,
+            Some(Ratio::new(BigInt::from(20), BigInt::from(1)))
+        );
+        assert_eq!(
+            marked.value_out,
+            Some(Ratio::new(BigInt::from(9), BigInt::from(1)))
+        );
+        assert_eq!(
+            marked.loss,
+            Some(Ratio::new(BigInt::from(11), BigInt::from(1)))
+        );
+        assert_eq!(
+            marked.spots,
+            vec![
+                (token(1), Some(price(2, 1))),
+                (token(2), None),
+                (token(3), Some(price(1, 1))),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_route_that_delivers_more_value_than_it_spends_has_a_negative_loss() {
+        let mut prices = BTreeMap::new();
+        prices.insert(token(1), price(1, 1));
+        prices.insert(token(2), price(4, 1));
+        let marked = mark_route(
+            &[token(1), token(2)],
+            &BigInt::from(5),
+            &BigInt::from(5),
+            &prices,
+        );
+        assert_eq!(
+            marked.loss,
+            Some(Ratio::new(BigInt::from(-15), BigInt::from(1)))
+        );
     }
 
     #[test]

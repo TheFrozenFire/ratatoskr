@@ -2,8 +2,10 @@
 //!
 //! Prices are the first slope of a conduit into the wrapped token. They are
 //! applied after [`optimizer::optimize`] returns. The score reports gas units
-//! and does not subtract them from the basket. The action table is the same
-//! quote, one consumed slope segment per row.
+//! and does not subtract them from the basket. A separate diagnostic prices
+//! that gas in the numeraire and marks each route's loss. Search and the
+//! allocator do not read either figure. The action table is the same quote,
+//! one consumed slope segment per row.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -12,7 +14,7 @@ use std::time::Instant;
 
 use action::Action;
 use num_bigint::BigInt;
-use num_traits::Zero;
+use num_traits::{Signed, Zero};
 use searcher::{Conduits, RouteSet, Token, NATIVE};
 use simulate::{Price, Ratio};
 
@@ -24,10 +26,12 @@ use crate::token;
 mod gas;
 mod price;
 mod print;
+mod value;
 
 use gas::{book_gas, GasMeta};
 use price::spots;
 use print::{action_table, allocation_lines};
+use value::{report, Quote, WEI_PER_GAS};
 
 pub(crate) fn run<S: Source>(
     source: &S,
@@ -48,7 +52,8 @@ pub(crate) fn run<S: Source>(
         token_count(stage),
         stage.scenarios.len()
     );
-    let prices = spots(&reader, stage);
+    let mut prices = spots(&reader, stage);
+    let mut missed = BTreeSet::new();
     let scenarios = match limit {
         Some(limit) => &stage.scenarios[..limit.min(stage.scenarios.len())],
         None => stage.scenarios.as_slice(),
@@ -62,12 +67,13 @@ pub(crate) fn run<S: Source>(
     let mut stats = Stats::default();
     for scenario in scenarios {
         let started = Instant::now();
-        let ctx = MeasureCtx {
-            prices: &prices,
+        let mut ctx = MeasureCtx {
             decimals,
             places: &places,
+            prices: &mut prices,
+            missed: &mut missed,
         };
-        let block = one(source, &reader, stage, scenario, &ctx, &mut stats);
+        let block = one(source, &reader, stage, scenario, &mut ctx, &mut stats);
         writeln!(stdout, "{block}")?;
         stdout.flush()?;
         eprintln!(
@@ -83,9 +89,10 @@ pub(crate) fn run<S: Source>(
 }
 
 struct MeasureCtx<'a> {
-    prices: &'a BTreeMap<Token, Price>,
     decimals: u32,
     places: &'a BTreeMap<Token, u8>,
+    prices: &'a mut BTreeMap<Token, Price>,
+    missed: &'a mut BTreeSet<Token>,
 }
 
 fn one<S: Source>(
@@ -93,10 +100,9 @@ fn one<S: Source>(
     reader: &Reader<'_, S>,
     stage: &Stage,
     scenario: &crate::scenario::Scenario,
-    ctx: &MeasureCtx<'_>,
+    ctx: &mut MeasureCtx<'_>,
     stats: &mut Stats,
 ) -> String {
-    let prices = ctx.prices;
     let decimals = ctx.decimals;
     let places = ctx.places;
     stats.scenarios += 1;
@@ -257,24 +263,65 @@ fn one<S: Source>(
             amount: amount.clone(),
         })
         .collect();
-    let scored = simulate::score(&spent, &received, prices, &plan.gas);
+    for flow in &plan.flows {
+        for token in value::path_tokens(&problem, flow.route) {
+            price::ensure(reader, stage, ctx.prices, ctx.missed, token);
+        }
+    }
+    let scored = simulate::score(&spent, &received, ctx.prices, &plan.gas);
+    let reported = report(
+        &problem,
+        &plan,
+        &scored,
+        &Quote {
+            prices: ctx.prices,
+            known: &stage.known,
+            places,
+            decimals,
+            wei_per_gas: WEI_PER_GAS,
+        },
+    );
     if scored.retained.is_none() {
         stats.unpriced += 1;
     }
     if let Some(retained) = &scored.retained {
         stats.retained.push(retained.clone());
+        stats.cumulative.push(reported.cumulative.clone());
+    }
+    if let Some(impact) = &reported.impact {
+        stats.impact.push(impact.clone());
+    }
+    if reported.surplus {
+        stats.surplus += 1;
+    }
+    if reported.large_loss {
+        stats.large_loss += 1;
+    }
+    for (loss, text) in &reported.routes {
+        stats.notes.push(RouteNote {
+            scenario: scenario.name.clone(),
+            loss: loss.clone(),
+            text: text.clone(),
+        });
     }
     let retained_text = match &scored.retained {
         Some(ratio) => simulate::decimal(ratio, 6),
         None => "unpriced".to_string(),
     };
+    let impact_text = match &reported.impact {
+        Some(ratio) => simulate::decimal(ratio, 6),
+        None => "unpriced".to_string(),
+    };
     let value_in = simulate::whole_tokens(&scored.value_in, decimals, 6);
     let value_out = simulate::whole_tokens(&scored.value_out, decimals, 6);
+    let gas_value =
+        simulate::whole_tokens(&simulate::gas_value(&plan.gas, WEI_PER_GAS), decimals, 6);
+    let cumulative = simulate::whole_tokens(&reported.cumulative, decimals, 6);
     let gap = simulate::whole_tokens(&scored.value_in.sub(&scored.value_out), decimals, 6);
     let score_ms = score_started.elapsed().as_millis();
     stats.score_ms += score_ms;
     stats.last = Some(format!(
-        "search_ms={search_ms} build_ms={build_ms} shape_ms={shape_ms} optimize_ms={optimize_ms} score_ms={score_ms} routes={} edges={} chords={chords} count={} retained={retained_text} value_in={value_in} value_out={value_out} gap={gap} gas={}",
+        "search_ms={search_ms} build_ms={build_ms} shape_ms={shape_ms} optimize_ms={optimize_ms} score_ms={score_ms} routes={} edges={} chords={chords} count={} retained={retained_text} impact={impact_text} value_in={value_in} value_out={value_out} gas_value={gas_value} cumulative={cumulative} gap={gap} gas={}",
         searched.routes.len(),
         problem.edges.len(),
         plan.count,
@@ -306,7 +353,7 @@ fn one<S: Source>(
         ));
     }
     lines.push(format!("value_in {value_in}"));
-    lines.push(format!("value_out {value_out}"));
+    lines.extend(reported.lines);
     lines.push(format!("retained {retained_text}"));
     lines.push(format!("gap {gap}"));
     if !scored.unpriced.is_empty() {
@@ -715,6 +762,13 @@ fn pool_of(action: &Action) -> Option<[u8; 32]> {
     }
 }
 
+#[derive(Clone)]
+struct RouteNote {
+    scenario: String,
+    loss: Ratio,
+    text: String,
+}
+
 #[derive(Default)]
 struct Stats {
     scenarios: u64,
@@ -723,46 +777,50 @@ struct Stats {
     errors: u64,
     unpriced: u64,
     shared: u64,
+    surplus: u64,
+    large_loss: u64,
     search_ms: u128,
     build_ms: u128,
     shape_ms: u128,
     optimize_ms: u128,
     score_ms: u128,
     retained: Vec<Ratio>,
+    impact: Vec<Ratio>,
+    cumulative: Vec<Ratio>,
+    notes: Vec<RouteNote>,
     last: Option<String>,
 }
 
 impl Stats {
     fn finish(&self, decimals: u32) -> String {
-        let retained = if self.retained.is_empty() {
-            "none".to_string()
-        } else {
-            let mut ordered = self.retained.clone();
-            ordered.sort_by(|left, right| left.cmp_value(right));
-            let mid = ordered.len() / 2;
-            let median = if ordered.len().is_multiple_of(2) {
-                let lower = &ordered[mid - 1];
-                let upper = &ordered[mid];
-                lower
-                    .add(upper)
-                    .div(&Ratio::new(BigInt::from(2), BigInt::from(1)))
-            } else {
-                ordered[mid].clone()
-            };
-            format!(
-                "min {} median {}",
-                simulate::decimal(&ordered[0], 6),
-                simulate::decimal(&median, 6)
-            )
-        };
+        let retained = span_text(&self.retained, |ratio| simulate::decimal(ratio, 6));
+        let impact = span_text(&self.impact, |ratio| simulate::decimal(ratio, 6));
+        let cumulative = span_text(&self.cumulative, |ratio| {
+            simulate::whole_tokens(ratio, decimals, 6)
+        });
+        let mut worst = self.notes.clone();
+        worst.sort_by(|left, right| right.loss.cmp_value(&left.loss));
+        worst.truncate(12);
+        let mut gains: Vec<_> = self
+            .notes
+            .iter()
+            .filter(|note| note.loss.numer.is_negative())
+            .cloned()
+            .collect();
+        gains.sort_by(|left, right| left.loss.cmp_value(&right.loss));
+        gains.truncate(12);
+        let worst_text = note_block(&worst);
+        let gain_text = note_block(&gains);
         format!(
-            "scenarios {}\nplans {}\nzero {}\nerrors {}\nunpriced {}\nshared {}\nsearch_ms {}\nbuild_ms {}\nshape_ms {}\noptimize_ms {}\nscore_ms {}\nretained {retained}\nnumeraire_decimals {decimals}\n",
+            "scenarios {}\nplans {}\nzero {}\nerrors {}\nunpriced {}\nshared {}\nsurplus {}\nlarge_loss {}\nsearch_ms {}\nbuild_ms {}\nshape_ms {}\noptimize_ms {}\nscore_ms {}\nretained {retained}\nimpact {impact}\ncumulative {cumulative}\ngas_wei {WEI_PER_GAS}\nnumeraire_decimals {decimals}\nworst\n{worst_text}gains\n{gain_text}",
             self.scenarios,
             self.plans,
             self.zero,
             self.errors,
             self.unpriced,
             self.shared,
+            self.surplus,
+            self.large_loss,
             self.search_ms,
             self.build_ms,
             self.shape_ms,
@@ -770,4 +828,37 @@ impl Stats {
             self.score_ms
         )
     }
+}
+
+fn span_text(values: &[Ratio], render: impl Fn(&Ratio) -> String) -> String {
+    if values.is_empty() {
+        return "none".to_string();
+    }
+    let mut ordered = values.to_vec();
+    ordered.sort_by(|left, right| left.cmp_value(right));
+    let mid = ordered.len() / 2;
+    let median = if ordered.len().is_multiple_of(2) {
+        let lower = &ordered[mid - 1];
+        let upper = &ordered[mid];
+        lower
+            .add(upper)
+            .div(&Ratio::new(BigInt::from(2), BigInt::from(1)))
+    } else {
+        ordered[mid].clone()
+    };
+    format!("min {} median {}", render(&ordered[0]), render(&median))
+}
+
+fn note_block(notes: &[RouteNote]) -> String {
+    if notes.is_empty() {
+        return "none\n".to_string();
+    }
+    let mut text = String::new();
+    for note in notes {
+        text.push_str(&note.scenario);
+        text.push(' ');
+        text.push_str(&note.text);
+        text.push('\n');
+    }
+    text
 }
