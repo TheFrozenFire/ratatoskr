@@ -18,46 +18,7 @@ impl Catalog {
         after: Option<B256>,
         limit: usize,
     ) -> eyre::Result<Vec<VenueRow>> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let read = self.entities.begin_read()?;
-        let table = match read.open_table(VENUES) {
-            Ok(table) => table,
-            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
-            Err(err) => return Err(err.into()),
-        };
-        let start_key = match after {
-            Some(id) => entity_key(kind, &id),
-            None => entity_key(kind, &B256::ZERO),
-        };
-        let mut end_key = [0u8; 33];
-        if kind != u8::MAX {
-            end_key[0] = kind + 1;
-        }
-        let start = match after {
-            Some(_) => Bound::Excluded(start_key.as_slice()),
-            None => Bound::Included(start_key.as_slice()),
-        };
-        let end = if kind == u8::MAX {
-            Bound::Unbounded
-        } else {
-            Bound::Excluded(end_key.as_slice())
-        };
-        let mut page = Vec::with_capacity(limit);
-        for item in table.range::<&[u8]>((start, end))? {
-            if page.len() == limit {
-                break;
-            }
-            let (key_bytes, value) = item?;
-            let key_bytes = key_bytes.value();
-            if key_bytes.len() != 33 || key_bytes[0] != kind {
-                return Err(eyre::eyre!("venue key"));
-            }
-            let id = B256::from_slice(&key_bytes[1..]);
-            page.push(decode_row(kind, id, value.value())?);
-        }
-        Ok(page)
+        page_venue_rows(&self.entities, kind, after, limit)
     }
 
     pub fn tally_by_kind(&self) -> eyre::Result<BTreeMap<(u8, Address), u64>> {
@@ -84,6 +45,64 @@ impl EntityRead {
     pub fn read_venue(&self, kind: u8, id: B256) -> eyre::Result<Option<VenueRow>> {
         read_venue_row(&self.entities, kind, id)
     }
+
+    /// At most `limit` rows of `kind` whose id is greater than `after`.
+    pub fn page_venues(
+        &self,
+        kind: u8,
+        after: Option<B256>,
+        limit: usize,
+    ) -> eyre::Result<Vec<VenueRow>> {
+        page_venue_rows(&self.entities, kind, after, limit)
+    }
+}
+
+fn page_venue_rows(
+    db: &impl crate::storage::Handle,
+    kind: u8,
+    after: Option<B256>,
+    limit: usize,
+) -> eyre::Result<Vec<VenueRow>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let read = db.begin_read()?;
+    let table = match read.open_table(VENUES) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+        Err(err) => return Err(err.into()),
+    };
+    let start_key = match after {
+        Some(id) => entity_key(kind, &id),
+        None => entity_key(kind, &B256::ZERO),
+    };
+    let mut end_key = [0u8; 33];
+    if kind != u8::MAX {
+        end_key[0] = kind + 1;
+    }
+    let start = match after {
+        Some(_) => Bound::Excluded(start_key.as_slice()),
+        None => Bound::Included(start_key.as_slice()),
+    };
+    let end = if kind == u8::MAX {
+        Bound::Unbounded
+    } else {
+        Bound::Excluded(end_key.as_slice())
+    };
+    let mut page = Vec::with_capacity(limit);
+    for item in table.range::<&[u8]>((start, end))? {
+        if page.len() == limit {
+            break;
+        }
+        let (key_bytes, value) = item?;
+        let key_bytes = key_bytes.value();
+        if key_bytes.len() != 33 || key_bytes[0] != kind {
+            return Err(eyre::eyre!("venue key"));
+        }
+        let id = B256::from_slice(&key_bytes[1..]);
+        page.push(decode_row(kind, id, value.value())?);
+    }
+    Ok(page)
 }
 
 pub(super) fn write_identities(db: &Database, rows: &[VenueRow], put: Put) -> eyre::Result<u64> {

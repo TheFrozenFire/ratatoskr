@@ -8,7 +8,7 @@ use store_model::{
     PoolState, TickPage, TickWord, CLASS_HEAD,
 };
 
-use super::super::catalog::Catalog;
+use super::super::catalog::{Catalog, EntityRead};
 use super::*;
 
 impl Catalog {
@@ -252,4 +252,43 @@ fn restamp_ticks(
         table.insert(key.as_slice(), bytes.as_slice())?;
     }
     Ok(())
+}
+
+/// One pool as the entity file stores it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolCard {
+    pub immutable: bool,
+    pub block: Option<u64>,
+    pub generation: Option<u64>,
+    pub tick_count: Option<u32>,
+    pub truncated: Option<bool>,
+    pub next_scan: Option<i32>,
+    pub curve_generation: Option<u64>,
+    pub curve_version: Option<u32>,
+}
+
+impl EntityRead {
+    pub fn pool_card(&self, kind: u8, id: B256) -> eyre::Result<PoolCard> {
+        let read = self.entities.begin_read()?;
+        let key = entity_key(kind, &id);
+        let immutable = read_optional(&read, IMMUTABLE, &key)?.is_some();
+        let mutable = match read_optional(&read, MUTABLE, &key)? {
+            Some(bytes) => Some(decode_mutable(&bytes)?),
+            None => None,
+        };
+        let curve = match read_optional(&read, CURVES, &key)? {
+            Some(bytes) => decode_curve_record(kind, id, &bytes).ok(),
+            None => None,
+        };
+        Ok(PoolCard {
+            immutable,
+            block: mutable.as_ref().map(|row| row.block),
+            generation: mutable.as_ref().map(|row| row.generation),
+            tick_count: mutable.as_ref().map(|row| row.tick_count),
+            truncated: mutable.as_ref().map(|row| row.truncated),
+            next_scan: mutable.as_ref().and_then(|row| row.next_scan),
+            curve_generation: curve.as_ref().map(|row| row.generation),
+            curve_version: curve.as_ref().map(|row| row.version),
+        })
+    }
 }

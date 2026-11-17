@@ -138,7 +138,7 @@ fn encode_identity(row: &DirectoryRow, listed_generation: u64) -> Result<Vec<u8>
     Ok(out)
 }
 
-fn decode_identity(proxy: Address, bytes: &[u8]) -> Result<Feed, Error> {
+pub(super) fn decode_identity(proxy: Address, bytes: &[u8]) -> Result<Feed, Error> {
     let mut cursor = Cursor { bytes, at: 0 };
     let version = cursor.u8()?;
     if version != IDENTITY_VERSION {
@@ -217,4 +217,60 @@ pub(super) fn decode_configuration(bytes: &[u8]) -> Result<Configuration, Error>
         description,
         version,
     })
+}
+
+impl super::FeedRead {
+    pub fn page(&self, after: Option<&[u8]>, limit: usize) -> Result<Vec<super::FeedLine>, Error> {
+        let read = self.db.begin_read().map_err(db_err)?;
+        let table = match read.open_table(IDENTITY) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(err) => return Err(db_err(err)),
+        };
+        let mut page = Vec::new();
+        let rows = match after {
+            Some(after) => table.range::<&[u8]>(after..).map_err(db_err)?,
+            None => table.range::<&[u8]>(..).map_err(db_err)?,
+        };
+        for item in rows {
+            if page.len() == limit {
+                break;
+            }
+            let (key, value) = item.map_err(db_err)?;
+            if after.is_some_and(|cursor| key.value() == cursor) {
+                continue;
+            }
+            if key.value().len() != 20 {
+                continue;
+            }
+            let proxy = Address::from_slice(key.value());
+            let feed = decode_identity(proxy, value.value())?;
+            let latest = super::answer::latest_answer(&self.db, proxy)?;
+            let history = super::phase::has_history(&self.db, proxy)?;
+            page.push(super::FeedLine {
+                feed,
+                latest,
+                history,
+            });
+        }
+        Ok(page)
+    }
+
+    pub fn detail(&self, proxy: Address) -> Result<Option<super::FeedDetail>, Error> {
+        let read = self.db.begin_read().map_err(db_err)?;
+        let table = match read.open_table(IDENTITY) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(err) => return Err(db_err(err)),
+        };
+        let Some(value) = table.get(proxy.as_slice()).map_err(db_err)? else {
+            return Ok(None);
+        };
+        let feed = decode_identity(proxy, value.value())?;
+        Ok(Some(super::FeedDetail {
+            feed,
+            phases: super::phase::phases_of(&self.db, proxy)?,
+            answers: super::answer::answers_of(&self.db, proxy)?,
+        }))
+    }
 }

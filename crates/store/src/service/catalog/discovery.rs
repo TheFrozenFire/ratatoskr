@@ -6,6 +6,36 @@ use store_model::{decode_body, encode_body, Put, ReceiptBody, VenueRow};
 use super::identity::write_identities;
 use super::{Catalog, BODIES, CURSORS, HITS, HIT_SCAN, NOTES};
 
+/// `discovery.redb` while another process writes it.
+pub struct DiscoveryRead {
+    db: crate::storage::ReadDatabase,
+}
+
+impl DiscoveryRead {
+    pub fn open(path: &std::path::Path, cache: usize) -> eyre::Result<Self> {
+        Ok(Self {
+            db: crate::storage::ReadDatabase::open(path, cache)?,
+        })
+    }
+
+    /// List-job name and the block that job has reached.
+    pub fn cursors(&self) -> eyre::Result<Vec<(String, u64)>> {
+        let read = self.db.begin_read()?;
+        let table = match read.open_table(CURSORS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(err) => return Err(err.into()),
+        };
+        let mut out = Vec::new();
+        for item in table.iter()? {
+            let (key, value) = item?;
+            out.push((key.value().to_string(), value.value()));
+        }
+        out.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(out)
+    }
+}
+
 impl Catalog {
     pub fn cursor(&self, job: &str) -> eyre::Result<Option<u64>> {
         let read = self.discovery.begin_read()?;

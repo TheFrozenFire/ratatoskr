@@ -70,4 +70,27 @@ impl HeaderChain {
         }
         Ok(out)
     }
+
+    /// The highest stored header.
+    pub fn tip(&self) -> eyre::Result<Option<HeaderRecord>> {
+        let read = self.db.begin_read()?;
+        let table = match read.open_table(HEADERS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(err) => return Err(err.into()),
+        };
+        let Some(item) = table.range::<u64>(..)?.next_back() else {
+            return Ok(None);
+        };
+        let (number, value) = item?;
+        let record = decode_header_record(value.value()).map_err(|err| eyre::eyre!(err))?;
+        if record.number != number.value() {
+            return Err(eyre::eyre!(
+                "header key {} stores block {}",
+                number.value(),
+                record.number
+            ));
+        }
+        Ok(Some(record))
+    }
 }

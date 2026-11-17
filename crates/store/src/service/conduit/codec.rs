@@ -58,7 +58,7 @@ pub(super) fn decode_conduit(bytes: &[u8]) -> eyre::Result<StoredConduit> {
     })
 }
 
-pub(super) fn meta_of(segments: &[SlopeSegment]) -> ConduitMeta {
+pub(crate) fn meta_of(segments: &[SlopeSegment]) -> ConduitMeta {
     let mut kinds = 0_u32;
     let mut capacity = 0_u128;
     for segment in segments {

@@ -366,6 +366,41 @@ pub(super) fn split_phase_key(bytes: &[u8]) -> Result<(Address, u16), Error> {
     Ok((Address::from_slice(&bytes[..20]), phase_id))
 }
 
+pub(super) fn phases_of(
+    db: &crate::storage::ReadDatabase,
+    proxy: Address,
+) -> Result<Vec<Phase>, Error> {
+    let read = db.begin_read().map_err(db_err)?;
+    let table = match read.open_table(PHASES) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+        Err(err) => return Err(db_err(err)),
+    };
+    let phases = read_phases(phase_rows(&table, proxy)?)?;
+    Ok(phases)
+}
+
+pub(super) fn has_history(
+    db: &crate::storage::ReadDatabase,
+    proxy: Address,
+) -> Result<bool, Error> {
+    let read = db.begin_read().map_err(db_err)?;
+    let table = match read.open_table(JOBS) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(false),
+        Err(err) => return Err(db_err(err)),
+    };
+    let start = phase_key(proxy, 0);
+    let end = phase_key(proxy, u16::MAX);
+    Ok(table
+        .range(start.as_slice()..=end.as_slice())
+        .map_err(db_err)?
+        .next()
+        .transpose()
+        .map_err(db_err)?
+        .is_some())
+}
+
 fn mismatch_key(proxy: Address, seq: u32) -> [u8; 24] {
     let mut key = [0u8; 24];
     key[..20].copy_from_slice(proxy.as_slice());

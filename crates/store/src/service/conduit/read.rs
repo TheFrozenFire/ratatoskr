@@ -4,9 +4,84 @@ use alloy_primitives::Address;
 use redb::{ReadableDatabase, ReadableTable};
 use routing::SlopeSegment;
 
-use super::super::catalog::Catalog;
-use super::codec::decode_conduit;
+use super::super::catalog::{Catalog, EntityRead};
+use super::codec::{decode_conduit, meta_of};
 use super::*;
+
+/// One stored pair and the mask stored beside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConduitRow {
+    pub token_in: Address,
+    pub token_out: Address,
+    pub meta: ConduitMeta,
+}
+
+impl EntityRead {
+    pub fn page_conduits(
+        &self,
+        after: Option<(Address, Address)>,
+        limit: usize,
+    ) -> eyre::Result<Vec<ConduitRow>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let read = self.entities.begin_read()?;
+        let Some(table) = open_conduit_table(&read)? else {
+            return Ok(Vec::new());
+        };
+        let mut page = Vec::new();
+        for item in table.iter()? {
+            if page.len() == limit {
+                break;
+            }
+            let (key, value) = item?;
+            let raw = key.value();
+            if raw.len() != 40 {
+                continue;
+            }
+            let token_in = Address::from_slice(&raw[..20]);
+            let token_out = Address::from_slice(&raw[20..]);
+            if let Some((after_in, after_out)) = after {
+                if (token_in, token_out) <= (after_in, after_out) {
+                    continue;
+                }
+            }
+            let stored = decode_conduit(value.value())?;
+            page.push(ConduitRow {
+                token_in,
+                token_out,
+                meta: meta_of(&stored.segments),
+            });
+        }
+        Ok(page)
+    }
+
+    pub fn conduit(
+        &self,
+        token_in: Address,
+        token_out: Address,
+    ) -> eyre::Result<Option<StoredConduit>> {
+        read_conduit_at(&self.entities, token_in, token_out)
+    }
+
+    /// Stored pairs that name `token` on either side.
+    pub fn conduits_naming(&self, token: Address) -> eyre::Result<u64> {
+        let read = self.entities.begin_read()?;
+        let Some(table) = open_conduit_table(&read)? else {
+            return Ok(0);
+        };
+        let raw = token.as_slice();
+        let mut count = 0_u64;
+        for item in table.iter()? {
+            let (key, _) = item?;
+            let bytes = key.value();
+            if bytes.len() == 40 && (&bytes[..20] == raw || &bytes[20..] == raw) {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+}
 
 impl Catalog {
     pub fn read_conduit(

@@ -10,6 +10,8 @@
 //! `.redb` selects that file's parent.
 
 mod discovery;
+
+pub use discovery::DiscoveryRead;
 mod identity;
 mod sample;
 mod token;

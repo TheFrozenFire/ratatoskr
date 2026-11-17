@@ -8,7 +8,7 @@ mod directory;
 mod follow;
 mod phase;
 
-use crate::storage::Database;
+use crate::storage::{Database, ReadDatabase};
 use alloy_primitives::{Address, U256};
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use std::path::Path;
@@ -75,6 +75,40 @@ fn count_open(table: &impl ReadableTable<&'static [u8], &'static [u8]>) -> Resul
 
 pub struct Feeds {
     db: Database,
+}
+
+/// One directory row and the newest answer stored for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedLine {
+    pub feed: store_model::Feed,
+    pub latest: Option<store_model::Answer>,
+    pub history: bool,
+}
+
+/// A feed and the phases and answers stored under it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedDetail {
+    pub feed: store_model::Feed,
+    pub phases: Vec<store_model::Phase>,
+    pub answers: Vec<store_model::Answer>,
+}
+
+/// `feeds.redb` while another process writes it.
+pub struct FeedRead {
+    db: ReadDatabase,
+}
+
+impl FeedRead {
+    pub fn open(path: &std::path::Path, cache: usize) -> Result<Self, Error> {
+        Ok(Self {
+            db: ReadDatabase::open(path, cache).map_err(db_err)?,
+        })
+    }
+
+    pub fn count(&self) -> Result<u64, Error> {
+        let read = self.db.begin_read().map_err(db_err)?;
+        count_rows(&read, IDENTITY)
+    }
 }
 
 impl Feeds {

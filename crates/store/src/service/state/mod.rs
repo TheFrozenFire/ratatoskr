@@ -7,6 +7,7 @@ mod summary;
 mod watch;
 mod work;
 
+pub use snapshot::PoolCard;
 pub(crate) use work::unix_now;
 
 use alloy_primitives::B256;

@@ -15,6 +15,7 @@ mod read;
 
 pub(crate) use job::account_jobs;
 pub(crate) use meta::each_meta;
+pub use read::ConduitRow;
 pub(crate) use read::{
     conduit_get, conduit_point, conduit_rows, open_conduit_table, visit_conduit_table,
 };

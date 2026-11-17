@@ -14,23 +14,29 @@ mod hooks;
 mod peers;
 mod pools;
 mod query;
+mod shelf;
 mod spots;
 mod state;
+mod work_read;
 
 pub use catalog::{
     append_dropped_ids, append_fill_ids, fill_identities, read_fill_ids, sample_identities,
-    write_fill_ids, Catalog, EntityRead, FillReport, SampleReport,
+    write_fill_ids, Catalog, DiscoveryRead, EntityRead, FillReport, SampleReport,
 };
 pub use conduit::{
-    ConduitBody, ConduitMember, ConduitMeta, CurvePage, CurveRow, MemberTarget, StoredConduit,
+    ConduitBody, ConduitMember, ConduitMeta, ConduitRow, CurvePage, CurveRow, MemberTarget,
+    StoredConduit,
 };
 pub use corpus::Corpus;
 pub use feeds::Error as FeedError;
-pub use feeds::Feeds;
+pub use feeds::{FeedDetail, FeedLine, FeedRead, Feeds};
 pub use headers::HeaderChain;
 pub use hooks::{install_capacity, Capacity};
-pub use peers::Peers;
+pub use peers::{PeerRead, PeerSummary, Peers};
 pub use pools::Pools;
 pub use query::{ConduitPoint, ConduitRead, ConduitScan, Snapshot, TokenRows, VenuePoint};
+pub use shelf::Shelf;
 pub use spots::Error as SpotError;
-pub use spots::Spots;
+pub use spots::{SpotRead, Spots};
+pub use state::PoolCard;
+pub use work_read::WorkRead;

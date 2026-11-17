@@ -4175,6 +4175,7 @@ dependencies = [
 name = "ratatoskr"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "chain",
  "clap",
  "config",
@@ -4190,6 +4191,7 @@ dependencies = [
  "spot",
  "store",
  "store-model",
+ "survey",
  "tokio",
  "venue",
 ]

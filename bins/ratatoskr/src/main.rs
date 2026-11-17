@@ -27,9 +27,18 @@ async fn main() -> eyre::Result<()> {
                 .clone()
                 .unwrap_or_else(|| loaded.process.status_url.clone());
             let window = loaded.process.rate_window();
-            tokio::task::spawn_blocking(move || status::run(&url, window))
-                .await
-                .wrap_err("status task")?
+            let data_dir = match &cli.args.data_dir {
+                Some(dir) => dir.clone(),
+                None => config::expand_home(&loaded.process.data_dir)?,
+            };
+            let socket = config::peer_socket(&data_dir, &loaded.peer.socket)?;
+            let caches = loaded.store.clone();
+            let spots = loaded.spots.clone();
+            tokio::task::spawn_blocking(move || {
+                status::run(&url, window, &data_dir, &caches, &spots, &socket)
+            })
+            .await
+            .wrap_err("status task")?
         }
         None => supervise::supervise(cli.args, loaded).await,
     }

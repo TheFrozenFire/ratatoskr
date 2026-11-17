@@ -9,7 +9,9 @@
 //! one consumed slope segment per row.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+use eyre::WrapErr;
 use std::io::{self, Write};
 use std::time::Instant;
 
@@ -94,6 +96,51 @@ struct MeasureCtx<'a> {
     places: &'a BTreeMap<Token, u8>,
     prices: &'a mut BTreeMap<Token, Price>,
     missed: &'a mut BTreeSet<Token>,
+}
+
+/// Score one prepared scenario and return the text the survey prints for it.
+pub(crate) fn text_of<S: Source>(
+    source: &S,
+    stage: &mut Stage,
+    index: usize,
+    prices: &mut BTreeMap<Token, Price>,
+    missed: &mut BTreeSet<Token>,
+) -> eyre::Result<String> {
+    if index >= stage.scenarios.len() {
+        return Err(eyre::eyre!(
+            "survey index {index} of {}",
+            stage.scenarios.len()
+        ));
+    }
+    let records = source.tokens().wrap_err("tokens")?;
+    let decimals = wrapper_decimals(&records, stage.wrapped);
+    let places = token_decimals(&records);
+    let cache = std::mem::take(&mut stage.cache);
+    let mut reader = Reader {
+        source,
+        cache: RefCell::new(cache),
+        graph: &stage.survey.graph,
+        incoming: &stage.incoming,
+    };
+    let mut stats = Stats::default();
+    let mut ctx = MeasureCtx {
+        decimals,
+        places: &places,
+        prices,
+        missed,
+    };
+    let text = one(
+        source,
+        &reader,
+        stage,
+        &stage.scenarios[index],
+        &mut ctx,
+        &mut stats,
+    );
+    let restored = std::mem::replace(&mut reader.cache, RefCell::new(HashMap::new())).into_inner();
+    drop(reader);
+    stage.cache = restored;
+    Ok(text)
 }
 
 fn one<S: Source>(

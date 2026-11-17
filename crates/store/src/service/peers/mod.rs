@@ -5,8 +5,8 @@
 
 mod record;
 
-use crate::storage::Database;
-use redb::{Durability, ReadableDatabase, ReadableTable, TableDefinition};
+use crate::storage::{Database, ReadDatabase};
+use redb::{Durability, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use reth_network_peers::PeerId;
 use std::{
     collections::HashMap,
@@ -35,6 +35,65 @@ pub struct Peers {
     db: Database,
     pub next_seq: u64,
     pub summaries: HashMap<PeerId, Summary>,
+}
+
+/// One stored dial summary.
+#[derive(Clone, Debug)]
+pub struct PeerSummary {
+    pub id: PeerId,
+    pub summary: Summary,
+}
+
+/// `peers.redb` while another process writes it.
+pub struct PeerRead {
+    db: ReadDatabase,
+}
+
+impl PeerRead {
+    pub fn open(path: &Path, cache: usize) -> eyre::Result<Self> {
+        Ok(Self {
+            db: ReadDatabase::open(path, cache)?,
+        })
+    }
+
+    pub fn page(&self, after: Option<&[u8]>, limit: usize) -> eyre::Result<Vec<PeerSummary>> {
+        let read = self.db.begin_read()?;
+        let table = match read.open_table(SUMMARIES) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(err) => return Err(err.into()),
+        };
+        let mut page = Vec::new();
+        let rows = match after {
+            Some(after) => table.range::<&[u8]>(after..)?,
+            None => table.range::<&[u8]>(..)?,
+        };
+        for item in rows {
+            if page.len() == limit {
+                break;
+            }
+            let (key, value) = item?;
+            if after.is_some_and(|cursor| key.value() == cursor) {
+                continue;
+            }
+            let Some(summary) = record::decode_summary(value.value()) else {
+                continue;
+            };
+            let id = PeerId::from_slice(key.value());
+            page.push(PeerSummary { id, summary });
+        }
+        Ok(page)
+    }
+
+    pub fn sightings(&self) -> eyre::Result<u64> {
+        let read = self.db.begin_read()?;
+        let table = match read.open_table(SIGHTINGS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(0),
+            Err(err) => return Err(err.into()),
+        };
+        Ok(table.len()?)
+    }
 }
 
 impl Peers {

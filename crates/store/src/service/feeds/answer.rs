@@ -53,6 +53,52 @@ impl Feeds {
     }
 }
 
+pub(super) fn latest_answer(
+    db: &crate::storage::ReadDatabase,
+    proxy: Address,
+) -> Result<Option<Answer>, Error> {
+    let read = db.begin_read().map_err(db_err)?;
+    let table = match read.open_table(ANSWERS) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+        Err(err) => return Err(db_err(err)),
+    };
+    let start = answer_key(proxy, 0, 0);
+    let end = answer_key(proxy, u16::MAX, u64::MAX);
+    let Some(item) = table
+        .range(start.as_slice()..=end.as_slice())
+        .map_err(db_err)?
+        .next_back()
+    else {
+        return Ok(None);
+    };
+    let (key, value) = item.map_err(db_err)?;
+    Ok(Some(decode_answer(key.value(), value.value())?))
+}
+
+pub(super) fn answers_of(
+    db: &crate::storage::ReadDatabase,
+    proxy: Address,
+) -> Result<Vec<Answer>, Error> {
+    let read = db.begin_read().map_err(db_err)?;
+    let table = match read.open_table(ANSWERS) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+        Err(err) => return Err(db_err(err)),
+    };
+    let start = answer_key(proxy, 0, 0);
+    let end = answer_key(proxy, u16::MAX, u64::MAX);
+    let mut out = Vec::new();
+    for item in table
+        .range(start.as_slice()..=end.as_slice())
+        .map_err(db_err)?
+    {
+        let (key, value) = item.map_err(db_err)?;
+        out.push(decode_answer(key.value(), value.value())?);
+    }
+    Ok(out)
+}
+
 pub(super) fn answer_key(proxy: Address, phase_id: u16, round_id: u64) -> [u8; 30] {
     let mut key = [0u8; 30];
     key[..20].copy_from_slice(proxy.as_slice());
@@ -70,7 +116,7 @@ pub(super) fn encode_answer(observed: &ObservedAnswer) -> [u8; 56] {
     out
 }
 
-fn decode_answer(key: &[u8], value: &[u8]) -> Result<Answer, Error> {
+pub(super) fn decode_answer(key: &[u8], value: &[u8]) -> Result<Answer, Error> {
     if key.len() != 30 || value.len() != 56 {
         return Err(Error::Store("answer row".into()));
     }

@@ -105,6 +105,49 @@ impl Catalog {
 }
 
 impl EntityRead {
+    pub fn token_count(&self) -> eyre::Result<u64> {
+        let read = self.entities.begin_read()?;
+        let table = match read.open_table(TOKENS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(0),
+            Err(err) => return Err(err.into()),
+        };
+        Ok(table.len()?)
+    }
+
+    pub fn page_tokens(
+        &self,
+        after: Option<Address>,
+        limit: usize,
+    ) -> eyre::Result<Vec<TokenRecord>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let read = self.entities.begin_read()?;
+        let table = match read.open_table(TOKENS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(err) => return Err(err.into()),
+        };
+        let mut page = Vec::new();
+        for item in table.iter()? {
+            if page.len() == limit {
+                break;
+            }
+            let (key, value) = item?;
+            let key = key.value();
+            if key.len() != 20 {
+                continue;
+            }
+            let address = Address::from_slice(key);
+            if after.is_some_and(|cursor| address <= cursor) {
+                continue;
+            }
+            page.push(decode_token(address, value.value())?);
+        }
+        Ok(page)
+    }
+
     pub fn token(&self, address: Address) -> eyre::Result<Option<TokenRecord>> {
         read_token_row(&self.entities, address)
     }

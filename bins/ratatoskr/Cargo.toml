@@ -13,6 +13,7 @@ path = "src/main.rs"
 config.workspace = true
 observability.workspace = true
 chain.workspace = true
+alloy-primitives.workspace = true
 clap.workspace = true
 crossterm = "0.28"
 eth-p2p.workspace = true
@@ -22,6 +23,7 @@ pipeline.workspace = true
 ratatui = "0.29"
 serde_json.workspace = true
 store.workspace = true
+survey.workspace = true
 store-model.workspace = true
 tokio = { workspace = true, features = ["signal"] }
 venue.workspace = true

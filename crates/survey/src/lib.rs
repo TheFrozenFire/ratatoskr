@@ -19,9 +19,12 @@ mod reader;
 mod report;
 mod scan;
 mod scenario;
+mod session;
 mod source;
 mod stage;
 mod token;
+
+pub use session::{Item, Session};
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
