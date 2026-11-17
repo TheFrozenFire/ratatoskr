@@ -1,6 +1,8 @@
-//! Price of one raw unit from the first slope of a pair conduit.
+//! Price of one raw unit from the first slope of a pair conduit, and the
+//! numeraire a sale of a raw amount fetches along that conduit.
 
 use num_bigint::BigInt;
+use num_traits::Signed;
 
 use crate::{Price, SlopeSegment, Token};
 
@@ -44,6 +46,62 @@ pub fn spot_price(
         }
     }
     best
+}
+
+/// Numeraire raw units fetched by selling `amount` of `token`.
+///
+/// The numeraire and native ETH return the amount. A direct conduit is quoted
+/// in full, including a quote of zero, and a hub is not substituted for it.
+/// Without that conduit the sale is the hub path that pays the most, and a
+/// native hub counts one for one on the leg into the numeraire. Zero is zero.
+/// A negative amount, or no path, is missing.
+pub fn realize(
+    token: Token,
+    amount: &BigInt,
+    numeraire: Token,
+    hubs: &[Token],
+    mut conduit: impl FnMut(Token, Token) -> Option<Vec<SlopeSegment>>,
+) -> Option<BigInt> {
+    if amount.is_negative() {
+        return None;
+    }
+    if amount == &BigInt::from(0) || token == numeraire || token == action::NATIVE {
+        return Some(amount.clone());
+    }
+    if let Some(segments) = conduit(token, numeraire) {
+        return Some(routing::quote(&segments, amount));
+    }
+    let mut best = None;
+    for hub in hubs {
+        if *hub == token || *hub == numeraire {
+            continue;
+        }
+        let Some(into_hub) = sold(&mut conduit, token, *hub, amount) else {
+            continue;
+        };
+        let into_num = if *hub == action::NATIVE {
+            into_hub
+        } else {
+            let Some(paid) = sold(&mut conduit, *hub, numeraire, &into_hub) else {
+                continue;
+            };
+            paid
+        };
+        if best.as_ref().map(|held| &into_num > held).unwrap_or(true) {
+            best = Some(into_num);
+        }
+    }
+    best
+}
+
+fn sold(
+    conduit: &mut impl FnMut(Token, Token) -> Option<Vec<SlopeSegment>>,
+    from: Token,
+    to: Token,
+    amount: &BigInt,
+) -> Option<BigInt> {
+    let segments = conduit(from, to)?;
+    Some(routing::quote(&segments, amount))
 }
 
 fn marginal(
@@ -107,5 +165,60 @@ mod tests {
     fn native_eth_is_one_raw_unit() {
         let price = spot_price(action::NATIVE, token(1), &[], |_, _| None).expect("price");
         assert_eq!(price, Price::one());
+    }
+
+    #[test]
+    fn a_sale_of_the_traded_amount_walks_past_a_dust_chord() {
+        let wrapped = token(1);
+        let token = token(2);
+        let mut curves = HashMap::new();
+        curves.insert(
+            (token, wrapped),
+            vec![segment(1, 1_000), segment(1_000, 10)],
+        );
+        let sold = realize(token, &BigInt::from(1_001), wrapped, &[], |from, to| {
+            curves.get(&(from, to)).cloned()
+        })
+        .expect("sale");
+        assert_eq!(sold, BigInt::from(1_010));
+    }
+
+    #[test]
+    fn a_sale_inside_the_first_chord_matches_that_chord() {
+        let wrapped = token(1);
+        let token = token(2);
+        let mut curves = HashMap::new();
+        curves.insert((token, wrapped), vec![segment(100, 50)]);
+        let sold = realize(token, &BigInt::from(10), wrapped, &[], |from, to| {
+            curves.get(&(from, to)).cloned()
+        })
+        .expect("sale");
+        assert_eq!(sold, BigInt::from(5));
+    }
+
+    #[test]
+    fn a_direct_conduit_is_quoted_ahead_of_a_richer_hub() {
+        let wrapped = token(1);
+        let sold_token = token(2);
+        let hub = token(3);
+        let mut curves = HashMap::new();
+        curves.insert((sold_token, wrapped), vec![segment(10, 5)]);
+        curves.insert((sold_token, hub), vec![segment(10, 100)]);
+        curves.insert((hub, wrapped), vec![segment(100, 100)]);
+        let sold = realize(
+            sold_token,
+            &BigInt::from(10),
+            wrapped,
+            &[hub],
+            |from, to| curves.get(&(from, to)).cloned(),
+        )
+        .expect("sale");
+        assert_eq!(sold, BigInt::from(5));
+    }
+
+    #[test]
+    fn a_negative_amount_has_no_sale() {
+        let sold = realize(token(2), &BigInt::from(-1), token(1), &[], |_, _| None);
+        assert!(sold.is_none());
     }
 }

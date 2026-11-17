@@ -1,10 +1,11 @@
 //! Allocate each prepared trade and score the plan.
 //!
-//! Prices are the first slope of a conduit into the wrapped token. They are
-//! applied after [`optimizer::optimize`] returns. The score reports gas units
-//! and does not subtract them from the basket. A separate diagnostic prices
-//! that gas in the numeraire and marks each route's loss. Search and the
-//! allocator do not read either figure. The action table is the same quote,
+//! The printed spot is the first slope of a conduit into the wrapped token.
+//! The value of an amount is the sale of that amount along the same conduit.
+//! Both are applied after [`optimizer::optimize`] returns. The score reports
+//! gas units and does not subtract them from the basket. A separate diagnostic
+//! prices that gas in the numeraire and marks each route's loss. Search and
+//! the allocator do not read either figure. The action table is the same quote,
 //! one consumed slope segment per row.
 
 use std::cell::RefCell;
@@ -268,7 +269,12 @@ fn one<S: Source>(
             price::ensure(reader, stage, ctx.prices, ctx.missed, token);
         }
     }
-    let scored = simulate::score(&spent, &received, ctx.prices, &plan.gas);
+    let sale = |token: Token, amount: &BigInt| {
+        simulate::realize(token, amount, stage.wrapped, &stage.hubs, |from, to| {
+            reader.conduit(from, to)
+        })
+    };
+    let scored = simulate::score_sales(&spent, &received, &sale, &plan.gas);
     let reported = report(
         &problem,
         &plan,
@@ -279,6 +285,7 @@ fn one<S: Source>(
             places,
             decimals,
             wei_per_gas: WEI_PER_GAS,
+            sale: &sale,
         },
     );
     if scored.retained.is_none() {

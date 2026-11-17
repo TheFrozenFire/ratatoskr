@@ -3,7 +3,8 @@
 //! A price is the numeraire value of one raw unit. It is the first slope of
 //! the pair conduit into the numeraire, or the best product through one hub
 //! when that conduit is absent. [`score`] applies those prices to the amounts
-//! the plan spent and the amounts it received. The gas is copied onto the
+//! the plan spent and the amounts it received. [`score_sales`] marks the same
+//! amounts by selling each one along the conduit. The gas is copied onto the
 //! score. This crate does not search, does not allocate, and does not open
 //! the catalog. The trading-set ledger quotes one direction from the reserves
 //! it was opened on.
@@ -11,7 +12,7 @@
 pub mod depletion;
 mod spot;
 
-pub use spot::spot_price;
+pub use spot::{realize, spot_price};
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -197,6 +198,101 @@ pub fn mark_route(
     let value_out = path
         .last()
         .and_then(|token| priced_amount(*token, output, prices));
+    let loss = match (&value_in, &value_out) {
+        (Some(left), Some(right)) => Some(left.sub(right)),
+        _ => None,
+    };
+    MarkedRoute {
+        value_in,
+        value_out,
+        loss,
+        spots,
+    }
+}
+
+/// Mark `spent` and `received` by the numeraire each amount sells for.
+///
+/// `sale` is that numeraire, in raw units. A missing sale on a positive amount
+/// leaves [`Score::retained`] empty. A sale of zero is a value of zero. A zero
+/// amount does not ask for a sale. Gas is stored and does not change the values.
+#[must_use]
+pub fn score_sales(
+    spent: &[Leg],
+    received: &[Leg],
+    mut sale: impl FnMut(Token, &BigInt) -> Option<BigInt>,
+    gas: &BigInt,
+) -> Score {
+    let mut unpriced = BTreeSet::new();
+    let mut value_in = Ratio::zero();
+    let mut value_out = Ratio::zero();
+    let mut complete = true;
+    for leg in spent {
+        match sold_value(leg, &mut sale) {
+            LegValue::Zero => {}
+            LegValue::Priced(value) => value_in = value_in.add(&value),
+            LegValue::Missing => {
+                complete = false;
+                unpriced.insert(leg.token);
+            }
+        }
+    }
+    for leg in received {
+        match sold_value(leg, &mut sale) {
+            LegValue::Zero => {}
+            LegValue::Priced(value) => value_out = value_out.add(&value),
+            LegValue::Missing => {
+                complete = false;
+                unpriced.insert(leg.token);
+            }
+        }
+    }
+    let retained = if complete && value_in.is_positive() {
+        Some(value_out.div(&value_in))
+    } else {
+        None
+    };
+    Score {
+        value_in,
+        value_out,
+        retained,
+        gas: gas.clone(),
+        unpriced: unpriced.into_iter().collect(),
+    }
+}
+
+fn sold_value(leg: &Leg, sale: &mut impl FnMut(Token, &BigInt) -> Option<BigInt>) -> LegValue {
+    if leg.amount.is_zero() {
+        return LegValue::Zero;
+    }
+    if leg.amount.is_negative() {
+        return LegValue::Missing;
+    }
+    match sale(leg.token, &leg.amount) {
+        Some(value) if value.is_zero() => LegValue::Zero,
+        Some(value) if value.is_negative() => LegValue::Missing,
+        Some(value) => LegValue::Priced(Ratio::new(value, BigInt::from(1))),
+        None => LegValue::Missing,
+    }
+}
+
+/// Source sale, sink sale, and the first-slope spot of every token on one route.
+///
+/// The loss is the sale of the input minus the sale of the output. A missing
+/// sale leaves the loss empty. The spots are the first-slope prices and do not
+/// change that difference.
+#[must_use]
+pub fn mark_sale(
+    path: &[Token],
+    input_sale: Option<BigInt>,
+    output_sale: Option<BigInt>,
+    prices: &BTreeMap<Token, Price>,
+) -> MarkedRoute {
+    let spots = path
+        .iter()
+        .map(|token| (*token, quoted(*token, prices)))
+        .collect();
+    let value_in = input_sale.map(|value| Ratio::new(value, BigInt::from(1)));
+    let value_out = output_sale.map(|value| Ratio::new(value, BigInt::from(1)));
     let loss = match (&value_in, &value_out) {
         (Some(left), Some(right)) => Some(left.sub(right)),
         _ => None,
@@ -533,6 +629,46 @@ mod tests {
             marked.loss,
             Some(Ratio::new(BigInt::from(-15), BigInt::from(1)))
         );
+    }
+
+    #[test]
+    fn a_sale_marks_the_quoted_amount_and_a_missing_sale_stays_unpriced() {
+        let wrapped = token(1);
+        let sold_token = token(2);
+        let mut curves = std::collections::HashMap::new();
+        curves.insert(
+            (sold_token, wrapped),
+            vec![crate::SlopeSegment {
+                width: BigInt::from(1),
+                output: BigInt::from(1_000),
+                action: routing::Action {
+                    kind: 1,
+                    pool: [1; 32],
+                },
+            }],
+        );
+        let sale = |token: Token, amount: &BigInt| {
+            realize(token, amount, wrapped, &[], |from, to| {
+                curves.get(&(from, to)).cloned()
+            })
+        };
+        let scored = score_sales(
+            &[leg(1, 4)],
+            &[Leg {
+                token: sold_token,
+                amount: BigInt::from(1),
+            }],
+            &sale,
+            &BigInt::from(0),
+        );
+        assert_eq!(
+            scored.value_out,
+            Ratio::new(BigInt::from(1_000), BigInt::from(1))
+        );
+        assert!(scored.unpriced.is_empty());
+        let missing = score_sales(&[leg(1, 4)], &[leg(3, 4)], &sale, &BigInt::from(0));
+        assert!(missing.retained.is_none());
+        assert_eq!(missing.unpriced, vec![token(3)]);
     }
 
     #[test]

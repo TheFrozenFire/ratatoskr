@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use num_bigint::BigInt;
-use num_traits::Zero;
+use num_traits::{Signed, Zero};
 use searcher::Token;
 use simulate::{Price, Ratio};
 
@@ -41,6 +41,7 @@ pub(super) struct Quote<'a> {
     pub places: &'a BTreeMap<Token, u8>,
     pub decimals: u32,
     pub wei_per_gas: u64,
+    pub sale: &'a dyn Fn(Token, &BigInt) -> Option<BigInt>,
 }
 
 pub(super) fn report(
@@ -66,7 +67,9 @@ pub(super) fn report(
             continue;
         }
         let path = path_tokens(problem, flow.route);
-        let route = simulate::mark_route(&path, &flow.input, &flow.output, quote.prices);
+        let input_sale = end_sale(path.first(), &flow.input, quote.sale);
+        let output_sale = end_sale(path.last(), &flow.output, quote.sale);
+        let route = simulate::mark_sale(&path, input_sale, output_sale, quote.prices);
         if let (Some(value_in), Some(value_out)) = (&route.value_in, &route.value_out) {
             if richer(value_out, value_in) {
                 surplus = true;
@@ -157,10 +160,18 @@ fn route_line(index: usize, route: &simulate::MarkedRoute, quote: &Quote<'_>) ->
         .map(|(token, price)| {
             let name = token::label(*token, quote.known);
             match price {
-                Some(price) => {
-                    let scale = u32::from(quote.places.get(token).copied().unwrap_or(18));
-                    format!("{name}={}", whole_price(price, scale, quote.decimals))
-                }
+                Some(price) => match quote.places.get(token).copied() {
+                    Some(scale) => {
+                        format!(
+                            "{name}={}",
+                            whole_price(price, u32::from(scale), quote.decimals)
+                        )
+                    }
+                    None => format!(
+                        "{name}=raw:{}",
+                        simulate::decimal(&Ratio::new(price.numer.clone(), price.denom.clone()), 6)
+                    ),
+                },
                 None => format!("{name}=unpriced"),
             }
         })
@@ -199,6 +210,20 @@ fn richer(value_out: &Ratio, value_in: &Ratio) -> bool {
 fn lost_half(loss: &Ratio, value_in: &Ratio) -> bool {
     &loss.numer * &value_in.denom * BigInt::from(LOSS_DENOM)
         > &value_in.numer * &loss.denom * BigInt::from(LOSS_NUMER)
+}
+
+fn end_sale(
+    token: Option<&Token>,
+    amount: &BigInt,
+    sale: &dyn Fn(Token, &BigInt) -> Option<BigInt>,
+) -> Option<BigInt> {
+    if amount.is_zero() {
+        return Some(BigInt::from(0));
+    }
+    if amount.is_negative() {
+        return None;
+    }
+    sale(*token?, amount)
 }
 
 fn pow10(exp: u32) -> BigInt {
@@ -313,6 +338,7 @@ mod tests {
         places.insert(token(1), 18);
         places.insert(token(2), 18);
         places.insert(token(3), 18);
+        let sale = |token: Token, amount: &BigInt| at_spot(&prices, token, amount);
         let reported = report(
             &problem,
             &plan,
@@ -323,6 +349,7 @@ mod tests {
                 places: &places,
                 decimals: 18,
                 wei_per_gas: 300_000_000,
+                sale: &sale,
             },
         );
         assert!(reported
@@ -372,6 +399,7 @@ mod tests {
             &plan.gas,
         );
         let places = BTreeMap::new();
+        let sale = |token: Token, amount: &BigInt| at_spot(&prices, token, amount);
         let reported = report(
             &problem,
             &plan,
@@ -382,9 +410,59 @@ mod tests {
                 places: &places,
                 decimals: 18,
                 wei_per_gas: 300_000_000,
+                sale: &sale,
             },
         );
         assert!(reported.surplus);
         assert!(!reported.large_loss);
+    }
+
+    #[test]
+    fn a_token_without_decimals_prints_a_raw_rate() {
+        let (problem, plan) = plan(1_000_000, 1_000_000);
+        let mut prices = BTreeMap::new();
+        prices.insert(token(1), price(1, 1));
+        prices.insert(token(3), price(1, 1));
+        let scored = simulate::score(
+            &[simulate::Leg {
+                token: token(1),
+                amount: BigInt::from(1_000_000),
+            }],
+            &[simulate::Leg {
+                token: token(3),
+                amount: BigInt::from(1_000_000),
+            }],
+            &prices,
+            &plan.gas,
+        );
+        let sale = |token: Token, amount: &BigInt| at_spot(&prices, token, amount);
+        let reported = report(
+            &problem,
+            &plan,
+            &scored,
+            &Quote {
+                prices: &prices,
+                known: &[],
+                places: &BTreeMap::new(),
+                decimals: 6,
+                wei_per_gas: 300_000_000,
+                sale: &sale,
+            },
+        );
+        let route = reported
+            .lines
+            .iter()
+            .find(|line| line.starts_with("route "))
+            .expect("route");
+        assert!(route.contains("0x0101010101010101010101010101010101010101=raw:1.000000"));
+        assert!(!route.contains("1000000000000"));
+    }
+
+    fn at_spot(prices: &BTreeMap<Token, Price>, token: Token, amount: &BigInt) -> Option<BigInt> {
+        let price = prices.get(&token)?;
+        if price.denom <= BigInt::from(0) || price.numer < BigInt::from(0) {
+            return None;
+        }
+        Some((amount * &price.numer) / &price.denom)
     }
 }
