@@ -200,6 +200,7 @@ where
     } else {
         None
     };
+    let token_task = spawn_tokens(store, opts, &stop);
     let planned = if let Some(calls) = &calls {
         match ingest::plan(store, calls).await {
             Ok(plan) => Some(plan),
@@ -217,6 +218,7 @@ where
         if let (Some(calls), Some(plan)) = (&calls, &planned) {
             for job in &plan.lists {
                 if hold_for_pause(&stop).await {
+                    take_tokens(&mut report, token_task).await;
                     return Ok(report);
                 }
                 if !job_wanted(&opts.only, &job.name) {
@@ -235,6 +237,7 @@ where
     }
     if import && !opts.no_corpus && opts.corpus_available && job_wanted(&opts.only, "corpus") {
         if hold_for_pause(&stop).await {
+            take_tokens(&mut report, token_task).await;
             return Ok(report);
         }
         match import::import_corpus(store).await {
@@ -252,6 +255,7 @@ where
     }
     if history {
         if hold_for_pause(&stop).await {
+            take_tokens(&mut report, token_task).await;
             return Ok(report);
         }
         let logs_wanted = planned
@@ -275,38 +279,54 @@ where
             }
         }
     }
-    if job_wanted(&opts.only, "tokens") {
-        if hold_for_pause(&stop).await {
-            return Ok(report);
+    take_tokens(&mut report, token_task).await;
+    Ok(report)
+}
+
+fn spawn_tokens<S>(
+    store: &S,
+    opts: &RunOpts,
+    stop: &tokio::sync::watch::Receiver<bool>,
+) -> Option<tokio::task::JoinHandle<eyre::Result<u64>>>
+where
+    S: TokenStore + Clone + 'static,
+{
+    if !job_wanted(&opts.only, "tokens") {
+        return None;
+    }
+    let store = store.clone();
+    let stop = stop.clone();
+    let opts = opts.clone();
+    Some(tokio::task::spawn_local(async move {
+        let rpc = open_calls(&opts).await?;
+        tokens::walk(&rpc, &store, &stop).await
+    }))
+}
+
+async fn take_tokens(
+    report: &mut RunReport,
+    task: Option<tokio::task::JoinHandle<eyre::Result<u64>>>,
+) {
+    let Some(task) = task else {
+        return;
+    };
+    match task.await {
+        Ok(Ok(wrote)) => {
+            let note = format!("tokens wrote {wrote}");
+            observability::info!(%note);
+            report.notes.push(note);
         }
-        let rpc = match &calls {
-            Some(calls) => Some(calls.clone()),
-            None => match open_calls(opts).await {
-                Ok(rpc) => Some(rpc),
-                Err(err) => {
-                    let message = format!("tokens: {err:#}");
-                    observability::error!(%message);
-                    report.list_errors.push(message);
-                    None
-                }
-            },
-        };
-        if let Some(rpc) = rpc {
-            match tokens::walk(&rpc, store, &stop).await {
-                Ok(wrote) => {
-                    let note = format!("tokens wrote {wrote}");
-                    observability::info!(%note);
-                    report.notes.push(note);
-                }
-                Err(err) => {
-                    let message = format!("tokens: {err:#}");
-                    observability::error!(%message);
-                    report.list_errors.push(message);
-                }
-            }
+        Ok(Err(err)) => {
+            let message = format!("tokens: {err:#}");
+            observability::error!(%message);
+            report.list_errors.push(message);
+        }
+        Err(err) => {
+            let message = format!("tokens: {err}");
+            observability::error!(%message);
+            report.list_errors.push(message);
         }
     }
-    Ok(report)
 }
 
 /// Bloom scan. The caller opens `headers.redb` for this and drops it before

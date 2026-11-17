@@ -91,6 +91,7 @@ pub(crate) struct App {
     pub live_peers: Vec<Session>,
     pub peer_down: bool,
     pub notice: String,
+    pub page_rows: u16,
 }
 
 impl App {
@@ -109,6 +110,7 @@ impl App {
             live_peers: Vec::new(),
             peer_down: false,
             notice: String::new(),
+            page_rows: 1,
         }
     }
 
@@ -130,6 +132,8 @@ impl App {
             Key::Right | Key::Char('l') => self.right(),
             Key::Up | Key::Char('k') => self.shift(-1),
             Key::Down | Key::Char('j') => self.shift(1),
+            Key::PageUp => self.page(-1),
+            Key::PageDown => self.page(1),
             Key::Char('p') if self.view == 0 => {
                 if let Some(paused) = self.ingest.paused {
                     self.control = Some(super::ingest::control_path(paused));
@@ -309,6 +313,15 @@ impl App {
         }
     }
 
+    fn page(&mut self, dir: isize) {
+        if self.focus == Focus::Nav {
+            self.nav = if dir < 0 { 0 } else { VIEWS.len() - 1 };
+            return;
+        }
+        let step = (self.page_rows as isize).max(1) * dir;
+        self.shift(step);
+    }
+
     fn shift(&mut self, delta: isize) {
         match self.focus {
             Focus::Nav => {
@@ -419,6 +432,8 @@ pub(crate) enum Key {
     Right,
     Up,
     Down,
+    PageUp,
+    PageDown,
 }
 
 #[cfg(test)]
@@ -615,5 +630,46 @@ mod tests {
         app.press(Key::Char('2'));
         app.press(Key::Char('p'));
         assert_eq!(app.take_control(), None);
+    }
+
+    #[test]
+    fn page_down_scrolls_a_page_of_the_open_view() {
+        let mut app = App::new();
+        app.focus = Focus::Body;
+        app.page_rows = 12;
+        app.press(Key::PageDown);
+        assert_eq!(app.scroll, 12);
+        app.press(Key::PageUp);
+        assert_eq!(app.scroll, 0);
+        app.press(Key::Char('2'));
+        let _ = app.take_order();
+        app.survey_prepared(two_rows());
+        app.page_rows = 1;
+        app.press(Key::PageDown);
+        assert_eq!(app.survey.cursor, 1);
+    }
+
+    #[test]
+    fn a_long_cursor_list_is_a_tally_and_the_furthest() {
+        let mut cursors = Vec::new();
+        for index in 0..12 {
+            cursors.push((format!("list:name-{index}"), 100));
+        }
+        cursors.push(("logs:uni-v3".into(), 50));
+        let local = Local {
+            header_number: Some(10_000),
+            cursors,
+            ..Local::default()
+        };
+        let mut app = App::new();
+        app.apply_status(None, &local, &[]);
+        let text = super::super::ingest::overview_lines(&app.ingest).join("\n");
+        assert!(text.contains("lists"), "{text}");
+        assert!(text.contains("behind"), "{text}");
+        assert!(!text.contains("list:name-2"), "{text}");
+        assert!(text.contains("logs:uni-v3"), "{text}");
+        let lags = super::super::ingest::furthest_lags(&app.ingest);
+        assert!(lags.len() <= 5, "{lags:?}");
+        assert_eq!(lags[0].0, "logs:uni-v3");
     }
 }

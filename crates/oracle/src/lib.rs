@@ -49,6 +49,52 @@ fn pass(
         .timeout(settings.directory_timeout())
         .build()
         .wrap_err("directory client")?;
+    let rpcs = if rpcs.is_empty() {
+        chain::default_call_rpcs()
+    } else {
+        rpcs
+    };
+    let (listing, rpc) = loop {
+        if *stop.borrow() {
+            return Ok(Listing {
+                generation: 0,
+                named: 0,
+            });
+        }
+        match prepare(&client, feeds, &rpcs, &settings) {
+            Ok(ready) => break ready,
+            Err(err) => {
+                observability::error!(%err, "feed directory");
+                if !pause(&stop, 12) {
+                    return Ok(Listing {
+                        generation: 0,
+                        named: 0,
+                    });
+                }
+            }
+        }
+    };
+    if *stop.borrow() {
+        return Ok(listing);
+    }
+    loop {
+        let stopped = || *stop.borrow();
+        match follow::catch_up(feeds, &rpc, &stopped) {
+            Ok(written) => observability::info!(written, "answers"),
+            Err(err) => observability::error!(%err, "answer follow"),
+        }
+        if !pause(&stop, 12) {
+            return Ok(listing);
+        }
+    }
+}
+
+fn prepare(
+    client: &reqwest::blocking::Client,
+    feeds: &store::service::Feeds,
+    rpcs: &[String],
+    settings: &config::Oracles,
+) -> eyre::Result<(Listing, chain::Rpc)> {
     let body = client
         .get(&settings.directory_url)
         .send()
@@ -64,12 +110,7 @@ fn pass(
         named = listing.named,
         "feeds"
     );
-    let rpcs = if rpcs.is_empty() {
-        chain::default_call_rpcs()
-    } else {
-        rpcs
-    };
-    let rpc = chain::Rpc::new(rpcs)?;
+    let rpc = chain::Rpc::new(rpcs.to_vec())?;
     configure::configure(feeds, &rpc)?;
     let _ = feeds.remember_answers();
     if let Ok(gauges) = feeds.gauges() {
@@ -82,23 +123,16 @@ fn pass(
             gauges.lookback,
         );
     }
-    if *stop.borrow() {
-        return Ok(listing);
-    }
-    loop {
-        let stopped = || *stop.borrow();
-        match follow::catch_up(feeds, &rpc, &stopped) {
-            Ok(written) => observability::info!(written, "answers"),
-            Err(err) => observability::error!(%err, "answer follow"),
-        }
+    Ok((listing, rpc))
+}
+
+/// Sleep up to `secs` seconds. False means the pipeline was asked to stop.
+fn pause(stop: &tokio::sync::watch::Receiver<bool>, secs: u64) -> bool {
+    for _ in 0..secs {
         if *stop.borrow() {
-            return Ok(listing);
+            return false;
         }
-        for _ in 0..12 {
-            if stop.has_changed().unwrap_or(true) && *stop.borrow() {
-                return Ok(listing);
-            }
-            std::thread::sleep(std::time::Duration::from_secs(1));
-        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
     }
+    !*stop.borrow()
 }

@@ -264,18 +264,11 @@ pub(crate) fn control_path(paused: bool) -> &'static str {
 pub(crate) fn overview_lines(ingest: &Ingest) -> Vec<String> {
     let mut lines = Vec::new();
     if !ingest.exporter_up {
-        lines.push(ingest.notice.clone());
+        lines.extend(process_lines(ingest));
         lines.push(String::new());
     } else {
         lines.push("Process".into());
-        let state = match ingest.paused {
-            Some(true) => "paused",
-            Some(false) => "running",
-            None => "—",
-        };
-        lines.push(fact("state", state));
-        lines.push(fact("uptime", &ingest.uptime));
-        lines.push(fact("block", &shown(&ingest.block)));
+        lines.extend(process_lines(ingest));
         lines.push(String::new());
     }
     lines.extend(header_lines(ingest));
@@ -291,28 +284,95 @@ pub(crate) fn overview_lines(ingest: &Ingest) -> Vec<String> {
     lines.extend(spot_lines(ingest));
     lines.push(String::new());
     lines.push("Peers".into());
-    lines.push(fact(
+    lines.extend(peer_card(ingest));
+    lines.push(String::new());
+    lines.extend(stage_table(&ingest.stages));
+    let queue = queue_lines(ingest);
+    if !queue.is_empty() {
+        lines.push(String::new());
+        lines.push("Queue".into());
+        lines.extend(queue);
+    }
+    lines
+}
+
+pub(crate) fn process_lines(ingest: &Ingest) -> Vec<String> {
+    if !ingest.exporter_up {
+        return vec![ingest.notice.clone()];
+    }
+    let state = match ingest.paused {
+        Some(true) => "paused",
+        Some(false) => "running",
+        None => "—",
+    };
+    vec![
+        fact("state", state),
+        fact("uptime", &ingest.uptime),
+        fact("block", &shown(&ingest.block)),
+    ]
+}
+
+pub(crate) fn peer_card(ingest: &Ingest) -> Vec<String> {
+    let mut lines = vec![fact(
         "service",
         if ingest.peers_live {
             "running"
         } else {
             "not running"
         },
-    ));
+    )];
     if ingest.peers_live {
         lines.push(fact("sessions", &num(ingest.peer_sessions)));
         lines.push(fact("summaries", &num(ingest.peer_summaries)));
         lines.push(fact("sightings", &num(ingest.peer_sightings)));
     }
-    lines.push(String::new());
-    lines.extend(stage_table(&ingest.stages));
-    if ingest.job_errors.is_some() || ingest.jobs.is_some() {
-        lines.push(String::new());
-        lines.push("Queue".into());
-        lines.push(fact("waiting", &num(ingest.jobs)));
-        lines.push(fact("in error", &num(ingest.job_errors)));
-    }
     lines
+}
+
+pub(crate) fn queue_lines(ingest: &Ingest) -> Vec<String> {
+    if ingest.job_errors.is_none() && ingest.jobs.is_none() {
+        return Vec::new();
+    }
+    vec![
+        fact("waiting", &num(ingest.jobs)),
+        fact("in error", &num(ingest.job_errors)),
+    ]
+}
+
+/// Stored count, and how many rows are still missing against the count above it.
+pub(crate) fn coverage_rows(ingest: &Ingest) -> Vec<(String, String, String)> {
+    vec![
+        row("identities", ingest.identities, None),
+        row("immutable", ingest.immutable, ingest.identities),
+        row("mutable", ingest.mutable, ingest.immutable),
+        row("tick pages", ingest.tick_pages, None),
+        row("curves", ingest.curves, ingest.mutable),
+        row("conduits", ingest.conduits, None),
+        row("mismatches", ingest.mismatches, None),
+    ]
+}
+
+fn row(name: &str, have: Option<u64>, against: Option<u64>) -> (String, String, String) {
+    let short = match (have, against) {
+        (Some(have), Some(against)) if have < against => commas(against - have),
+        (Some(_), Some(_)) => "0".into(),
+        _ => "—".into(),
+    };
+    (name.into(), num(have), short)
+}
+
+pub(crate) fn stuck_lines(ingest: &Ingest) -> Vec<String> {
+    if ingest.errors.is_empty() {
+        let waiting = num(ingest.jobs);
+        vec![format!(
+            "{waiting} jobs are waiting. None of them is carrying an error."
+        )]
+    } else {
+        vec![
+            fact("in error", &num(ingest.job_errors)),
+            "These errors are still on queued jobs.".into(),
+        ]
+    }
 }
 
 pub(crate) fn pool_lines(ingest: &Ingest) -> Vec<String> {
@@ -573,7 +633,7 @@ pub(crate) fn error_detail(count: u64, error: &str) -> String {
     )
 }
 
-fn header_lines(ingest: &Ingest) -> Vec<String> {
+pub(crate) fn header_lines(ingest: &Ingest) -> Vec<String> {
     let mut lines = vec!["Headers".into()];
     if ingest.headers_live {
         lines.push(fact("cursor", &num(ingest.cursor)));
@@ -607,19 +667,113 @@ fn header_lines(ingest: &Ingest) -> Vec<String> {
 
 fn discovery_lines(ingest: &Ingest) -> Vec<String> {
     let mut lines = vec!["Discovery".into()];
+    lines.extend(discovery_facts(ingest));
+    let far = furthest_lags(ingest);
+    if far.is_empty() {
+        return lines;
+    }
+    lines.push(String::new());
+    lines.push(format!(
+        "  {:<36}{:>14}{:>14}",
+        "furthest", "block", "behind"
+    ));
+    for (name, block, lag) in far {
+        lines.push(format!(
+            "  {:<36}{:>14}{:>14}",
+            shorten(&name, 36),
+            commas(block),
+            num(lag)
+        ));
+    }
+    lines
+}
+
+pub(crate) fn discovery_facts(ingest: &Ingest) -> Vec<String> {
+    let mut lines = Vec::new();
     if ingest.exporter_up {
         lines.push(fact("identities", &num(ingest.identities)));
     }
     if ingest.cursors.is_empty() {
         lines.push(fact("cursors", "none"));
+        return lines;
     }
-    for (name, block) in &ingest.cursors {
-        lines.push(fact(name, &commas(*block)));
+    let (lists, logs) = split_cursors(ingest);
+    lines.push(cursor_tally("lists", &lists));
+    lines.push(cursor_tally("logs", &logs));
+    if ingest.cursors.len() <= 8 {
+        for (name, block) in &ingest.cursors {
+            lines.push(fact(name, &commas(*block)));
+        }
     }
     lines
 }
 
-fn corpus_lines(ingest: &Ingest) -> Vec<String> {
+/// Cursors more than 100 blocks behind the head, the five furthest first.
+/// A short cursor list stays in [`discovery_facts`] instead.
+pub(crate) fn furthest_lags(ingest: &Ingest) -> Vec<(String, u64, Option<u64>)> {
+    if ingest.cursors.len() <= 8 {
+        return Vec::new();
+    }
+    let (mut behind, logs) = split_cursors(ingest);
+    behind.extend(logs);
+    behind.retain(|row| row.2.unwrap_or(0) > 100);
+    behind.sort_by(|left, right| right.2.cmp(&left.2).then(left.0.cmp(&right.0)));
+    behind.truncate(5);
+    behind
+}
+
+fn split_cursors(
+    ingest: &Ingest,
+) -> (
+    Vec<(String, u64, Option<u64>)>,
+    Vec<(String, u64, Option<u64>)>,
+) {
+    let head = if ingest.head_known {
+        ingest.head
+    } else {
+        ingest.chain_number
+    };
+    let mut lists = Vec::new();
+    let mut logs = Vec::new();
+    for (name, block) in &ingest.cursors {
+        let behind = head.map(|tip| tip.saturating_sub(*block));
+        if name.starts_with("logs:") {
+            logs.push((name.clone(), *block, behind));
+        } else {
+            lists.push((name.clone(), *block, behind));
+        }
+    }
+    (lists, logs)
+}
+
+fn cursor_tally(label: &str, rows: &[(String, u64, Option<u64>)]) -> String {
+    if rows.is_empty() {
+        return fact(label, "none");
+    }
+    let behind = rows.iter().filter(|row| row.2.unwrap_or(0) > 100).count();
+    if behind == 0 {
+        fact(label, &format!("{} caught up", rows.len()))
+    } else {
+        fact(label, &format!("{}    {behind} behind", rows.len()))
+    }
+}
+
+pub(crate) fn shorten(name: &str, width: usize) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    if chars.len() <= width {
+        return name.to_string();
+    }
+    let keep = width.saturating_sub(1);
+    let head = keep / 2;
+    let tail = keep - head;
+    format!(
+        "{}…{}",
+        chars[..head].iter().collect::<String>(),
+        chars[chars.len() - tail..].iter().collect::<String>()
+    )
+}
+
+pub(crate) fn corpus_lines(ingest: &Ingest) -> Vec<String> {
     let mut lines = vec!["Corpus".into()];
     match ingest.corpus_bytes {
         Some(bytes) => {
@@ -653,9 +807,6 @@ fn stage_table(stages: &[StageRow]) -> Vec<String> {
             shown(&stage.last),
             shown(&stage.rate)
         ));
-        if !stage.spark.is_empty() {
-            lines.push(format!("  {:<12}{}", "", stage.spark));
-        }
     }
     lines
 }
@@ -722,14 +873,14 @@ fn fact(label: &str, value: &str) -> String {
     format!("  {label:<16}{value}")
 }
 
-fn num(value: Option<u64>) -> String {
+pub(crate) fn num(value: Option<u64>) -> String {
     match value {
         Some(value) => commas(value),
         None => "—".into(),
     }
 }
 
-fn shown(value: &str) -> String {
+pub(crate) fn shown(value: &str) -> String {
     if value.is_empty() {
         "—".into()
     } else {

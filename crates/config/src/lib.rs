@@ -55,7 +55,13 @@ impl Default for Process {
         Self {
             data_dir: "data/ratatoskr".into(),
             services: vec!["db".into(), "peer".into()],
-            pipelines: vec!["headers".into(), "venues".into(), "state".into()],
+            pipelines: vec![
+                "headers".into(),
+                "venues".into(),
+                "state".into(),
+                "oracles".into(),
+                "spots".into(),
+            ],
             log: "ratatoskr=info,store=info,pipeline=info,peer=info,eth_p2p=info,venue=info,headers=info,oracle=info,spot=info".into(),
             metrics: "127.0.0.1:9737".into(),
             status_url: "http://127.0.0.1:9737".into(),
@@ -514,7 +520,10 @@ mod tests {
         let loaded = load(&dir).unwrap();
         assert_eq!(loaded.process.data_dir, "data/ratatoskr");
         assert_eq!(loaded.process.services, ["db", "peer"]);
-        assert_eq!(loaded.process.pipelines, ["headers", "venues", "state"]);
+        assert_eq!(
+            loaded.process.pipelines,
+            ["headers", "venues", "state", "oracles", "spots"]
+        );
         assert_eq!(loaded.peer.target, 16);
         let key = loaded.peer.key.trim();
         assert!(

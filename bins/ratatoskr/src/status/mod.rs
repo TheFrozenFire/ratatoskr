@@ -106,7 +106,7 @@ pub fn run(
                 }
             }
         }
-        screen.terminal.draw(|frame| draw::draw(frame, &app))?;
+        screen.terminal.draw(|frame| draw::draw(frame, &mut app))?;
     };
     drop(screen);
     drop(jobs);
@@ -322,6 +322,8 @@ fn key_of(code: KeyCode) -> Option<Key> {
         KeyCode::Right => Some(Key::Right),
         KeyCode::Up => Some(Key::Up),
         KeyCode::Down => Some(Key::Down),
+        KeyCode::PageUp => Some(Key::PageUp),
+        KeyCode::PageDown => Some(Key::PageDown),
         _ => None,
     }
 }

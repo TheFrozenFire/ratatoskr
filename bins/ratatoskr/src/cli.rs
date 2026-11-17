@@ -213,8 +213,8 @@ mod tests {
             headers: true,
             venues: true,
             state: true,
-            oracles: false,
-            spots: false,
+            oracles: true,
+            spots: true,
         }
     }
 
@@ -233,7 +233,7 @@ mod tests {
     }
 
     #[test]
-    fn default_pipelines_are_header_sync_discovery_and_state() {
+    fn default_pipelines_run_headers_venues_state_oracles_and_spots() {
         let args = Cli::try_parse_from(["ratatoskr"]).unwrap().args;
         assert!(args.pipeline.is_none());
         let loaded =
