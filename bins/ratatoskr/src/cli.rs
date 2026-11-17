@@ -36,7 +36,7 @@ pub(crate) struct Args {
     /// `spots` reads that catalog and writes `spots.redb`.
     #[arg(long)]
     pub(crate) pipeline: Option<String>,
-    /// Catalog directory for this process. Default is the live catalog.
+    /// Catalog directory for this process. Omitted uses `process.data_dir`.
     #[arg(long)]
     pub(crate) data_dir: Option<PathBuf>,
     /// Copy a stratified identity sample from this redb file into `--data-dir`.
@@ -91,10 +91,10 @@ pub(crate) struct Args {
     /// Do not fold the local corpus into the venue catalog.
     #[arg(long)]
     pub(crate) no_corpus: bool,
-    /// Bind IPv4 RLPx to this address. Policy routing sends that source into the tunnel.
+    /// Bind IPv4 RLPx to this address. Omitted uses `peer.bind4`.
     #[arg(long)]
     pub(crate) bind4: Option<Ipv4Addr>,
-    /// Bind IPv6 RLPx to this address.
+    /// Bind IPv6 RLPx to this address. Omitted uses `peer.bind6`.
     #[arg(long)]
     pub(crate) bind6: Option<Ipv6Addr>,
     /// How many outbound sessions the peer service keeps. Omitted uses the loaded config.
@@ -216,6 +216,26 @@ mod tests {
             oracles: true,
             spots: true,
         }
+    }
+
+    #[test]
+    fn a_bare_invocation_uses_the_configured_directory_and_binds() {
+        let cli = Cli::try_parse_from(["ratatoskr"]).unwrap();
+        assert_eq!(cli.config_dir, PathBuf::from("config"));
+        assert!(cli.args.data_dir.is_none());
+        assert!(cli.args.bind4.is_none());
+        assert!(cli.args.bind6.is_none());
+        let loaded =
+            config::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config")).unwrap();
+        assert_eq!(loaded.process.data_dir, "data/ratatoskr");
+        let egress = egress_from(
+            bind_addr(cli.args.bind4, loaded.peer.bind4.as_deref()).unwrap(),
+            bind_addr(cli.args.bind6, loaded.peer.bind6.as_deref()).unwrap(),
+        )
+        .unwrap()
+        .expect("egress");
+        assert_eq!(egress.v4, Ipv4Addr::new(10, 2, 0, 2));
+        assert_eq!(egress.v6, "2a07:b944::2:2".parse::<Ipv6Addr>().unwrap());
     }
 
     #[test]

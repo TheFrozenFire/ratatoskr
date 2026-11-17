@@ -1,2 +1,4 @@
 peer:
   target: 16
+  bind4: 10.2.0.2
+  bind6: 2a07:b944::2:2

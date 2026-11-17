@@ -99,6 +99,8 @@ pub struct Peer {
     pub key: String,
     /// Absent means `<data_dir>/peer.sock`.
     pub socket: Option<String>,
+    /// RLPx source addresses. Both are set, or neither. Policy routing sends
+    /// those sources into the tunnel.
     pub bind4: Option<String>,
     pub bind6: Option<String>,
     pub redial_gap_secs: u64,
@@ -534,6 +536,7 @@ mod tests {
         assert_eq!(loaded.spots.hub_floor, 3);
         assert_eq!(loaded.spots.hub_limit, 32);
         assert!(loaded.peer.socket.is_none());
-        assert!(loaded.peer.bind4.is_none());
+        assert_eq!(loaded.peer.bind4.as_deref(), Some("10.2.0.2"));
+        assert_eq!(loaded.peer.bind6.as_deref(), Some("2a07:b944::2:2"));
     }
 }
