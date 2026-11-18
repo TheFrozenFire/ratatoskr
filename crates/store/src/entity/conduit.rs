@@ -1,6 +1,6 @@
 //! Pair-conduit persistence.
 
-use crate::service::{ConduitBody, ConduitMember, CurvePage, MemberTarget};
+use crate::service::{ConduitBody, ConduitMember, CurvePage, MemberTarget, PendingMember};
 use alloy_primitives::{Address, B256};
 use store_model::{ConduitFail, ConduitJob};
 
@@ -10,6 +10,12 @@ use crate::{blocking, LocalStore};
 pub trait ConduitStore: Send + Sync {
     async fn page_curves(&self, after: Option<(u8, B256)>, limit: usize)
         -> eyre::Result<CurvePage>;
+
+    async fn member_fill_done(&self) -> eyre::Result<bool>;
+
+    async fn pending_member_curves(&self) -> eyre::Result<Vec<PendingMember>>;
+
+    async fn mark_member_fill_done(&self) -> eyre::Result<()>;
 
     async fn enqueue_members(&self, targets: &[MemberTarget]) -> eyre::Result<u64>;
 
@@ -53,6 +59,21 @@ impl ConduitStore for LocalStore {
     ) -> eyre::Result<CurvePage> {
         let catalog = self.catalog_db()?;
         blocking(move || catalog.page_curves(after, limit)).await
+    }
+
+    async fn member_fill_done(&self) -> eyre::Result<bool> {
+        let catalog = self.catalog_db()?;
+        blocking(move || catalog.member_fill_done()).await
+    }
+
+    async fn pending_member_curves(&self) -> eyre::Result<Vec<PendingMember>> {
+        let catalog = self.catalog_db()?;
+        blocking(move || catalog.pending_member_curves()).await
+    }
+
+    async fn mark_member_fill_done(&self) -> eyre::Result<()> {
+        let catalog = self.catalog_db()?;
+        blocking(move || catalog.mark_member_fill_done()).await
     }
 
     async fn enqueue_members(&self, targets: &[MemberTarget]) -> eyre::Result<u64> {

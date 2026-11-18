@@ -6,7 +6,7 @@ use store_model::{decode_curve_record, entity_key, STAGE_IMMUTABLE, STAGE_QUOTE}
 
 use super::super::catalog::Catalog;
 use super::super::catalog::VENUES;
-use super::work::clear_job;
+use super::work::{clear_job, JOB_ERROR, JOB_STAGE, WORK_META};
 use super::*;
 
 impl Catalog {
@@ -60,6 +60,7 @@ impl Catalog {
                 let mut mutable = write.open_table(MUTABLE)?;
                 let mut ticks = write.open_table(TICK_PAGES)?;
                 let mut curves = write.open_table(CURVES)?;
+                let mut pending = write.open_table(PENDING_MEMBERS)?;
                 let mut quotes = write.open_table(QUOTES)?;
                 let mut dirty = write.open_table(DIRTY)?;
                 let mut mismatch = write.open_table(MISMATCH)?;
@@ -70,7 +71,14 @@ impl Catalog {
                     }
                     if let Some(value) = curves.get(key.as_slice())? {
                         if let Ok(curve) = decode_curve_record(*kind, *id, value.value()) {
+                            super::curve::stage_pending(
+                                &mut pending,
+                                key.as_slice(),
+                                Some(&curve),
+                            )?;
                             dropped_curves.push(curve);
+                        } else {
+                            super::curve::stage_pending(&mut pending, key.as_slice(), None)?;
                         }
                     }
                     immutable.remove(key.as_slice())?;
@@ -89,9 +97,21 @@ impl Catalog {
             {
                 let mut jobs = work.open_table(JOBS)?;
                 let mut ranks = work.open_table(JOB_RANK)?;
+                let mut stages = work.open_table(JOB_STAGE)?;
+                let mut errors = work.open_table(JOB_ERROR)?;
+                let meta = work.open_table(WORK_META)?;
                 for (kind, id) in chunk {
                     for stage in STAGE_IMMUTABLE..=STAGE_QUOTE {
-                        clear_job(&mut jobs, &mut ranks, stage, *kind, id)?;
+                        clear_job(
+                            &mut jobs,
+                            &mut ranks,
+                            &mut stages,
+                            &mut errors,
+                            &meta,
+                            stage,
+                            *kind,
+                            id,
+                        )?;
                     }
                 }
             }

@@ -1,41 +1,48 @@
 //! Read conduits, replace the stored spots, and wait.
 
+use std::collections::HashMap;
+
+use alloy_primitives::Address;
 use store_model::Spot;
 
 use crate::price::{mainnet_numeraires, price, CustodialWrap, Edge};
 
 /// Read conduits, replace the stored spots, and wait. One failed pass is logged.
 ///
-/// `gather` reads the open venue catalog. This task does not open it and does
-/// not open the feed file. The custodial wrap is the seed file's first pair.
-/// The caller opens the spot file.
-pub async fn run<F>(
+/// The first pass reads every stored conduit. Later passes apply the conduit
+/// log and skip pricing when nothing was written. This task does not open the
+/// feed file. The custodial wrap is the seed file's first pair. The caller
+/// opens the spot file.
+pub async fn run(
     book: store::service::Spots,
+    store: store::LocalStore,
     mut stop: tokio::sync::watch::Receiver<bool>,
     settings: config::Spots,
-    gather: F,
-) -> eyre::Result<()>
-where
-    F: Fn() -> eyre::Result<Vec<Edge>> + Send + Sync + 'static,
-{
+) -> eyre::Result<()> {
     let (native, wrapped) = chain::custodial_wrap();
     let wrap = Some(CustodialWrap { native, wrapped });
-    let gather = std::sync::Arc::new(gather);
+    let mut held = Held::default();
     loop {
         if *stop.borrow() {
             return Ok(());
         }
-        let gather = std::sync::Arc::clone(&gather);
         let floor = settings.hub_floor;
         let limit = settings.hub_limit;
-        let found = tokio::task::spawn_blocking(move || -> eyre::Result<Vec<Spot>> {
-            let edges = gather()?;
-            Ok(price(&edges, floor, limit, &mainnet_numeraires(), wrap))
-        })
-        .await
-        .map_err(|err| eyre::eyre!("spot pass: {err}"))?;
+        let store = store.clone();
+        let outcome =
+            tokio::task::spawn_blocking(move || -> (eyre::Result<Option<Vec<Spot>>>, Held) {
+                let read = refresh(&store, &mut held).map(|edges| {
+                    edges.map(|edges| price(&edges, floor, limit, &mainnet_numeraires(), wrap))
+                });
+                (read, held)
+            })
+            .await
+            .map_err(|err| eyre::eyre!("spot pass: {err}"))?;
+        held = outcome.1;
+        let found = outcome.0;
         match found {
-            Ok(spots) => {
+            Ok(None) => observability::info!(changed = 0, "spots"),
+            Ok(Some(spots)) => {
                 let count = spots.len() as u64;
                 match book.replace(&spots) {
                     Ok(()) => {
@@ -59,6 +66,107 @@ where
             _ = tokio::time::sleep(settings.pass()) => {}
         }
     }
+}
+
+#[derive(Default)]
+struct Held {
+    edges: HashMap<(Address, Address), Edge>,
+    /// Next log sequence already applied. Empty until the first full read.
+    next: Option<u64>,
+}
+
+/// `None` means the stored conduits are unchanged since the last pass.
+fn refresh(store: &store::LocalStore, held: &mut Held) -> eyre::Result<Option<Vec<Edge>>> {
+    let tip = store.conduit_log_tip()?;
+    if tip.overflow || held.next.is_none() {
+        if tip.overflow {
+            store.clear_conduit_log()?;
+        }
+        let tip = store.conduit_log_tip()?;
+        held.edges.clear();
+        store.visit_conduit_blocks(|token_in, token_out, block, segments| {
+            held.edges.insert(
+                (token_in, token_out),
+                Edge {
+                    token_in,
+                    token_out,
+                    block: Some(block),
+                    segments: segments.to_vec(),
+                },
+            );
+            Ok(())
+        })?;
+        let (notes, after) = store.conduit_log_since(tip.next)?;
+        let changed = notes.len();
+        apply(held, &notes);
+        store.trim_conduit_log(after.next)?;
+        held.next = Some(after.next);
+        if after.overflow {
+            held.next = None;
+            return refresh(store, held);
+        }
+        observability::info!(
+            conduits = held.edges.len(),
+            changed,
+            full = true,
+            "spots read"
+        );
+        return Ok(Some(owned(held)));
+    }
+    let cursor = held
+        .next
+        .expect("a full conduit read stores the log cursor");
+    let (notes, after) = store.conduit_log_since(cursor)?;
+    if after.overflow {
+        held.next = None;
+        return refresh(store, held);
+    }
+    if notes.is_empty() && after.next == cursor {
+        return Ok(None);
+    }
+    let changed = notes.len();
+    apply(held, &notes);
+    store.trim_conduit_log(after.next)?;
+    held.next = Some(after.next);
+    observability::info!(
+        conduits = held.edges.len(),
+        changed,
+        full = false,
+        "spots read"
+    );
+    Ok(Some(owned(held)))
+}
+
+fn apply(held: &mut Held, notes: &[store::service::ConduitNote]) {
+    for note in notes {
+        let key = (note.token_in, note.token_out);
+        match &note.block {
+            Some(block) => {
+                held.edges.insert(
+                    key,
+                    Edge {
+                        token_in: note.token_in,
+                        token_out: note.token_out,
+                        block: Some(*block),
+                        segments: note.segments.clone(),
+                    },
+                );
+            }
+            None => {
+                held.edges.remove(&key);
+            }
+        }
+    }
+}
+
+fn owned(held: &Held) -> Vec<Edge> {
+    let mut edges: Vec<Edge> = held.edges.values().cloned().collect();
+    edges.sort_by(|left, right| {
+        left.token_in
+            .cmp(&right.token_in)
+            .then(left.token_out.cmp(&right.token_out))
+    });
+    edges
 }
 
 /// Stored pair conduits as spot edges. The block is the one the merge used.

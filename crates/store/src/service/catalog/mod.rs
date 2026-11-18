@@ -36,7 +36,7 @@ const HIT_SCAN: TableDefinition<&str, u64> = TableDefinition::new("hit_scan");
 /// Era1 receipt payload for one block, so a retry does not range-read it again.
 const BODIES: TableDefinition<u64, &[u8]> = TableDefinition::new("bodies");
 /// Token symbol, decimals, and an optional wrap counterpart. Key is the address.
-const TOKENS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("tokens");
+pub(super) const TOKENS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("tokens");
 /// List-view index and log-root deploy block. The value is a `u64`.
 const NOTES: TableDefinition<&str, u64> = TableDefinition::new("notes");
 
@@ -547,5 +547,46 @@ mod tests {
             .unwrap();
         assert_eq!(catalog.missing_tokens(10).unwrap(), vec![missing[1]]);
         assert_eq!(catalog.token_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn a_token_scan_resumes_after_the_filled_row_and_then_reads_needed() {
+        let dir = TempDir::new();
+        let catalog = Catalog::open(&dir.0).unwrap();
+        catalog
+            .commit_chunk("list:test", 1, &[sample()], Put::Merge)
+            .unwrap();
+        let first = catalog.missing_tokens(1).unwrap();
+        assert_eq!(first.len(), 1);
+        let second = catalog.missing_tokens(1).unwrap();
+        assert_eq!(second.len(), 1);
+        assert_ne!(first, second);
+        catalog
+            .put_tokens(&[
+                TokenRecord {
+                    address: first[0],
+                    symbol: "A".into(),
+                    decimals: Some(18),
+                    wraps: None,
+                },
+                TokenRecord {
+                    address: second[0],
+                    symbol: "B".into(),
+                    decimals: Some(18),
+                    wraps: None,
+                },
+            ])
+            .unwrap();
+        assert!(catalog.missing_tokens(10).unwrap().is_empty());
+        let mut later = sample();
+        later.id = VenueRow::address_id(address!("6666666666666666666666666666666666666666"));
+        later.tokens = vec![address!("7777777777777777777777777777777777777777")];
+        catalog
+            .commit_chunk("list:test", 2, &[later], Put::Merge)
+            .unwrap();
+        assert_eq!(
+            catalog.missing_tokens(10).unwrap(),
+            vec![address!("7777777777777777777777777777777777777777")]
+        );
     }
 }

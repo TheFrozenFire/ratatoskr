@@ -6,7 +6,8 @@ use std::collections::{BTreeMap, HashSet};
 use std::ops::Bound;
 use store_model::{decode_row, encode_row, entity_key, factory_of, tally_kind, Put, VenueRow};
 
-use super::{Catalog, EntityRead, VENUES};
+use super::token::queue_needed;
+use super::{Catalog, EntityRead, TOKENS, VENUES};
 
 impl Catalog {
     /// At most `limit` rows of `kind` whose id is greater than `after`.
@@ -113,6 +114,8 @@ pub(super) fn write_identities(db: &Database, rows: &[VenueRow], put: Put) -> ey
     write.set_durability(Durability::Immediate)?;
     let written = {
         let mut venues = write.open_table(VENUES)?;
+        let tokens = write.open_table(TOKENS)?;
+        let mut needed = write.open_table(super::token::NEEDED)?;
         let mut n = 0_u64;
         for row in rows {
             let key = row.key();
@@ -123,12 +126,13 @@ pub(super) fn write_identities(db: &Database, rows: &[VenueRow], put: Put) -> ey
                 (Some(_), Put::IfAbsent) => None,
                 (Some(bytes), Put::Merge) => {
                     let old = decode_row(row.kind, row.id, &bytes)?;
-                    Some(encode_row(&merge(old, row.clone()))?)
+                    Some(merge(old, row.clone()))
                 }
-                (None, _) => Some(encode_row(row)?),
+                (None, _) => Some(row.clone()),
             };
-            if let Some(bytes) = stored {
-                venues.insert(key.as_slice(), bytes.as_slice())?;
+            if let Some(stored) = stored {
+                queue_needed(&tokens, &mut needed, &stored.tokens)?;
+                venues.insert(key.as_slice(), encode_row(&stored)?.as_slice())?;
                 n += 1;
             }
         }

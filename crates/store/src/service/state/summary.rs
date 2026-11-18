@@ -2,7 +2,7 @@
 
 use alloy_primitives::B256;
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata};
-use store_model::{decode_job, StateSummary, VenueRow, STAGE_CONDUIT};
+use store_model::{StateSummary, VenueRow, STAGE_CONDUIT};
 
 use super::super::catalog::Catalog;
 use super::super::catalog::VENUES;
@@ -21,16 +21,30 @@ impl Catalog {
             tokens: self.token_count()?,
             ..StateSummary::default()
         };
+        super::work::ensure_state_accounts(&self.work)?;
         let read = self.work.begin_read()?;
-        match read.open_table(JOBS) {
-            Ok(table) => {
-                for item in table.iter()? {
+        match read.open_table(super::work::JOB_STAGE) {
+            Ok(stages) => {
+                for item in stages.iter()? {
                     let (key, value) = item?;
-                    let job = decode_job(key.value(), value.value())?;
-                    summary.jobs += 1;
-                    *summary.jobs_by_stage.entry(job.stage).or_default() += 1;
-                    if !job.error.is_empty() {
-                        *summary.errors.entry(job.error).or_default() += 1;
+                    let key = key.value();
+                    if key.len() != 1 || value.value() == 0 {
+                        continue;
+                    }
+                    summary.jobs += value.value();
+                    summary.jobs_by_stage.insert(key[0], value.value());
+                }
+            }
+            Err(redb::TableError::TableDoesNotExist(_)) => {}
+            Err(err) => return Err(err.into()),
+        }
+        match read.open_table(super::work::JOB_ERROR) {
+            Ok(errors) => {
+                for item in errors.iter()? {
+                    let (_, value) = item?;
+                    let error = String::from_utf8_lossy(value.value()).into_owned();
+                    if !error.is_empty() {
+                        *summary.errors.entry(error).or_default() += 1;
                     }
                 }
             }

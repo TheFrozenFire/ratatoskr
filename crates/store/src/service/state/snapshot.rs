@@ -98,6 +98,8 @@ impl Catalog {
                 delete_prefix(&mut ticks, &key)?;
             }
             let _ = curves.remove(key.as_slice())?;
+            let mut pending = write.open_table(PENDING_MEMBERS)?;
+            super::curve::stage_pending(&mut pending, key.as_slice(), previous_curve.as_ref())?;
             let bytes = encode_mutable(row, generation);
             mutable_table.insert(key.as_slice(), bytes.as_slice())?;
             let seen = match dirty_table.get(key.as_slice())? {

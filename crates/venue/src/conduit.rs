@@ -222,7 +222,28 @@ fn absorb(curves: &mut u64, targets: &mut Vec<MemberTarget>, page: &store::servi
 }
 
 /// Queue one job per ordered pair whose conduit is missing or behind the stored curves.
+///
+/// The first call reads every curve. Later calls retarget only curves written
+/// since that fill whose member update did not commit.
+#[allow(dead_code)]
 pub fn enqueue_conduit_fill(catalog: &Catalog) -> eyre::Result<u64> {
+    if catalog.member_fill_done()? {
+        let pending = catalog.pending_member_curves()?;
+        let curves = pending.len() as u64;
+        for row in pending {
+            retarget(
+                catalog,
+                row.kind,
+                row.id,
+                row.previous.as_ref(),
+                row.current.as_ref(),
+            )?;
+        }
+        if curves > 0 {
+            observability::info!(curves, "conduit fill repaired");
+        }
+        return Ok(0);
+    }
     let mut curves = 0_u64;
     let mut targets = Vec::new();
     let mut after = None;
@@ -238,11 +259,40 @@ pub fn enqueue_conduit_fill(catalog: &Catalog) -> eyre::Result<u64> {
         after = Some(resume);
     }
     observability::info!(curves, members = targets.len(), "conduit fill scanned");
-    catalog.enqueue_members(&targets)
+    let queued = catalog.enqueue_members(&targets)?;
+    catalog.mark_member_fill_done()?;
+    Ok(queued)
 }
 
 /// Queue one job per ordered pair whose conduit is missing or behind the stored curves.
+///
+/// The first call reads every curve. Later calls retarget only curves written
+/// since that fill whose member update did not commit.
 pub async fn enqueue_conduit_fill_store<S: ConduitStore>(store: &S) -> eyre::Result<u64> {
+    if store.member_fill_done().await? {
+        let pending = store.pending_member_curves().await?;
+        let curves = pending.len() as u64;
+        for row in pending {
+            retarget_store(
+                store,
+                row.kind,
+                row.id,
+                row.previous.as_ref(),
+                row.current.as_ref(),
+            )
+            .await?;
+        }
+        if curves > 0 {
+            observability::info!(curves, "conduit fill repaired");
+        }
+        return Ok(0);
+    }
+    let queued = scan_members_store(store).await?;
+    store.mark_member_fill_done().await?;
+    Ok(queued)
+}
+
+async fn scan_members_store<S: ConduitStore>(store: &S) -> eyre::Result<u64> {
     let mut curves = 0_u64;
     let mut targets = Vec::new();
     let mut after = None;
@@ -456,6 +506,27 @@ mod tests {
         assert_eq!(curve.version, CURVE_VERSION);
         super::commit_curve(catalog, &curve).unwrap();
         curve
+    }
+
+    #[test]
+    fn a_later_fill_retargets_a_curve_whose_member_update_did_not_commit() {
+        let dir = TempDir::new();
+        install_catalog_hooks();
+        let catalog = Catalog::open(&dir.0).unwrap();
+        let curve = write_pool(&catalog, &product(1, 1_000_000, 1_000_000), 10);
+        assert_eq!(super::enqueue_conduit_fill(&catalog).unwrap(), 2);
+        let jobs = catalog.claim_conduits(8, 1, 30).unwrap();
+        let done: Vec<_> = jobs
+            .iter()
+            .map(|job| (job.token_in, job.token_out))
+            .collect();
+        catalog.finish_conduits(&done, &[], &[]).unwrap();
+        assert!(catalog.claim_conduits(8, 1, 30).unwrap().is_empty());
+        catalog.put_curve(&curve).unwrap();
+        assert_eq!(catalog.pending_member_curves().unwrap().len(), 1);
+        assert_eq!(super::enqueue_conduit_fill(&catalog).unwrap(), 0);
+        assert!(catalog.pending_member_curves().unwrap().is_empty());
+        assert!(!catalog.claim_conduits(8, 1, 30).unwrap().is_empty());
     }
 
     #[test]

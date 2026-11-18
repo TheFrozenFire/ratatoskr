@@ -26,9 +26,6 @@ impl Catalog {
         let mut pairs = BTreeSet::new();
         pairs.extend(old_pairs.iter().copied());
         pairs.extend(new_pairs.iter().copied());
-        if pairs.is_empty() {
-            return Ok(());
-        }
         let now = super::super::state::unix_now();
         let mut alive = Vec::new();
         let mut gone = Vec::new();
@@ -39,6 +36,8 @@ impl Catalog {
                 let mut members = write.open_table(MEMBERS)?;
                 let mut conduits = write.open_table(CONDUITS)?;
                 let mut metas = write.open_table(META)?;
+                let (mut log_meta, mut log) = super::log::open_log(&write)?;
+                let mut pending = write.open_table(super::super::state::PENDING_MEMBERS)?;
                 for pair in &pairs {
                     let key = member_key(&pair_key(pair.0, pair.1), kind, &id);
                     if new_pairs.contains(pair) {
@@ -56,13 +55,18 @@ impl Catalog {
                     if write_members(&members, &stored)?.is_empty() {
                         conduits.remove(stored.as_slice())?;
                         remove_meta(&mut metas, &stored)?;
+                        super::log::note_conduit(&mut log_meta, &mut log, &stored, false)?;
                         gone.push(*pair);
                     } else {
                         alive.push(*pair);
                     }
                 }
+                super::super::state::clear_pending(&mut pending, kind, &id)?;
             }
             write.commit()?;
+        }
+        if alive.is_empty() && gone.is_empty() {
+            return Ok(());
         }
         sync_jobs(self, &alive, &gone, now)
     }
@@ -236,10 +240,12 @@ impl Catalog {
             {
                 let mut conduits = write.open_table(CONDUITS)?;
                 let mut metas = write.open_table(META)?;
+                let (mut log_meta, mut log) = super::log::open_log(&write)?;
                 for pair in &gone {
                     let key = pair_key(pair.0, pair.1);
                     conduits.remove(key.as_slice())?;
                     remove_meta(&mut metas, &key)?;
+                    super::log::note_conduit(&mut log_meta, &mut log, &key, false)?;
                 }
             }
             write.commit()?;
@@ -281,9 +287,11 @@ impl Catalog {
                 }
                 let mut conduits = write.open_table(CONDUITS)?;
                 let mut metas = write.open_table(META)?;
+                let (mut log_meta, mut log) = super::log::open_log(&write)?;
                 if body.kept.is_empty() {
                     conduits.remove(pair.as_slice())?;
                     remove_meta(&mut metas, &pair)?;
+                    super::log::note_conduit(&mut log_meta, &mut log, &pair, false)?;
                 } else {
                     let encoded = encode_conduit(
                         body.block,
@@ -293,6 +301,7 @@ impl Catalog {
                     )?;
                     conduits.insert(pair.as_slice(), encoded.as_slice())?;
                     write_meta(&mut metas, &pair, &body.segments)?;
+                    super::log::note_conduit(&mut log_meta, &mut log, &pair, true)?;
                 }
                 false
             }

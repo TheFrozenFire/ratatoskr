@@ -4,12 +4,20 @@ use alloy_primitives::{B256, U256};
 use redb::{Durability, ReadableDatabase, ReadableTable};
 use std::time::{SystemTime, UNIX_EPOCH};
 use store_model::{
-    decode_job, encode_job, priority_of, tick_page_generation, WorkFail, WorkJob,
-    CLASS_NONE, STAGE_IMMUTABLE, STAGE_MUTABLE, STAGE_QUOTE, TICK_PAGE,
+    decode_job, encode_job, priority_of, tick_page_generation, WorkFail, WorkJob, CLASS_NONE,
+    STAGE_IMMUTABLE, STAGE_MUTABLE, STAGE_QUOTE, TICK_PAGE,
 };
 
 use super::super::catalog::Catalog;
 use super::*;
+
+pub(super) const JOB_STAGE: TableDefinition<&[u8], u64> = TableDefinition::new("job_stage");
+
+pub(super) const JOB_ERROR: TableDefinition<&[u8], &[u8]> = TableDefinition::new("job_error");
+
+pub(super) const WORK_META: TableDefinition<&str, u64> = TableDefinition::new("work_meta");
+
+const ACCOUNTS_READY: &str = "job_accounts";
 
 impl Catalog {
     /// Write `jobs` and clear every other stage from immutable through quote
@@ -45,6 +53,9 @@ impl Catalog {
         let jobs = {
             let mut table = write.open_table(JOBS)?;
             let mut ranks = write.open_table(JOB_RANK)?;
+            let mut stages = write.open_table(JOB_STAGE)?;
+            let mut errors = write.open_table(JOB_ERROR)?;
+            let meta = write.open_table(WORK_META)?;
             let mut picked = Vec::new();
             let mut stale = Vec::new();
             let start = rank_key(stage, u64::MAX, 0, &B256::ZERO);
@@ -94,9 +105,15 @@ impl Catalog {
                 ranks.remove(key.as_slice())?;
             }
             let mut jobs = Vec::with_capacity(picked.len());
-            for (key, job) in picked {
-                let bytes = encode_job(&job);
-                table.insert(key.as_slice(), bytes.as_slice())?;
+            for (_key, job) in picked {
+                put_job(
+                    &mut table,
+                    &mut ranks,
+                    &mut stages,
+                    &mut errors,
+                    &meta,
+                    &job,
+                )?;
                 jobs.push(job);
             }
             jobs
@@ -119,8 +136,21 @@ impl Catalog {
         {
             let mut table = write.open_table(JOBS)?;
             let mut ranks = write.open_table(JOB_RANK)?;
+            let mut stages = write.open_table(JOB_STAGE)?;
+            let mut errors = write.open_table(JOB_ERROR)?;
+            let mut meta = write.open_table(WORK_META)?;
+            prepare_state_accounts(&table, &mut stages, &mut errors, &mut meta)?;
             for (stage, kind, id) in done {
-                clear_job(&mut table, &mut ranks, *stage, *kind, id)?;
+                clear_job(
+                    &mut table,
+                    &mut ranks,
+                    &mut stages,
+                    &mut errors,
+                    &meta,
+                    *stage,
+                    *kind,
+                    id,
+                )?;
             }
             for fail in failed {
                 let key = job_key(fail.stage, fail.kind, &fail.id);
@@ -132,7 +162,14 @@ impl Catalog {
                 job.lease_until = 0;
                 job.not_before = fail.not_before;
                 job.error = clip_error(&fail.error);
-                put_job(&mut table, &mut ranks, &job)?;
+                put_job(
+                    &mut table,
+                    &mut ranks,
+                    &mut stages,
+                    &mut errors,
+                    &meta,
+                    &job,
+                )?;
             }
         }
         write.commit()?;
@@ -198,6 +235,10 @@ impl Catalog {
         let written = {
             let mut table = write.open_table(JOBS)?;
             let mut ranks = write.open_table(JOB_RANK)?;
+            let mut stages = write.open_table(JOB_STAGE)?;
+            let mut errors = write.open_table(JOB_ERROR)?;
+            let mut meta = write.open_table(WORK_META)?;
+            prepare_state_accounts(&table, &mut stages, &mut errors, &mut meta)?;
             for (stage, kind, id) in drop {
                 let Some(existing) = load_job(&table, *stage, *kind, id)? else {
                     continue;
@@ -206,7 +247,16 @@ impl Catalog {
                     ensure_rank(&mut ranks, &existing)?;
                     continue;
                 }
-                clear_job(&mut table, &mut ranks, *stage, *kind, id)?;
+                clear_job(
+                    &mut table,
+                    &mut ranks,
+                    &mut stages,
+                    &mut errors,
+                    &meta,
+                    *stage,
+                    *kind,
+                    id,
+                )?;
             }
             let mut written = 0_u64;
             for job in jobs {
@@ -219,7 +269,7 @@ impl Catalog {
                         remove_rank(&mut ranks, &existing)?;
                     }
                 }
-                put_job(&mut table, &mut ranks, job)?;
+                put_job(&mut table, &mut ranks, &mut stages, &mut errors, &meta, job)?;
                 written += 1;
             }
             written
@@ -353,13 +403,18 @@ fn load_job(
 fn put_job(
     jobs: &mut redb::Table<'_, &[u8], &[u8]>,
     ranks: &mut redb::Table<'_, &[u8], &[u8]>,
+    stages: &mut redb::Table<'_, &[u8], u64>,
+    errors: &mut redb::Table<'_, &[u8], &[u8]>,
+    meta: &redb::Table<'_, &str, u64>,
     job: &WorkJob,
 ) -> eyre::Result<()> {
     let key = job_key(job.stage, job.kind, &job.id);
+    let previous = load_job(jobs, job.stage, job.kind, &job.id)?;
     let bytes = encode_job(job);
     jobs.insert(key.as_slice(), bytes.as_slice())?;
     let rank = rank_key(job.stage, job.priority, job.kind, &job.id);
     ranks.insert(rank.as_slice(), &[][..])?;
+    note_state_job(stages, errors, meta, &key, previous.as_ref(), Some(job))?;
     Ok(())
 }
 
@@ -377,9 +432,13 @@ fn ensure_rank(ranks: &mut redb::Table<'_, &[u8], &[u8]>, job: &WorkJob) -> eyre
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn clear_job(
     jobs: &mut redb::Table<'_, &[u8], &[u8]>,
     ranks: &mut redb::Table<'_, &[u8], &[u8]>,
+    stages: &mut redb::Table<'_, &[u8], u64>,
+    errors: &mut redb::Table<'_, &[u8], &[u8]>,
+    meta: &redb::Table<'_, &str, u64>,
     stage: u8,
     kind: u8,
     id: &B256,
@@ -390,6 +449,99 @@ pub(super) fn clear_job(
     };
     if let Ok(job) = decode_job(key.as_slice(), stored.value()) {
         remove_rank(ranks, &job)?;
+        note_state_job(stages, errors, meta, &key, Some(&job), None)?;
+    }
+    Ok(())
+}
+
+pub(super) fn ensure_state_accounts(db: &redb::Database) -> eyre::Result<()> {
+    let read = db.begin_read()?;
+    let ready = match read.open_table(WORK_META) {
+        Ok(meta) => meta.get(ACCOUNTS_READY)?.is_some(),
+        Err(redb::TableError::TableDoesNotExist(_)) => false,
+        Err(err) => return Err(err.into()),
+    };
+    drop(read);
+    if ready {
+        return Ok(());
+    }
+    let mut write = db.begin_write()?;
+    write.set_durability(Durability::Immediate)?;
+    {
+        let jobs = write.open_table(JOBS)?;
+        let mut stages = write.open_table(JOB_STAGE)?;
+        let mut errors = write.open_table(JOB_ERROR)?;
+        let mut meta = write.open_table(WORK_META)?;
+        prepare_state_accounts(&jobs, &mut stages, &mut errors, &mut meta)?;
+    }
+    write.commit()?;
+    Ok(())
+}
+
+fn prepare_state_accounts(
+    jobs: &redb::Table<'_, &[u8], &[u8]>,
+    stages: &mut redb::Table<'_, &[u8], u64>,
+    errors: &mut redb::Table<'_, &[u8], &[u8]>,
+    meta: &mut redb::Table<'_, &str, u64>,
+) -> eyre::Result<()> {
+    if meta.get(ACCOUNTS_READY)?.is_some() {
+        return Ok(());
+    }
+    let mut counts: std::collections::BTreeMap<u8, u64> = std::collections::BTreeMap::new();
+    for item in jobs.iter()? {
+        let (key, value) = item?;
+        let job = decode_job(key.value(), value.value())?;
+        *counts.entry(job.stage).or_default() += 1;
+        if !job.error.is_empty() {
+            errors.insert(key.value(), job.error.as_bytes())?;
+        }
+    }
+    for (stage, count) in counts {
+        stages.insert(stage.to_be_bytes().as_slice(), count)?;
+    }
+    meta.insert(ACCOUNTS_READY, 1)?;
+    Ok(())
+}
+
+fn note_state_job(
+    stages: &mut redb::Table<'_, &[u8], u64>,
+    errors: &mut redb::Table<'_, &[u8], &[u8]>,
+    meta: &redb::Table<'_, &str, u64>,
+    key: &[u8; 34],
+    previous: Option<&WorkJob>,
+    next: Option<&WorkJob>,
+) -> eyre::Result<()> {
+    if meta.get(ACCOUNTS_READY)?.is_none() {
+        return Ok(());
+    }
+    if previous.is_none() {
+        if let Some(job) = next {
+            let stage = job.stage.to_be_bytes();
+            let count = stages
+                .get(stage.as_slice())?
+                .map(|value| value.value())
+                .unwrap_or(0);
+            stages.insert(stage.as_slice(), count.saturating_add(1))?;
+        }
+    }
+    if next.is_none() {
+        if let Some(job) = previous {
+            let stage = job.stage.to_be_bytes();
+            let count = stages
+                .get(stage.as_slice())?
+                .map(|value| value.value())
+                .unwrap_or(0);
+            stages.insert(stage.as_slice(), count.saturating_sub(1))?;
+        }
+    }
+    let old = previous.map(|job| job.error.as_str()).unwrap_or("");
+    let new = next.map(|job| job.error.as_str()).unwrap_or("");
+    if old != new {
+        if new.is_empty() {
+            errors.remove(key.as_slice())?;
+        } else {
+            errors.insert(key.as_slice(), new.as_bytes())?;
+        }
     }
     Ok(())
 }

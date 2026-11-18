@@ -7,6 +7,8 @@ mod summary;
 mod watch;
 mod work;
 
+pub(crate) use curve::clear_pending;
+pub use curve::PendingMember;
 pub use snapshot::PoolCard;
 pub(crate) use work::unix_now;
 
@@ -21,6 +23,13 @@ const MUTABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("mutable");
 const TICK_PAGES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("tick_pages");
 
 const CURVES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("curves");
+
+/// Curve writes whose member retarget has not committed. The value is the
+/// replaced curve, or empty when there was none.
+pub(crate) const PENDING_MEMBERS: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("curve_member_pending");
+
+const MEMBER_FILL: &str = "member_fill";
 
 /// Retired chain-sample table. Deleting a pool identity still removes its row.
 const QUOTES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("quotes");

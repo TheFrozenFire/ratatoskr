@@ -173,10 +173,7 @@ fn spawn_pipelines(
         let spot_settings = loaded.spots.clone();
         tasks.spawn_local(async move {
             let book = store::service::Spots::open_with(&spots_path, spot_cache)?;
-            spot::run(book, stop, spot_settings, move || {
-                spot::conduit_edges(&store)
-            })
-            .await
+            spot::run(book, store, stop, spot_settings).await
         });
     }
     if pipelines.state {

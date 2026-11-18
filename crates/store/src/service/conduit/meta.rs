@@ -136,6 +136,8 @@ impl Catalog {
             let encoded = encode_conduit(1, 1, 0, segments)?;
             let pair = pair_key(token_in, token_out);
             conduits.insert(pair.as_slice(), encoded.as_slice())?;
+            let (mut log_meta, mut log) = super::log::open_log(&write)?;
+            super::log::note_conduit(&mut log_meta, &mut log, &pair, true)?;
         }
         write.commit()?;
         Ok(())

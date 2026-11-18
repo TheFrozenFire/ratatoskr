@@ -9,9 +9,12 @@
 
 mod codec;
 mod job;
+mod log;
 mod member;
 mod meta;
 mod read;
+
+pub use log::{ConduitNote, ConduitTip};
 
 pub(crate) use job::account_jobs;
 pub(crate) use meta::each_meta;

@@ -171,6 +171,25 @@ impl LocalStore {
     ) -> eyre::Result<()> {
         self.catalog_db()?.visit_conduit_blocks(visit)
     }
+
+    pub fn conduit_log_tip(&self) -> eyre::Result<service::ConduitTip> {
+        self.catalog_db()?.conduit_log_tip()
+    }
+
+    pub fn conduit_log_since(
+        &self,
+        after: u64,
+    ) -> eyre::Result<(Vec<service::ConduitNote>, service::ConduitTip)> {
+        self.catalog_db()?.conduit_log_since(after)
+    }
+
+    pub fn clear_conduit_log(&self) -> eyre::Result<()> {
+        self.catalog_db()?.clear_conduit_log()
+    }
+
+    pub fn trim_conduit_log(&self, before: u64) -> eyre::Result<()> {
+        self.catalog_db()?.trim_conduit_log(before)
+    }
 }
 
 fn open_corpus(mode: CorpusOpen<'_>, cache: usize) -> eyre::Result<Corpus> {

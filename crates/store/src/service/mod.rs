@@ -24,8 +24,8 @@ pub use catalog::{
     write_fill_ids, Catalog, DiscoveryRead, EntityRead, FillReport, SampleReport,
 };
 pub use conduit::{
-    ConduitBody, ConduitMember, ConduitMeta, ConduitRow, CurvePage, CurveRow, MemberTarget,
-    StoredConduit,
+    ConduitBody, ConduitMember, ConduitMeta, ConduitNote, ConduitRow, ConduitTip, CurvePage,
+    CurveRow, MemberTarget, StoredConduit,
 };
 pub use corpus::Corpus;
 pub use feeds::Error as FeedError;
@@ -38,5 +38,5 @@ pub use query::{ConduitPoint, ConduitRead, ConduitScan, Snapshot, TokenRows, Ven
 pub use shelf::Shelf;
 pub use spots::Error as SpotError;
 pub use spots::{SpotRead, Spots};
-pub use state::PoolCard;
+pub use state::{PendingMember, PoolCard};
 pub use work_read::WorkRead;
