@@ -151,6 +151,7 @@ mod tests {
     struct Files {
         corpus: Corpus,
         catalog: crate::Catalog,
+        puts: Arc<AtomicUsize>,
     }
 
     impl CorpusStore for Files {
@@ -158,6 +159,7 @@ mod tests {
             self.corpus.read_block(number)
         }
         async fn put_blocks(&self, records: &[BlockRecord]) -> eyre::Result<u64> {
+            self.puts.fetch_add(1, Ordering::Relaxed);
             self.corpus.put_blocks(records)
         }
         async fn write_records(&self, _: &str, _: &[BlockRecord]) -> eyre::Result<u64> {
@@ -354,6 +356,7 @@ mod tests {
                 crate::install_catalog_hooks();
                 crate::Catalog::open(&dir.0.join("venues.redb")).unwrap()
             },
+            puts: Arc::new(AtomicUsize::new(0)),
         };
         let era_calls = Arc::new(AtomicUsize::new(0));
         let peer_calls = Arc::new(AtomicUsize::new(0));
@@ -426,5 +429,46 @@ mod tests {
         .unwrap();
         assert_eq!(era_calls.load(Ordering::Relaxed), 1);
         assert_eq!(peer_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn fresh_receipts_share_one_corpus_commit_until_the_span_boundary() {
+        let dir = TempDir::new();
+        let puts = Arc::new(AtomicUsize::new(0));
+        let store = Files {
+            corpus: Corpus::create(&dir.0.join("corpus.redb")).unwrap(),
+            catalog: {
+                crate::install_catalog_hooks();
+                crate::Catalog::open(&dir.0.join("venues.redb")).unwrap()
+            },
+            puts: Arc::clone(&puts),
+        };
+        let peer = FakePeer {
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let start = MERGE_BLOCK;
+        let hits: Vec<u64> = (start..start + 4).collect();
+        let limits = config::Venues {
+            chunk_max: 1,
+            commit_spans: 4,
+            ..config::Venues::default()
+        };
+        fetch_peer(
+            &store,
+            &peer,
+            &pending("peer-batch", start),
+            &hits,
+            start + 4,
+            &stop(),
+            &limits,
+        )
+        .await
+        .unwrap();
+        assert_eq!(puts.load(Ordering::Relaxed), 1);
+        for number in hits {
+            let stored = store.read_block(number).await.unwrap().unwrap();
+            assert_eq!(stored.number, number);
+            assert!(!stored.receipts_zstd.is_empty());
+        }
     }
 }

@@ -3,6 +3,8 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
+use eyre::WrapErr;
+
 use super::scan::PendingJob;
 use crate::catalog::Put;
 use crate::logs::{Walk, MERGE_BLOCK};
@@ -35,6 +37,7 @@ where
     let mut pending: BTreeMap<u64, tokio::task::JoinHandle<Result<SpanOut, AskFail>>> =
         BTreeMap::new();
     let mut rows = Vec::new();
+    let mut fresh = Vec::new();
     let mut since_commit = 0_usize;
     let mut cursor = job.at.max(MERGE_BLOCK);
     let started = Instant::now();
@@ -43,6 +46,7 @@ where
     loop {
         if crate::hold_for_pause(stop).await {
             abort(&mut pending);
+            flush_bodies(store, &mut fresh).await?;
             commit_rows(store, &job.job.name, cursor, &rows).await?;
             return Ok(Walk::Stopped {
                 at: cursor,
@@ -58,6 +62,7 @@ where
                 Ok(cached) => cached,
                 Err(fail) => {
                     abort(&mut pending);
+                    flush_bodies(store, &mut fresh).await?;
                     commit_rows(store, &job.job.name, cursor, &rows).await?;
                     return Ok(stop_ask(cursor, fail));
                 }
@@ -79,11 +84,13 @@ where
             Ok(Ok(span)) => span,
             Ok(Err(fail)) => {
                 abort(&mut pending);
+                flush_bodies(store, &mut fresh).await?;
                 commit_rows(store, &job.job.name, cursor, &rows).await?;
                 return Ok(stop_ask(cursor, fail));
             }
             Err(err) => {
                 abort(&mut pending);
+                flush_bodies(store, &mut fresh).await?;
                 commit_rows(store, &job.job.name, cursor, &rows).await?;
                 return Ok(Walk::Stopped {
                     at: cursor,
@@ -93,23 +100,21 @@ where
         };
         if span.got == 0 {
             abort(&mut pending);
+            flush_bodies(store, &mut fresh).await?;
             commit_rows(store, &job.job.name, cursor, &rows).await?;
             return Ok(Walk::Stopped {
                 at: cursor,
                 reason: format!("chunk {start} returned no receipts"),
             });
         }
-        if let Err(err) = store.put_blocks(&span.fresh).await {
-            abort(&mut pending);
-            commit_rows(store, &job.job.name, cursor, &rows).await?;
-            return Err(err.wrap_err("cache receipts"));
-        }
         from_cache += span.got.saturating_sub(span.fresh.len() as u64);
+        fresh.extend(span.fresh);
         rows.extend(span.rows);
         fetched += span.got;
         cursor = start + span.got;
         since_commit += 1;
         if span.got < span.asked || since_commit >= limits.commit_spans {
+            flush_bodies(store, &mut fresh).await?;
             let wrote = commit_rows(store, &job.job.name, cursor, &rows).await?;
             rows.clear();
             since_commit = 0;
@@ -135,9 +140,20 @@ where
             });
         }
     }
+    flush_bodies(store, &mut fresh).await?;
     commit_rows(store, &job.job.name, end, &rows).await?;
     observability::info!(job = %job.job.name, at = end, fetched, cached = from_cache, "history caught up");
     Ok(Walk::Done)
+}
+
+/// Store receipt bodies before the discovery cursor moves past them.
+async fn flush_bodies<S: CorpusStore>(store: &S, fresh: &mut Vec<BlockRecord>) -> eyre::Result<()> {
+    if fresh.is_empty() {
+        return Ok(());
+    }
+    store.put_blocks(fresh).await.wrap_err("cache receipts")?;
+    fresh.clear();
+    Ok(())
 }
 
 async fn commit_rows<S: DiscoveryStore>(
