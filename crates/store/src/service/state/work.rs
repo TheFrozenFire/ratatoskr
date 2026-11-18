@@ -466,6 +466,7 @@ pub(super) fn ensure_state_accounts(db: &redb::Database) -> eyre::Result<()> {
         return Ok(());
     }
     let mut write = db.begin_write()?;
+    write.set_quick_repair(true);
     write.set_durability(Durability::Immediate)?;
     {
         let jobs = write.open_table(JOBS)?;
