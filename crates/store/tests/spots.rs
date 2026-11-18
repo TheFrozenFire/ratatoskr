@@ -73,3 +73,25 @@ fn a_pass_replaces_the_spots_and_leaves_the_answer_table_absent() {
     drop(db);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn an_unchanged_pass_leaves_the_spot_file_and_an_edit_reads_back() {
+    let dir = temp_dir("diff");
+    let path = dir.join("spots.redb");
+    let kept = spot(1, 2, 9);
+    let gone = spot(3, 2, 4);
+    let book = Spots::open(&path).unwrap();
+    book.replace(&[gone.clone(), kept.clone()]).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    book.replace(&[kept.clone(), gone.clone()]).unwrap();
+    let after = std::fs::read(&path).unwrap();
+    assert_eq!(after.len(), before.len());
+    assert!(after == before, "an unchanged pass rewrote the spot file");
+    let mut edited = kept.clone();
+    edited.bought = BigInt::from(11);
+    let added = spot(4, 2, 5);
+    book.replace(&[edited.clone(), added.clone()]).unwrap();
+    assert_eq!(book.read().unwrap(), vec![edited, added]);
+    drop(book);
+    let _ = std::fs::remove_dir_all(&dir);
+}

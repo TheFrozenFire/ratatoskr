@@ -1,6 +1,6 @@
 //! `spots.redb`. One row is one token in one numeraire.
 //!
-//! A pass replaces the table, so a token that lost its route is gone. The
+//! A pass writes the rows that changed, so a token that lost its route is gone. The
 //! table is not the feed answer table, and this file is not `feeds.redb`.
 
 mod pass;
