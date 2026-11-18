@@ -22,10 +22,11 @@ peer.workspace = true
 pipeline.workspace = true
 ratatui = "0.29"
 serde_json.workspace = true
+signal-hook = "0.3"
 store.workspace = true
 survey.workspace = true
 store-model.workspace = true
-tokio = { workspace = true, features = ["signal"] }
+tokio.workspace = true
 venue.workspace = true
 oracle.workspace = true
 spot.workspace = true

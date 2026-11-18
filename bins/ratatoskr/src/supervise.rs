@@ -6,12 +6,19 @@ use crate::sampler::spawn_sampler;
 use peer::LocalPeer;
 use pipeline::{HeaderSource, Source, StoreSink, VenueSource};
 use std::path::PathBuf;
+use std::time::Duration;
 use store::LocalStore;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use venue::{RunOpts, RunPhase};
 
+/// Blocking reads do not observe the stop flag. The process exits if they
+/// are still running when this elapses. A second interrupt exits at once.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
 pub(crate) async fn supervise(args: Args, loaded: config::Config) -> eyre::Result<()> {
+    let (stop_tx, stop_rx) = watch::channel(false);
+    install_signals(stop_tx.clone())?;
     let metrics = args
         .metrics
         .clone()
@@ -49,19 +56,6 @@ pub(crate) async fn supervise(args: Args, loaded: config::Config) -> eyre::Resul
         )?),
         None => None,
     };
-    let (stop_tx, stop_rx) = watch::channel(false);
-    let signal_tx = stop_tx.clone();
-    tokio::spawn(async move {
-        if let Err(err) = shutdown_signal().await {
-            observability::error!(%err, "shutdown signal");
-        }
-        let _ = signal_tx.send(true);
-    });
-    tokio::spawn(async move {
-        if let Err(err) = pause_signal().await {
-            observability::error!(%err, "pause signal");
-        }
-    });
     let peer_task = prepared.map(|prepared| {
         let stop = stop_rx.clone();
         tokio::spawn(async move { peer::run(prepared, stop).await })
@@ -117,6 +111,7 @@ pub(crate) async fn supervise(args: Args, loaded: config::Config) -> eyre::Resul
         match task.await {
             Ok(Ok(())) => {}
             Ok(Err(err)) => note_failure(&mut failed, err),
+            Err(err) if err.is_cancelled() => {}
             Err(err) => note_failure(&mut failed, eyre::eyre!("peer task: {err}")),
         }
     }
@@ -217,6 +212,12 @@ async fn wait_for_stop(
 ) -> Option<eyre::Report> {
     let mut failed = None;
     loop {
+        if *stop_rx.borrow() {
+            tasks.abort_all();
+            if let Some(task) = peer_task.as_ref() {
+                task.abort();
+            }
+        }
         if tasks.is_empty() && *stop_rx.borrow() {
             break;
         }
@@ -238,6 +239,7 @@ async fn wait_for_stop(
                         }
                         let _ = stop_tx.send(true);
                     }
+                    Some(Err(err)) if err.is_cancelled() && *stop_rx.borrow() => {}
                     Some(Err(err)) => {
                         let err = eyre::eyre!("pipeline task: {err}");
                         observability::error!(%err, "pipeline task");
@@ -268,6 +270,7 @@ async fn wait_for_stop(
                         }
                         let _ = stop_tx.send(true);
                     }
+                    Err(err) if err.is_cancelled() && *stop_rx.borrow() => {}
                     Err(err) => {
                         let err = eyre::eyre!("peer maintain: {err}");
                         observability::error!(%err, "peer task");
@@ -279,8 +282,11 @@ async fn wait_for_stop(
                 }
             }
             changed = stop_rx.changed(), if !*stop_rx.borrow() => {
-                if changed.is_err() {
-                    let _ = stop_tx.send(true);
+                if changed.is_err() || *stop_rx.borrow() {
+                    tasks.abort_all();
+                    if let Some(task) = peer_task.as_ref() {
+                        task.abort();
+                    }
                 }
             }
         }
@@ -288,25 +294,92 @@ async fn wait_for_stop(
     failed
 }
 
-async fn shutdown_signal() -> eyre::Result<()> {
-    use tokio::signal::unix::{signal, SignalKind};
-    let mut interrupt = signal(SignalKind::interrupt())?;
-    let mut terminate = signal(SignalKind::terminate())?;
-    tokio::select! {
-        _ = interrupt.recv() => {}
-        _ = terminate.recv() => {}
-    }
+fn install_signals(stop: watch::Sender<bool>) -> eyre::Result<()> {
+    use signal_hook::consts::signal::{SIGINT, SIGTERM, SIGUSR1, SIGUSR2};
+    use signal_hook::iterator::Signals;
+
+    let mut signals = Signals::new([SIGINT, SIGTERM, SIGUSR1, SIGUSR2])?;
+    std::thread::Builder::new()
+        .name("signals".into())
+        .spawn(move || {
+            let mut shutting_down = false;
+            for signal in signals.forever() {
+                match signal_action(signal, shutting_down) {
+                    SignalAction::Shutdown => {
+                        shutting_down = true;
+                        observability::info!(signal, "shutdown");
+                        let _ = stop.send(true);
+                        let code = exit_code(signal);
+                        if std::thread::Builder::new()
+                            .name("shutdown".into())
+                            .spawn(move || {
+                                std::thread::sleep(SHUTDOWN_GRACE);
+                                eprintln!("ratatoskr: shutdown did not finish, exiting");
+                                std::process::exit(code);
+                            })
+                            .is_err()
+                        {
+                            eprintln!("ratatoskr: shutdown did not finish, exiting");
+                            std::process::exit(code);
+                        }
+                    }
+                    SignalAction::Exit => {
+                        eprintln!("ratatoskr: second shutdown signal, exiting");
+                        std::process::exit(exit_code(signal));
+                    }
+                    SignalAction::Pause => venue::pause_work(),
+                    SignalAction::Resume => venue::resume_work(),
+                    SignalAction::Ignore => {}
+                }
+            }
+        })
+        .map_err(|err| eyre::eyre!("signal thread: {err}"))?;
     Ok(())
 }
 
-async fn pause_signal() -> eyre::Result<()> {
-    use tokio::signal::unix::{signal, SignalKind};
-    let mut pause = signal(SignalKind::user_defined1())?;
-    let mut resume = signal(SignalKind::user_defined2())?;
-    loop {
-        tokio::select! {
-            _ = pause.recv() => venue::pause_work(),
-            _ = resume.recv() => venue::resume_work(),
-        }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SignalAction {
+    Shutdown,
+    Exit,
+    Pause,
+    Resume,
+    Ignore,
+}
+
+fn signal_action(signal: i32, shutting_down: bool) -> SignalAction {
+    use signal_hook::consts::signal::{SIGINT, SIGTERM, SIGUSR1, SIGUSR2};
+    match signal {
+        SIGINT | SIGTERM if shutting_down => SignalAction::Exit,
+        SIGINT | SIGTERM => SignalAction::Shutdown,
+        SIGUSR1 => SignalAction::Pause,
+        SIGUSR2 => SignalAction::Resume,
+        _ => SignalAction::Ignore,
+    }
+}
+
+fn exit_code(signal: i32) -> i32 {
+    128 + signal
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{exit_code, signal_action, SignalAction};
+    use signal_hook::consts::signal::{SIGINT, SIGTERM, SIGUSR1, SIGUSR2};
+
+    #[test]
+    fn the_first_interrupt_asks_the_process_to_stop_and_the_second_exits() {
+        assert_eq!(signal_action(SIGINT, false), SignalAction::Shutdown);
+        assert_eq!(signal_action(SIGTERM, false), SignalAction::Shutdown);
+        assert_eq!(signal_action(SIGINT, true), SignalAction::Exit);
+        assert_eq!(signal_action(SIGTERM, true), SignalAction::Exit);
+        assert_eq!(exit_code(SIGINT), 130);
+        assert_eq!(exit_code(SIGTERM), 143);
+    }
+
+    #[test]
+    fn user_signals_pause_and_resume_work() {
+        assert_eq!(signal_action(SIGUSR1, false), SignalAction::Pause);
+        assert_eq!(signal_action(SIGUSR2, false), SignalAction::Resume);
+        assert_eq!(signal_action(SIGUSR1, true), SignalAction::Pause);
     }
 }
