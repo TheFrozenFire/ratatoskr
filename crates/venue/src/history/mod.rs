@@ -174,6 +174,7 @@ mod tests {
         }
         async fn for_each_block(
             &self,
+            _: u64,
             _: &mut dyn FnMut(u64, &[u8]) -> eyre::Result<()>,
         ) -> eyre::Result<()> {
             Err(eyre::eyre!("unused"))

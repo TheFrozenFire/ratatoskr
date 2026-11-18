@@ -306,7 +306,7 @@ mod tests {
         assert_eq!(store.meta("cursor-range").await.unwrap(), Some(3));
         let mut seen = Vec::new();
         store
-            .for_each_block(&mut |number, bytes| {
+            .for_each_block(0, &mut |number, bytes| {
                 seen.push((number, bytes.to_vec()));
                 Ok(())
             })
@@ -430,7 +430,7 @@ mod tests {
         let store = open(&dir.0);
         let mut seen = 0_u64;
         store
-            .for_each_block(&mut |_number, _bytes| {
+            .for_each_block(0, &mut |_number, _bytes| {
                 seen += 1;
                 Ok(())
             })
@@ -487,13 +487,50 @@ mod tests {
             .unwrap();
         let mut numbers = Vec::new();
         store
-            .for_each_block(&mut |number, _bytes| {
+            .for_each_block(0, &mut |number, _bytes| {
                 numbers.push(number);
                 Ok(())
             })
             .await
             .unwrap();
         assert_eq!(numbers, vec![1, 2, 4]);
+    }
+
+    #[tokio::test]
+    async fn a_block_walk_from_a_later_block_does_not_visit_earlier_ones() {
+        let dir = TempDir::new();
+        let store = open(&dir.0);
+        store
+            .write_records("cursor-range", &[block(1), block(2), block(4)])
+            .await
+            .unwrap();
+        let mut numbers = Vec::new();
+        store
+            .for_each_block(4, &mut |number, _bytes| {
+                numbers.push(number);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(numbers, vec![4]);
+        numbers.clear();
+        store
+            .for_each_block(3, &mut |number, _bytes| {
+                numbers.push(number);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(numbers, vec![4]);
+        numbers.clear();
+        store
+            .for_each_block(5, &mut |number, _bytes| {
+                numbers.push(number);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(numbers.is_empty());
     }
 
     #[tokio::test]

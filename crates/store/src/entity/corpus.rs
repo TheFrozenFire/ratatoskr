@@ -12,8 +12,10 @@ pub trait CorpusStore: Send + Sync {
     async fn write_hole(&self, number: u64) -> eyre::Result<()>;
     async fn meta(&self, key: &str) -> eyre::Result<Option<u64>>;
     async fn put_meta(&self, key: &str, value: u64) -> eyre::Result<()>;
+    /// Visit stored blocks numbered at least `from`, in order.
     async fn for_each_block(
         &self,
+        from: u64,
         visit: &mut dyn FnMut(u64, &[u8]) -> eyre::Result<()>,
     ) -> eyre::Result<()>;
 }
@@ -56,9 +58,10 @@ impl CorpusStore for LocalStore {
 
     async fn for_each_block(
         &self,
+        from: u64,
         visit: &mut dyn FnMut(u64, &[u8]) -> eyre::Result<()>,
     ) -> eyre::Result<()> {
-        let mut from = 0_u64;
+        let mut from = from;
         loop {
             let corpus = self.corpus_db()?;
             let start = from;
