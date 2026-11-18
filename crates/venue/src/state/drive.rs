@@ -4,6 +4,7 @@
 //! at one block for the whole run.
 
 use super::*;
+use alloy_primitives::B256;
 
 /// One pass of the state pipeline. The caller loops until shutdown.
 ///
@@ -214,13 +215,14 @@ where
     let mut done = Vec::new();
     let mut again = Vec::new();
     let mut failed = Vec::new();
+    let mut bodies = Vec::new();
+    let mut built = Vec::new();
     for job in &jobs {
-        match crate::conduit::build_conduit_store(store, job.token_in, job.token_out).await {
-            Ok(true) => {
-                again.push((job.token_in, job.token_out));
-                done.push((job.token_in, job.token_out));
+        match crate::conduit::conduit_body(store, job.token_in, job.token_out).await {
+            Ok(body) => {
+                bodies.push(body);
+                built.push((job.token_in, job.token_out));
             }
-            Ok(false) => done.push((job.token_in, job.token_out)),
             Err(err) => {
                 let error = chain::rpc::redact_secret(&err.to_string());
                 if give_up_after > 0 && job.attempt >= give_up_after {
@@ -256,6 +258,13 @@ where
             }
         }
     }
+    let flags = store.store_conduits(&bodies).await?;
+    for (pair, again_flag) in built.into_iter().zip(flags) {
+        if again_flag {
+            again.push(pair);
+        }
+        done.push(pair);
+    }
     store.finish_conduits(&done, &again, &failed).await?;
     let ms = started.elapsed().as_millis() as u64;
     observability::record_batch(STAGE_CONDUIT, count, ms);
@@ -289,6 +298,15 @@ async fn run_stage<S: VenueStore + ConduitStore>(
     observability::info!(stage, jobs = count, ms, "state batch");
     result?;
     Ok(notes)
+}
+
+struct PreparedFollow {
+    write: store::service::FollowWrite,
+    job: Option<WorkJob>,
+    derive: bool,
+    priority: u64,
+    kind: u8,
+    id: B256,
 }
 
 async fn drive_details<S: VenueStore + ConduitStore>(
@@ -347,6 +365,7 @@ async fn drive_details<S: VenueStore + ConduitStore>(
     if loaded.len() != rows.len() {
         return Err(eyre::eyre!("detail lens row count"));
     }
+    let mut prepared = Vec::new();
     for (row, detail) in rows.iter().zip(loaded) {
         if detail_flags(&detail) & FLAG_FAILED != 0 {
             let fallback = blank_job(stage, row.kind, row.id);
@@ -371,26 +390,24 @@ async fn drive_details<S: VenueStore + ConduitStore>(
             }
         };
         mutable.block = block;
-        if stage == STAGE_IMMUTABLE {
-            store
-                .put_immutable(&[ImmutableRow {
-                    kind: row.kind,
-                    id: row.id,
-                    body: immutable,
-                }])
-                .await?;
+        let state = store.read_state(row.kind, row.id).await?;
+        let immutable_row = if stage == STAGE_IMMUTABLE {
             mutable.class = CLASS_NONE;
+            Some(ImmutableRow {
+                kind: row.kind,
+                id: row.id,
+                body: immutable,
+            })
         } else {
-            let state = store.read_state(row.kind, row.id).await?;
             mutable.class = state.dirty.map(|dirty| dirty.class).unwrap_or(CLASS_HEAD);
-        }
-        let stored = crate::conduit::commit_mutable_store(store, &mutable).await?;
+            None
+        };
+        let stamp = store_model::snapshot_stamp(state.mutable.as_ref(), &mutable);
         let mut detail = detail;
         let mut book_ready = mutable.tick_count == 0 || !concentrated_kind(row.kind);
-        if stored.kept_ticks {
-            let fresh = store.read_state(row.kind, row.id).await?;
+        if stamp.kept_ticks {
             if let PoolDetail::Concentrated(pool) = &mut detail {
-                pool.ticks = fresh.ticks;
+                pool.ticks = state.ticks.clone();
             }
             book_ready = true;
         }
@@ -399,36 +416,56 @@ async fn drive_details<S: VenueStore + ConduitStore>(
             id: row.id,
             detail: &detail,
             class: mutable.class,
-            bitmap_changed: stored.bitmap_changed && !stored.kept_ticks,
+            bitmap_changed: stamp.bitmap_changed && !stamp.kept_ticks,
             truncated: mutable.truncated,
             tick_count: mutable.tick_count,
-            generation: stored.generation,
+            generation: stamp.generation,
             watched: stage == STAGE_MUTABLE,
             book_ready,
         });
-        if plan.derive {
-            match curve_for_snapshot(&detail, stored.generation) {
-                Ok(curve) => {
-                    if crate::conduit::commit_curve_store(store, &curve)
-                        .await
-                        .is_err()
-                    {
-                        let mut job = curve_job(row.kind, row.id, stored.generation);
-                        job.priority = plan.priority;
-                        follow.push(job);
-                    }
-                }
-                Err(_) => {
-                    let mut job = curve_job(row.kind, row.id, stored.generation);
-                    job.priority = plan.priority;
-                    follow.push(job);
-                }
+        let curve = if plan.derive {
+            curve_for_snapshot(&detail, stamp.generation).ok()
+        } else {
+            None
+        };
+        let retired_pairs = state
+            .curve
+            .as_ref()
+            .map(crate::conduit::priced_pairs)
+            .unwrap_or_default();
+        let pairs = curve
+            .as_ref()
+            .map(crate::conduit::priced_pairs)
+            .unwrap_or_default();
+        prepared.push(PreparedFollow {
+            write: store::service::FollowWrite {
+                immutable: immutable_row,
+                mutable,
+                curve,
+                retired_pairs,
+                pairs,
+            },
+            job: plan.job,
+            derive: plan.derive,
+            priority: plan.priority,
+            kind: row.kind,
+            id: row.id,
+        });
+    }
+    if !prepared.is_empty() {
+        let writes: Vec<_> = prepared.iter().map(|item| item.write.clone()).collect();
+        let stored = store.write_follow(&writes).await?;
+        for (item, result) in prepared.iter().zip(stored) {
+            if item.derive && !result.curve_written {
+                let mut job = curve_job(item.kind, item.id, result.stored.generation);
+                job.priority = item.priority;
+                follow.push(job);
             }
+            if let Some(job) = item.job.clone() {
+                follow.push(job);
+            }
+            done.push((stage, item.kind, item.id));
         }
-        if let Some(job) = plan.job {
-            follow.push(job);
-        }
-        done.push((stage, row.kind, row.id));
     }
     store.enqueue_work(&follow, unix_now()).await?;
     store.finish_work(&done, &failed).await?;
@@ -491,10 +528,11 @@ async fn drive_ticks<S: VenueStore + ConduitStore>(
         requests.push(tick_request(&pool, ticks[start..end].to_vec()));
         metas.push((
             job.clone(),
-            mutable.generation,
+            mutable.book,
             mutable.block,
             page,
             end < ticks.len(),
+            mutable.generation,
         ));
     }
     if requests.is_empty() {
@@ -537,7 +575,7 @@ async fn drive_ticks<S: VenueStore + ConduitStore>(
             failed_by_index[index] = loaded.failed[slot];
         }
     }
-    for (index, (job, generation, _block, page, more)) in metas.into_iter().enumerate() {
+    for (index, (job, book, _block, page, more, generation)) in metas.into_iter().enumerate() {
         let words = std::mem::take(&mut words_by_index[index]);
         if let Some(error) = errors_by_index[index].clone() {
             keep_or_drop(&job, error, give_up_after, &mut done, &mut failed, notes);
@@ -571,7 +609,7 @@ async fn drive_ticks<S: VenueStore + ConduitStore>(
                 kind: job.kind,
                 id: job.id,
                 page,
-                generation,
+                generation: book,
                 ticks,
             }])
             .await?;

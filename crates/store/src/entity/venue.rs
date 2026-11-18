@@ -1,5 +1,6 @@
 //! Venue identity, work, pool state, and the watch.
 
+use crate::service::{FollowStored, FollowWrite};
 use alloy_primitives::B256;
 use store_model::{
     CurveRecord, ImmutablePut, ImmutableRow, MutableStored, MutableWrite, PoolState, TickPage,
@@ -40,6 +41,7 @@ pub trait VenueStore: Send + Sync {
     async fn enqueue_work(&self, jobs: &[WorkJob], now: u64) -> eyre::Result<()>;
     async fn put_immutable(&self, rows: &[ImmutableRow]) -> eyre::Result<Vec<ImmutablePut>>;
     async fn put_mutable(&self, row: &MutableWrite) -> eyre::Result<MutableStored>;
+    async fn write_follow(&self, pools: &[FollowWrite]) -> eyre::Result<Vec<FollowStored>>;
     async fn put_tick_pages(&self, pages: &[TickPage]) -> eyre::Result<()>;
     async fn put_curve(&self, curve: &CurveRecord) -> eyre::Result<Option<CurveRecord>>;
     async fn read_state(&self, kind: u8, id: B256) -> eyre::Result<PoolState>;
@@ -125,6 +127,12 @@ impl VenueStore for LocalStore {
         let catalog = self.catalog_db()?;
         let row = row.clone();
         blocking(move || catalog.put_mutable(&row)).await
+    }
+
+    async fn write_follow(&self, pools: &[FollowWrite]) -> eyre::Result<Vec<FollowStored>> {
+        let catalog = self.catalog_db()?;
+        let pools = pools.to_vec();
+        blocking(move || catalog.write_follow(&pools)).await
     }
 
     async fn put_tick_pages(&self, pages: &[TickPage]) -> eyre::Result<()> {

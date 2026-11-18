@@ -38,5 +38,5 @@ pub use query::{ConduitPoint, ConduitRead, ConduitScan, Snapshot, TokenRows, Ven
 pub use shelf::Shelf;
 pub use spots::Error as SpotError;
 pub use spots::{SpotRead, Spots};
-pub use state::{PendingMember, PoolCard};
+pub use state::{FollowStored, FollowWrite, PendingMember, PoolCard};
 pub use work_read::WorkRead;

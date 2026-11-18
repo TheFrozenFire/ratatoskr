@@ -9,7 +9,8 @@ mod work;
 
 pub(crate) use curve::clear_pending;
 pub use curve::PendingMember;
-pub use snapshot::PoolCard;
+pub(crate) use snapshot::{write_curve_in, write_immutable_in, write_mutable_in};
+pub use snapshot::{FollowStored, FollowWrite, PoolCard};
 pub(crate) use work::unix_now;
 
 use alloy_primitives::B256;

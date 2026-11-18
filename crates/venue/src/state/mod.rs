@@ -51,9 +51,9 @@ pub use self::codec::{join_detail, split_detail};
 #[cfg(test)]
 use self::codec::{push_i32, push_u32, push_u64, push_u8};
 pub use self::drive::run;
-use self::follow::{after_book, follow_for_detail, FollowInput};
 pub use self::follow::curve_for_snapshot;
 pub(crate) use self::follow::keep_or_drop;
+use self::follow::{after_book, follow_for_detail, FollowInput};
 pub use self::follow::{plan_follow_up, Plan};
 pub use self::refresh::{refresh_kinds, RefreshReport};
 pub use self::watch::classify_log;
@@ -513,6 +513,66 @@ mod tests {
         let changed = crate::conduit::commit_mutable(&catalog, &write).unwrap();
         assert!(changed.bitmap_changed);
         assert!(catalog.read_state(UNI_V3, id).unwrap().ticks.is_empty());
+    }
+
+    #[test]
+    fn a_head_refresh_leaves_tick_pages_at_their_book_generation() {
+        let (_dir, catalog) = open();
+        let id = row(7).id;
+        let bitmap = B256::repeat_byte(1);
+        let mut write = MutableWrite {
+            kind: UNI_V3,
+            id,
+            block: 3,
+            class: CLASS_NONE,
+            bitmap,
+            tick_count: 1,
+            truncated: false,
+            next_scan: None,
+            body: b"bitmap".to_vec(),
+        };
+        let first = crate::conduit::commit_mutable(&catalog, &write).unwrap();
+        catalog
+            .put_tick_pages(&[TickPage {
+                kind: UNI_V3,
+                id,
+                page: 0,
+                generation: first.generation,
+                ticks: vec![TickWord {
+                    tick: 60,
+                    liquidity_gross: 5,
+                    liquidity_net: 5,
+                }],
+            }])
+            .unwrap();
+        write.block = 4;
+        write.class = CLASS_HEAD;
+        let head = crate::conduit::commit_mutable(&catalog, &write).unwrap();
+        assert!(head.kept_ticks);
+        let view = catalog.read_state(UNI_V3, id).unwrap().mutable.unwrap();
+        assert_eq!(view.book, first.generation);
+        assert_ne!(view.generation, view.book);
+        assert_eq!(
+            catalog
+                .first_missing_tick_page(UNI_V3, id, view.book, view.tick_count)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            catalog
+                .first_missing_tick_page(UNI_V3, id, view.generation, view.tick_count)
+                .unwrap(),
+            0
+        );
+        assert!(catalog
+            .put_tick_pages(&[TickPage {
+                kind: UNI_V3,
+                id,
+                page: 1,
+                generation: view.generation,
+                ticks: Vec::new(),
+            }])
+            .is_err());
     }
 
     #[test]

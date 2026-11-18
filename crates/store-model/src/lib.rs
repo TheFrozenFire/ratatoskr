@@ -39,11 +39,11 @@ pub use conduit::{decode_conduit_job, encode_conduit_job, ConduitFail, ConduitJo
 pub use state::{
     decode_curve_record, decode_dirty, decode_job, decode_mutable, decode_mutable_parts,
     decode_tick_words, encode_curve, encode_dirty, encode_job, encode_mutable, encode_tick_page,
-    priority_of, tick_page_generation, CurveRecord, Dirty, ImmutablePut, ImmutableRow,
-    MutableStored, MutableView, MutableWrite, PoolState, StateSummary, TickPage, WatchHit,
-    WorkFail, WorkJob, CLASS_HEAD, CLASS_NONE, CLASS_TICKS, CURVE_VERSION, DIRTY_BAND,
-    STAGE_CONDUIT, STAGE_CURVE, STAGE_IMMUTABLE, STAGE_MUTABLE, STAGE_QUOTE, STAGE_TICKS,
-    TICK_PAGE,
+    priority_of, snapshot_stamp, tick_page_generation, CurveRecord, Dirty, ImmutablePut,
+    ImmutableRow, MutableStored, MutableView, MutableWrite, PoolState, SnapshotStamp, StateSummary,
+    TickPage, WatchHit, WorkFail, WorkJob, CLASS_HEAD, CLASS_NONE, CLASS_TICKS, CURVE_VERSION,
+    DIRTY_BAND, STAGE_CONDUIT, STAGE_CURVE, STAGE_IMMUTABLE, STAGE_MUTABLE, STAGE_QUOTE,
+    STAGE_TICKS, TICK_PAGE,
 };
 pub use tick::TickWord;
 pub use venue::{

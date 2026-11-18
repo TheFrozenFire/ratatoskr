@@ -27,6 +27,8 @@ pub trait ConduitStore: Send + Sync {
 
     async fn store_conduit(&self, body: &ConduitBody) -> eyre::Result<bool>;
 
+    async fn store_conduits(&self, bodies: &[ConduitBody]) -> eyre::Result<Vec<bool>>;
+
     async fn apply_retarget(
         &self,
         kind: u8,
@@ -95,6 +97,12 @@ impl ConduitStore for LocalStore {
         let catalog = self.catalog_db()?;
         let body = body.clone();
         blocking(move || catalog.store_conduit(&body)).await
+    }
+
+    async fn store_conduits(&self, bodies: &[ConduitBody]) -> eyre::Result<Vec<bool>> {
+        let catalog = self.catalog_db()?;
+        let bodies = bodies.to_vec();
+        blocking(move || catalog.store_conduits(&bodies)).await
     }
 
     async fn apply_retarget(

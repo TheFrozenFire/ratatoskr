@@ -13,6 +13,11 @@ use super::meta::{remove_meta, write_meta};
 use super::*;
 use super::{ConduitBody, ConduitMember, CurvePage, CurveRow, MemberTarget};
 
+struct PairMove {
+    alive: Vec<(Address, Address)>,
+    gone: Vec<(Address, Address)>,
+}
+
 impl Catalog {
     /// Move one pool's member rows to `new_pairs` and queue every pair that changed.
     pub fn apply_retarget(
@@ -23,53 +28,137 @@ impl Catalog {
         new_pairs: &[(Address, Address)],
         generation: Option<u64>,
     ) -> eyre::Result<()> {
-        let mut pairs = BTreeSet::new();
-        pairs.extend(old_pairs.iter().copied());
-        pairs.extend(new_pairs.iter().copied());
         let now = super::super::state::unix_now();
-        let mut alive = Vec::new();
-        let mut gone = Vec::new();
-        {
+        let moved = {
             let mut write = self.entities.begin_write()?;
             write.set_durability(Durability::Immediate)?;
-            {
-                let mut members = write.open_table(MEMBERS)?;
-                let mut conduits = write.open_table(CONDUITS)?;
-                let mut metas = write.open_table(META)?;
-                let (mut log_meta, mut log) = super::log::open_log(&write)?;
-                let mut pending = write.open_table(super::super::state::PENDING_MEMBERS)?;
-                for pair in &pairs {
-                    let key = member_key(&pair_key(pair.0, pair.1), kind, &id);
-                    if new_pairs.contains(pair) {
-                        let Some(generation) = generation else {
-                            continue;
-                        };
-                        let bytes = generation.to_le_bytes();
-                        members.insert(key.as_slice(), bytes.as_slice())?;
-                    } else {
-                        members.remove(key.as_slice())?;
-                    }
-                }
-                for pair in &pairs {
-                    let stored = pair_key(pair.0, pair.1);
-                    if write_members(&members, &stored)?.is_empty() {
-                        conduits.remove(stored.as_slice())?;
-                        remove_meta(&mut metas, &stored)?;
-                        super::log::note_conduit(&mut log_meta, &mut log, &stored, false)?;
-                        gone.push(*pair);
-                    } else {
-                        alive.push(*pair);
-                    }
-                }
-                super::super::state::clear_pending(&mut pending, kind, &id)?;
-            }
+            let moved = retarget_in(&write, kind, &id, old_pairs, new_pairs, generation)?;
             write.commit()?;
-        }
-        if alive.is_empty() && gone.is_empty() {
+            moved
+        };
+        if moved.alive.is_empty() && moved.gone.is_empty() {
             return Ok(());
         }
-        sync_jobs(self, &alive, &gone, now)
+        sync_jobs(self, &moved.alive, &moved.gone, now)
     }
+
+    /// Store every follow snapshot, its curve, and its member retarget, then
+    /// queue the conduit jobs once.
+    pub fn write_follow(
+        &self,
+        pools: &[super::super::state::FollowWrite],
+    ) -> eyre::Result<Vec<super::super::state::FollowStored>> {
+        if pools.is_empty() {
+            return Ok(Vec::new());
+        }
+        let now = super::super::state::unix_now();
+        let mut alive = BTreeSet::new();
+        let mut gone = BTreeSet::new();
+        let stored = {
+            let mut write = self.entities.begin_write()?;
+            write.set_durability(Durability::Immediate)?;
+            let mut stored = Vec::with_capacity(pools.len());
+            for pool in pools {
+                let immutable = match &pool.immutable {
+                    Some(row) => Some(super::super::state::write_immutable_in(&write, row)?),
+                    None => None,
+                };
+                let snapshot = super::super::state::write_mutable_in(&write, &pool.mutable)?;
+                let curve_written = match &pool.curve {
+                    Some(curve) => super::super::state::write_curve_in(&write, curve)?,
+                    None => false,
+                };
+                let pairs: &[(Address, Address)] = if curve_written {
+                    pool.pairs.as_slice()
+                } else {
+                    &[]
+                };
+                let generation = curve_written.then_some(snapshot.generation);
+                let moved = retarget_in(
+                    &write,
+                    pool.mutable.kind,
+                    &pool.mutable.id,
+                    &pool.retired_pairs,
+                    pairs,
+                    generation,
+                )?;
+                absorb(&mut alive, &mut gone, moved);
+                stored.push(super::super::state::FollowStored {
+                    immutable,
+                    stored: snapshot,
+                    curve_written,
+                });
+            }
+            write.commit()?;
+            stored
+        };
+        let alive: Vec<_> = alive.into_iter().collect();
+        let gone: Vec<_> = gone.into_iter().collect();
+        if !alive.is_empty() || !gone.is_empty() {
+            sync_jobs(self, &alive, &gone, now)?;
+        }
+        Ok(stored)
+    }
+}
+
+fn absorb(
+    alive: &mut BTreeSet<(Address, Address)>,
+    gone: &mut BTreeSet<(Address, Address)>,
+    moved: PairMove,
+) {
+    for pair in moved.gone {
+        alive.remove(&pair);
+        gone.insert(pair);
+    }
+    for pair in moved.alive {
+        gone.remove(&pair);
+        alive.insert(pair);
+    }
+}
+
+fn retarget_in(
+    write: &redb::WriteTransaction,
+    kind: u8,
+    id: &B256,
+    old_pairs: &[(Address, Address)],
+    new_pairs: &[(Address, Address)],
+    generation: Option<u64>,
+) -> eyre::Result<PairMove> {
+    let mut pairs = BTreeSet::new();
+    pairs.extend(old_pairs.iter().copied());
+    pairs.extend(new_pairs.iter().copied());
+    let mut members = write.open_table(MEMBERS)?;
+    let mut conduits = write.open_table(CONDUITS)?;
+    let mut metas = write.open_table(META)?;
+    let (mut log_meta, mut log) = super::log::open_log(write)?;
+    let mut pending = write.open_table(super::super::state::PENDING_MEMBERS)?;
+    for pair in &pairs {
+        let key = member_key(&pair_key(pair.0, pair.1), kind, id);
+        if new_pairs.contains(pair) {
+            let Some(generation) = generation else {
+                continue;
+            };
+            let bytes = generation.to_le_bytes();
+            members.insert(key.as_slice(), bytes.as_slice())?;
+        } else {
+            members.remove(key.as_slice())?;
+        }
+    }
+    let mut alive = Vec::new();
+    let mut gone = Vec::new();
+    for pair in &pairs {
+        let stored = pair_key(pair.0, pair.1);
+        if write_members(&members, &stored)?.is_empty() {
+            conduits.remove(stored.as_slice())?;
+            remove_meta(&mut metas, &stored)?;
+            super::log::note_conduit(&mut log_meta, &mut log, &stored, false)?;
+            gone.push(*pair);
+        } else {
+            alive.push(*pair);
+        }
+    }
+    super::super::state::clear_pending(&mut pending, kind, id)?;
+    Ok(PairMove { alive, gone })
 }
 
 impl Catalog {
@@ -271,44 +360,60 @@ impl Catalog {
     /// The bool asks for another pass. It is set when the member index moved
     /// while this merge was reading.
     pub fn store_conduit(&self, body: &ConduitBody) -> eyre::Result<bool> {
-        let pair = pair_key(body.token_in, body.token_out);
         let mut write = self.entities.begin_write()?;
         write.set_durability(Durability::Immediate)?;
-        let again = {
-            let mut members = write.open_table(MEMBERS)?;
-            let live = write_members(&members, &pair)?;
-            if !same_members(&body.snapshot, &live) {
-                true
-            } else {
-                for member in &body.snapshot {
-                    if !body.kept.contains(&member.key) {
-                        members.remove(member.key.as_slice())?;
-                    }
-                }
-                let mut conduits = write.open_table(CONDUITS)?;
-                let mut metas = write.open_table(META)?;
-                let (mut log_meta, mut log) = super::log::open_log(&write)?;
-                if body.kept.is_empty() {
-                    conduits.remove(pair.as_slice())?;
-                    remove_meta(&mut metas, &pair)?;
-                    super::log::note_conduit(&mut log_meta, &mut log, &pair, false)?;
-                } else {
-                    let encoded = encode_conduit(
-                        body.block,
-                        body.generation,
-                        body.kept.len() as u32,
-                        &body.segments,
-                    )?;
-                    conduits.insert(pair.as_slice(), encoded.as_slice())?;
-                    write_meta(&mut metas, &pair, &body.segments)?;
-                    super::log::note_conduit(&mut log_meta, &mut log, &pair, true)?;
-                }
-                false
-            }
-        };
+        let again = store_conduit_in(&write, body)?;
         write.commit()?;
         Ok(again)
     }
+
+    /// Store every merged conduit in one commit.
+    pub fn store_conduits(&self, bodies: &[ConduitBody]) -> eyre::Result<Vec<bool>> {
+        if bodies.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut write = self.entities.begin_write()?;
+        write.set_durability(Durability::Immediate)?;
+        let mut again = Vec::with_capacity(bodies.len());
+        for body in bodies {
+            again.push(store_conduit_in(&write, body)?);
+        }
+        write.commit()?;
+        Ok(again)
+    }
+}
+
+fn store_conduit_in(write: &redb::WriteTransaction, body: &ConduitBody) -> eyre::Result<bool> {
+    let pair = pair_key(body.token_in, body.token_out);
+    let mut members = write.open_table(MEMBERS)?;
+    let live = write_members(&members, &pair)?;
+    if !same_members(&body.snapshot, &live) {
+        return Ok(true);
+    }
+    for member in &body.snapshot {
+        if !body.kept.contains(&member.key) {
+            members.remove(member.key.as_slice())?;
+        }
+    }
+    let mut conduits = write.open_table(CONDUITS)?;
+    let mut metas = write.open_table(META)?;
+    let (mut log_meta, mut log) = super::log::open_log(write)?;
+    if body.kept.is_empty() {
+        conduits.remove(pair.as_slice())?;
+        remove_meta(&mut metas, &pair)?;
+        super::log::note_conduit(&mut log_meta, &mut log, &pair, false)?;
+    } else {
+        let encoded = encode_conduit(
+            body.block,
+            body.generation,
+            body.kept.len() as u32,
+            &body.segments,
+        )?;
+        conduits.insert(pair.as_slice(), encoded.as_slice())?;
+        write_meta(&mut metas, &pair, &body.segments)?;
+        super::log::note_conduit(&mut log_meta, &mut log, &pair, true)?;
+    }
+    Ok(false)
 }
 
 fn same_members(left: &[ConduitMember], right: &[ConduitMember]) -> bool {

@@ -1,11 +1,11 @@
 //! Immutable rows, mutable snapshots, and tick pages.
 
-use alloy_primitives::B256;
+use alloy_primitives::{Address, B256};
 use redb::{Durability, ReadableDatabase, ReadableTable};
 use store_model::{
-    decode_curve_record, decode_dirty, decode_mutable, decode_tick_words, encode_mutable,
-    encode_tick_page, entity_key, Dirty, ImmutablePut, ImmutableRow, MutableStored, MutableWrite,
-    PoolState, TickPage, TickWord, CLASS_HEAD,
+    decode_curve_record, decode_dirty, decode_mutable, decode_tick_words, encode_curve,
+    encode_mutable, encode_tick_page, entity_key, snapshot_stamp, Dirty, ImmutablePut,
+    ImmutableRow, MutableStored, MutableWrite, PoolState, TickPage, TickWord,
 };
 
 use super::super::catalog::{Catalog, EntityRead};
@@ -64,63 +64,12 @@ impl Catalog {
 
     /// Write one mutable snapshot. Tick pages from an older bitmap, or from a
     /// mint, are deleted here. A head refresh with the same bitmap keeps the
-    /// pages and stamps the new generation on them. The curve is always dropped.
-    /// The dirty flag is removed only when it does not name a newer block.
+    /// pages at the book generation they were written with. The curve is always
+    /// dropped. The dirty flag is removed only when it does not name a newer block.
     pub fn put_mutable(&self, row: &MutableWrite) -> eyre::Result<MutableStored> {
         let mut write = self.entities.begin_write()?;
         write.set_durability(Durability::Immediate)?;
-        let stored = {
-            let mut mutable_table = write.open_table(MUTABLE)?;
-            let mut ticks = write.open_table(TICK_PAGES)?;
-            let mut curves = write.open_table(CURVES)?;
-            let mut dirty_table = write.open_table(DIRTY)?;
-            let key = entity_key(row.kind, &row.id);
-            let previous = match mutable_table.get(key.as_slice())? {
-                Some(value) => Some(decode_mutable(value.value())?),
-                None => None,
-            };
-            let previous_curve = match curves.get(key.as_slice())? {
-                Some(value) => decode_curve_record(row.kind, row.id, value.value()).ok(),
-                None => None,
-            };
-            let generation = previous
-                .as_ref()
-                .map(|view| view.generation.saturating_add(1))
-                .unwrap_or(1);
-            let bitmap_changed = previous
-                .as_ref()
-                .map(|view| view.bitmap != row.bitmap)
-                .unwrap_or(true);
-            let kept_ticks = !bitmap_changed && row.class == CLASS_HEAD && !row.truncated;
-            if kept_ticks {
-                restamp_ticks(&mut ticks, row.kind, row.id, generation)?;
-            } else {
-                delete_prefix(&mut ticks, &key)?;
-            }
-            let _ = curves.remove(key.as_slice())?;
-            let mut pending = write.open_table(PENDING_MEMBERS)?;
-            super::curve::stage_pending(&mut pending, key.as_slice(), previous_curve.as_ref())?;
-            let bytes = encode_mutable(row, generation);
-            mutable_table.insert(key.as_slice(), bytes.as_slice())?;
-            let seen = match dirty_table.get(key.as_slice())? {
-                Some(value) => Some(decode_dirty(value.value())?.0),
-                None => None,
-            };
-            let dirty_cleared = match seen {
-                Some(seen) if seen <= row.block => {
-                    dirty_table.remove(key.as_slice())?;
-                    true
-                }
-                _ => false,
-            };
-            MutableStored {
-                generation,
-                dirty_cleared,
-                kept_ticks,
-                bitmap_changed,
-                previous_curve,
-            }
-        };
+        let stored = write_mutable_in(&write, row)?;
         write.commit()?;
         Ok(stored)
     }
@@ -140,7 +89,7 @@ impl Catalog {
                     return Err(eyre::eyre!("tick page has no mutable row"));
                 };
                 let view = decode_mutable(stored.value())?;
-                if view.generation != page.generation {
+                if view.book != page.generation {
                     return Err(eyre::eyre!("tick page generation"));
                 }
                 let bytes = encode_tick_page(page)?;
@@ -228,32 +177,124 @@ fn read_tick_words(
     Ok(ticks)
 }
 
-fn restamp_ticks(
-    table: &mut redb::Table<'_, &[u8], &[u8]>,
-    kind: u8,
-    id: B256,
-    generation: u64,
-) -> eyre::Result<()> {
-    let start = tick_key(kind, id, 0);
-    let end = tick_key(kind, id, u32::MAX);
-    let mut rows = Vec::new();
-    for item in table.range::<&[u8]>(start.as_slice()..=end.as_slice())? {
-        let (key, value) = item?;
-        rows.push((key.value().to_vec(), value.value().to_vec()));
+/// One pool in a follow batch: its immutable row, the mutable snapshot, and
+/// the curve derived from the pages this snapshot keeps.
+#[derive(Debug, Clone)]
+pub struct FollowWrite {
+    pub immutable: Option<ImmutableRow>,
+    pub mutable: MutableWrite,
+    pub curve: Option<store_model::CurveRecord>,
+    /// Pairs of the curve this snapshot replaces.
+    pub retired_pairs: Vec<(Address, Address)>,
+    /// Pairs of `curve`. Empty when the snapshot has no curve yet.
+    pub pairs: Vec<(Address, Address)>,
+}
+
+/// What one pool in a follow batch stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FollowStored {
+    pub immutable: Option<ImmutablePut>,
+    pub stored: MutableStored,
+    pub curve_written: bool,
+}
+
+pub(crate) fn write_mutable_in(
+    write: &redb::WriteTransaction,
+    row: &MutableWrite,
+) -> eyre::Result<MutableStored> {
+    let mut mutable_table = write.open_table(MUTABLE)?;
+    let mut ticks = write.open_table(TICK_PAGES)?;
+    let mut curves = write.open_table(CURVES)?;
+    let mut dirty_table = write.open_table(DIRTY)?;
+    let key = entity_key(row.kind, &row.id);
+    let previous = match mutable_table.get(key.as_slice())? {
+        Some(value) => Some(decode_mutable(value.value())?),
+        None => None,
+    };
+    let previous_curve = match curves.get(key.as_slice())? {
+        Some(value) => decode_curve_record(row.kind, row.id, value.value()).ok(),
+        None => None,
+    };
+    let stamp = snapshot_stamp(previous.as_ref(), row);
+    if !stamp.kept_ticks {
+        delete_prefix(&mut ticks, &key)?;
     }
-    for (key, value) in rows {
-        let mut ticks = decode_tick_words(&value)?;
-        ticks.sort_by_key(|tick| tick.tick);
-        let bytes = encode_tick_page(&TickPage {
-            kind,
-            id,
-            page: u32::from_be_bytes(key[33..].try_into().unwrap()),
-            generation,
-            ticks,
-        })?;
-        table.insert(key.as_slice(), bytes.as_slice())?;
+    let _ = curves.remove(key.as_slice())?;
+    let mut pending = write.open_table(PENDING_MEMBERS)?;
+    super::curve::stage_pending(&mut pending, key.as_slice(), previous_curve.as_ref())?;
+    let bytes = encode_mutable(row, stamp.generation, stamp.book);
+    mutable_table.insert(key.as_slice(), bytes.as_slice())?;
+    let seen = match dirty_table.get(key.as_slice())? {
+        Some(value) => Some(decode_dirty(value.value())?.0),
+        None => None,
+    };
+    let dirty_cleared = match seen {
+        Some(seen) if seen <= row.block => {
+            dirty_table.remove(key.as_slice())?;
+            true
+        }
+        _ => false,
+    };
+    Ok(MutableStored {
+        generation: stamp.generation,
+        dirty_cleared,
+        kept_ticks: stamp.kept_ticks,
+        bitmap_changed: stamp.bitmap_changed,
+        previous_curve,
+    })
+}
+
+pub(crate) fn write_immutable_in(
+    write: &redb::WriteTransaction,
+    row: &ImmutableRow,
+) -> eyre::Result<ImmutablePut> {
+    let mut table = write.open_table(IMMUTABLE)?;
+    let mut mismatch = write.open_table(MISMATCH)?;
+    let key = entity_key(row.kind, &row.id);
+    let stored = table
+        .get(key.as_slice())?
+        .map(|value| value.value().to_vec());
+    let put = match stored.as_deref() {
+        None => {
+            table.insert(key.as_slice(), row.body.as_slice())?;
+            ImmutablePut::Written
+        }
+        Some(bytes) if bytes == row.body.as_slice() => ImmutablePut::Present,
+        Some(_) => {
+            let count = match mismatch.get(key.as_slice())? {
+                Some(value) => u64::from_le_bytes(word8(value.value())?),
+                None => 0,
+            }
+            .saturating_add(1);
+            mismatch.insert(key.as_slice(), count.to_le_bytes().as_slice())?;
+            ImmutablePut::Mismatch
+        }
+    };
+    Ok(put)
+}
+
+pub(crate) fn write_curve_in(
+    write: &redb::WriteTransaction,
+    curve: &store_model::CurveRecord,
+) -> eyre::Result<bool> {
+    let mutable_table = write.open_table(MUTABLE)?;
+    let mut curves = write.open_table(CURVES)?;
+    let key = entity_key(curve.kind, &curve.id);
+    let Some(stored) = mutable_table.get(key.as_slice())? else {
+        return Ok(false);
+    };
+    let view = decode_mutable(stored.value())?;
+    if view.generation != curve.generation {
+        return Ok(false);
     }
-    Ok(())
+    let previous = match curves.get(key.as_slice())? {
+        Some(value) => decode_curve_record(curve.kind, curve.id, value.value()).ok(),
+        None => None,
+    };
+    curves.insert(key.as_slice(), encode_curve(curve).as_slice())?;
+    let mut pending = write.open_table(PENDING_MEMBERS)?;
+    super::curve::stage_pending(&mut pending, key.as_slice(), previous.as_ref())?;
+    Ok(true)
 }
 
 /// One pool as the entity file stores it.

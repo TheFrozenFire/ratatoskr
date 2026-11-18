@@ -123,23 +123,6 @@ pub fn commit_mutable(catalog: &Catalog, row: &MutableWrite) -> eyre::Result<Mut
     Ok(stored)
 }
 
-/// Write a snapshot, then drop conduit members of the curve it removed.
-pub async fn commit_mutable_store<S: VenueStore + ConduitStore>(
-    store: &S,
-    row: &MutableWrite,
-) -> eyre::Result<MutableStored> {
-    let stored = store.put_mutable(row).await?;
-    retarget_store(
-        store,
-        row.kind,
-        row.id,
-        stored.previous_curve.as_ref(),
-        None,
-    )
-    .await?;
-    Ok(stored)
-}
-
 /// Write a curve, then retarget conduit members from the row it replaced.
 pub fn commit_curve(catalog: &Catalog, curve: &CurveRecord) -> eyre::Result<()> {
     let previous = catalog.put_curve(curve)?;
@@ -357,31 +340,38 @@ pub fn build_conduit(
     token_in: Address,
     token_out: Address,
 ) -> eyre::Result<bool> {
+    let body = conduit_body_of(catalog, token_in, token_out)?;
+    catalog.store_conduit(&body)
+}
+
+fn conduit_body_of(
+    catalog: &Catalog,
+    token_in: Address,
+    token_out: Address,
+) -> eyre::Result<ConduitBody> {
     let snapshot = catalog.conduit_members(token_in, token_out)?;
     let mut states = Vec::with_capacity(snapshot.len());
     for member in &snapshot {
         states.push(catalog.read_state(member.kind, member.id)?);
     }
-    let body = assemble(token_in, token_out, &snapshot, &states);
-    catalog.store_conduit(&body)
+    Ok(assemble(token_in, token_out, &snapshot, &states))
 }
 
 /// Merge the members of one ordered pair and store the slope segments.
 ///
 /// The bool asks for another pass. It is set when the member index moved
 /// while this merge was reading.
-pub async fn build_conduit_store<S: VenueStore + ConduitStore>(
+pub async fn conduit_body<S: VenueStore + ConduitStore>(
     store: &S,
     token_in: Address,
     token_out: Address,
-) -> eyre::Result<bool> {
+) -> eyre::Result<ConduitBody> {
     let snapshot = store.conduit_members(token_in, token_out).await?;
     let mut states = Vec::with_capacity(snapshot.len());
     for member in &snapshot {
         states.push(store.read_state(member.kind, member.id).await?);
     }
-    let body = assemble(token_in, token_out, &snapshot, &states);
-    store.store_conduit(&body).await
+    Ok(assemble(token_in, token_out, &snapshot, &states))
 }
 
 /// Build every conduit job that is ready. A job that fails stays for a later pass.
@@ -396,13 +386,14 @@ pub fn drain_conduits(catalog: &Catalog) -> eyre::Result<u64> {
         let mut done = Vec::new();
         let mut again = Vec::new();
         let mut failed = Vec::new();
+        let mut bodies = Vec::new();
+        let mut ready = Vec::new();
         for job in &jobs {
-            match build_conduit(catalog, job.token_in, job.token_out) {
-                Ok(true) => {
-                    again.push((job.token_in, job.token_out));
-                    done.push((job.token_in, job.token_out));
+            match conduit_body_of(catalog, job.token_in, job.token_out) {
+                Ok(body) => {
+                    bodies.push(body);
+                    ready.push((job.token_in, job.token_out));
                 }
-                Ok(false) => done.push((job.token_in, job.token_out)),
                 Err(err) => failed.push(ConduitFail {
                     token_in: job.token_in,
                     token_out: job.token_out,
@@ -410,6 +401,13 @@ pub fn drain_conduits(catalog: &Catalog) -> eyre::Result<u64> {
                     error: clip_error(&err.to_string()),
                 }),
             }
+        }
+        let flags = catalog.store_conduits(&bodies)?;
+        for (pair, again_flag) in ready.into_iter().zip(flags) {
+            if again_flag {
+                again.push(pair);
+            }
+            done.push(pair);
         }
         catalog.finish_conduits(&done, &again, &failed)?;
         built += done.len() as u64;
@@ -506,6 +504,54 @@ mod tests {
         assert_eq!(curve.version, CURVE_VERSION);
         super::commit_curve(catalog, &curve).unwrap();
         curve
+    }
+
+    #[test]
+    fn a_follow_batch_stores_both_curves() {
+        let dir = TempDir::new();
+        install_catalog_hooks();
+        let catalog = Catalog::open(&dir.0).unwrap();
+        let details = [
+            product(1, 1_000_000, 1_000_000),
+            product(2, 2_000_000, 2_000_000),
+        ];
+        let mut pools = Vec::new();
+        for detail in &details {
+            let PoolDetail::ConstantProduct(pool) = detail else {
+                unreachable!();
+            };
+            let (body, mut write) = split_detail(detail).unwrap();
+            write.block = 10;
+            let curve = derive_curve(detail, 1).unwrap();
+            let pairs = super::priced_pairs(&curve);
+            pools.push(store::service::FollowWrite {
+                immutable: Some(ImmutableRow {
+                    kind: pool.kind,
+                    id: pool.id,
+                    body,
+                }),
+                mutable: write,
+                curve: Some(curve),
+                retired_pairs: Vec::new(),
+                pairs,
+            });
+        }
+        let stored = catalog.write_follow(&pools).unwrap();
+        assert!(stored.iter().all(|item| item.curve_written));
+        for detail in &details {
+            let PoolDetail::ConstantProduct(pool) = detail else {
+                unreachable!();
+            };
+            let curve = catalog.read_curve(pool.kind, pool.id).unwrap().unwrap();
+            assert_eq!(curve.generation, 1);
+        }
+        let members = catalog
+            .conduit_members(
+                address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+            )
+            .unwrap();
+        assert_eq!(members.len(), 2);
     }
 
     #[test]

@@ -15,7 +15,7 @@ const PAGE: usize = 256;
 
 enum Planned {
     Job(Option<WorkJob>),
-    NeedPage { generation: u64, tick_count: u32 },
+    NeedPage { book: u64, tick_count: u32 },
 }
 
 /// Insert jobs for pools whose stored state is behind.
@@ -65,11 +65,10 @@ pub(super) async fn reconcile<S: VenueStore>(store: &S, now: u64) -> eyre::Resul
                 let job = match plan_job(row, &state, None) {
                     Planned::Job(job) => job,
                     Planned::NeedPage {
-                        generation,
-                        tick_count,
+                        book, tick_count, ..
                     } => {
                         let cursor = store
-                            .first_missing_tick_page(row.kind, row.id, generation, tick_count)
+                            .first_missing_tick_page(row.kind, row.id, book, tick_count)
                             .await?;
                         match plan_job(row, &state, Some(cursor)) {
                             Planned::Job(job) => job,
@@ -106,10 +105,9 @@ fn jobs_for_page(
         let job = match plan_job(row, &state, None) {
             Planned::Job(job) => job,
             Planned::NeedPage {
-                generation,
-                tick_count,
+                book, tick_count, ..
             } => {
-                let cursor = missing(row, generation, tick_count)?;
+                let cursor = missing(row, book, tick_count)?;
                 match plan_job(row, &state, Some(cursor)) {
                     Planned::Job(job) => job,
                     Planned::NeedPage { .. } => return Err(eyre::eyre!("tick page")),
@@ -149,7 +147,7 @@ fn plan_job(row: &VenueRow, state: &PoolState, page: Option<u32>) -> Planned {
             if needs_ticks(row.kind, mutable) {
                 let Some(cursor) = page else {
                     return Planned::NeedPage {
-                        generation: mutable.generation,
+                        book: mutable.book,
                         tick_count: mutable.tick_count,
                     };
                 };
@@ -191,7 +189,7 @@ fn structural_job(
     if needs_ticks(row.kind, mutable) {
         let Some(cursor) = page else {
             return Planned::NeedPage {
-                generation: mutable.generation,
+                book: mutable.book,
                 tick_count: mutable.tick_count,
             };
         };

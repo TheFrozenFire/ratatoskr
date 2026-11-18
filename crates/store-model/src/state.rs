@@ -66,11 +66,50 @@ pub struct MutableStored {
 pub struct MutableView {
     pub block: u64,
     pub generation: u64,
+    /// Generation of the tick pages still stored for this bitmap.
+    ///
+    /// A head refresh keeps the pages and leaves this where it was. A new
+    /// bitmap starts a new book at `generation`.
+    pub book: u64,
     pub bitmap: B256,
     pub tick_count: u32,
     pub truncated: bool,
     pub next_scan: Option<i32>,
     pub body: Vec<u8>,
+}
+
+/// Generation assigned to one mutable snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapshotStamp {
+    pub generation: u64,
+    pub book: u64,
+    pub kept_ticks: bool,
+    pub bitmap_changed: bool,
+}
+
+/// The generation a snapshot write will store.
+///
+/// An unchanged head bitmap keeps the tick pages, so `book` stays on the
+/// generation those pages were written with.
+pub fn snapshot_stamp(previous: Option<&MutableView>, row: &MutableWrite) -> SnapshotStamp {
+    let generation = previous
+        .map(|view| view.generation.saturating_add(1))
+        .unwrap_or(1);
+    let bitmap_changed = previous
+        .map(|view| view.bitmap != row.bitmap)
+        .unwrap_or(true);
+    let kept_ticks = !bitmap_changed && row.class == CLASS_HEAD && !row.truncated;
+    let book = if kept_ticks {
+        previous.map(|view| view.book).unwrap_or(generation)
+    } else {
+        generation
+    };
+    SnapshotStamp {
+        generation,
+        book,
+        kept_ticks,
+        bitmap_changed,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -286,10 +325,11 @@ fn push_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(bytes);
 }
 
-pub fn encode_mutable(row: &MutableWrite, generation: u64) -> Vec<u8> {
-    let mut out = vec![1];
+pub fn encode_mutable(row: &MutableWrite, generation: u64, book: u64) -> Vec<u8> {
+    let mut out = vec![2];
     push_u64(&mut out, row.block);
     push_u64(&mut out, generation);
+    push_u64(&mut out, book);
     out.extend_from_slice(row.bitmap.as_slice());
     push_u32(&mut out, row.tick_count);
     push_u8(&mut out, u8::from(row.truncated));
@@ -311,11 +351,19 @@ pub fn decode_mutable(bytes: &[u8]) -> eyre::Result<MutableView> {
 
 pub fn decode_mutable_parts(bytes: &[u8]) -> Result<MutableView, String> {
     let mut reader = Reader::new(bytes);
-    if reader.u8()? != 1 {
+    let version = reader.u8()?;
+    if version != 1 && version != 2 {
         return Err("mutable".into());
     }
     let block = reader.u64()?;
     let generation = reader.u64()?;
+    // A version 1 row was written when every kept page was restamped to the
+    // row generation, so that generation is the book.
+    let book = if version == 2 {
+        reader.u64()?
+    } else {
+        generation
+    };
     let bitmap = reader.hash()?;
     let tick_count = reader.u32()?;
     let truncated = reader.u8()? != 0;
@@ -329,6 +377,7 @@ pub fn decode_mutable_parts(bytes: &[u8]) -> Result<MutableView, String> {
     Ok(MutableView {
         block,
         generation,
+        book,
         bitmap,
         tick_count,
         truncated,
@@ -472,4 +521,75 @@ pub fn decode_tick_words(bytes: &[u8]) -> eyre::Result<Vec<TickWord>> {
         });
     }
     Ok(ticks)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row() -> MutableWrite {
+        MutableWrite {
+            kind: 1,
+            id: B256::repeat_byte(3),
+            block: 9,
+            class: CLASS_HEAD,
+            bitmap: B256::repeat_byte(4),
+            tick_count: 2,
+            truncated: false,
+            next_scan: Some(8),
+            body: b"pool".to_vec(),
+        }
+    }
+
+    #[test]
+    fn a_mutable_row_without_a_book_uses_its_generation() {
+        let sample = row();
+        let mut bytes = vec![1];
+        push_u64(&mut bytes, sample.block);
+        push_u64(&mut bytes, 6);
+        bytes.extend_from_slice(sample.bitmap.as_slice());
+        push_u32(&mut bytes, sample.tick_count);
+        push_u8(&mut bytes, 0);
+        push_u8(&mut bytes, 1);
+        push_i32(&mut bytes, 8);
+        push_bytes(&mut bytes, &sample.body);
+        let view = decode_mutable(&bytes).unwrap();
+        assert_eq!(view.generation, 6);
+        assert_eq!(view.book, 6);
+        assert_eq!(view.body, b"pool");
+
+        let encoded = encode_mutable(&sample, 7, 6);
+        let again = decode_mutable(&encoded).unwrap();
+        assert_eq!(again.generation, 7);
+        assert_eq!(again.book, 6);
+        assert_eq!(again.block, sample.block);
+        assert_eq!(again.body, sample.body);
+    }
+
+    #[test]
+    fn an_unchanged_head_bitmap_keeps_the_book_generation() {
+        let sample = row();
+        let previous = MutableView {
+            block: 8,
+            generation: 4,
+            book: 2,
+            bitmap: sample.bitmap,
+            tick_count: sample.tick_count,
+            truncated: false,
+            next_scan: None,
+            body: Vec::new(),
+        };
+        let stamp = snapshot_stamp(Some(&previous), &sample);
+        assert!(stamp.kept_ticks);
+        assert!(!stamp.bitmap_changed);
+        assert_eq!(stamp.generation, 5);
+        assert_eq!(stamp.book, 2);
+
+        let mut changed = sample.clone();
+        changed.bitmap = B256::repeat_byte(9);
+        let stamp = snapshot_stamp(Some(&previous), &changed);
+        assert!(!stamp.kept_ticks);
+        assert!(stamp.bitmap_changed);
+        assert_eq!(stamp.book, stamp.generation);
+    }
 }
