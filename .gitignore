@@ -10,4 +10,5 @@
 /cache
 /broadcast
 # Local databases and the curve-fit extract. Not committed.
-/data/
+# No trailing slash: this path is a symlink to the data volume.
+/data
