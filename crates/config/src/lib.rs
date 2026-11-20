@@ -28,6 +28,7 @@ pub struct Config {
     pub venues: Venues,
     pub spots: Spots,
     pub oracles: Oracles,
+    pub archival: Archival,
     pub simulate: Simulate,
 }
 
@@ -354,6 +355,29 @@ impl Oracles {
     }
 }
 
+/// How long receipt blocks remain in the corpus.
+///
+/// [`Archival::blocks_secs`] is zero unless a yaml file sets it. Zero keeps
+/// no block: the receipts are read, and the row is not retained.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Archival {
+    pub blocks_secs: u64,
+}
+
+impl Archival {
+    pub fn blocks(&self) -> Duration {
+        Duration::from_secs(self.blocks_secs)
+    }
+
+    /// Whether a block with this chain timestamp is still inside the window.
+    ///
+    /// Zero seconds keeps nothing. `now` is a unix timestamp.
+    pub fn keeps_block(&self, timestamp: u64, now: u64) -> bool {
+        self.blocks_secs > 0 && timestamp.saturating_add(self.blocks_secs) >= now
+    }
+}
+
 /// Log filter for the survey binary.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -510,6 +534,18 @@ mod tests {
     }
 
     #[test]
+    fn a_zero_retention_keeps_no_block_and_a_window_keeps_its_recent_blocks() {
+        let off = Archival::default();
+        assert!(!off.keeps_block(1_700_000_000, 1_700_000_100));
+        let week = Archival {
+            blocks_secs: 7 * 24 * 60 * 60,
+        };
+        let now = 1_700_000_000_u64;
+        assert!(week.keeps_block(now - week.blocks_secs, now));
+        assert!(!week.keeps_block(now - week.blocks_secs - 1, now));
+    }
+
+    #[test]
     fn an_unknown_field_is_an_error() {
         let dir = TempDir::new();
         fs::write(dir.0.join("process.yaml"), "process:\n  nope: 1\n").unwrap();
@@ -535,6 +571,7 @@ mod tests {
         );
         assert_eq!(loaded.spots.hub_floor, 3);
         assert_eq!(loaded.spots.hub_limit, 32);
+        assert_eq!(loaded.archival.blocks_secs, 0);
         assert!(loaded.peer.socket.is_none());
         assert_eq!(loaded.peer.bind4.as_deref(), Some("10.2.0.2"));
         assert_eq!(loaded.peer.bind6.as_deref(), Some("2a07:b944::2:2"));

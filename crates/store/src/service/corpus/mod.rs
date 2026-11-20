@@ -63,6 +63,11 @@ impl Corpus {
     pub fn default_path() -> std::path::PathBuf {
         crate::storage::data_file("corpus.redb")
     }
+
+    /// Rewrite the file so pruned blocks are not left allocated.
+    pub fn compact(&mut self) -> eyre::Result<bool> {
+        self.db.compact()
+    }
 }
 
 fn meta_get(db: &crate::storage::File, key: &str) -> eyre::Result<Option<u64>> {
@@ -157,6 +162,74 @@ mod tests {
         assert_eq!(rest.len(), 1);
         assert_eq!(rest[0].0, 3);
         assert!(corpus.read_block_page(rest[0].0 + 1, 1).unwrap().is_empty());
+        drop(corpus);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn timed(number: u64, timestamp: u64) -> BlockRecord {
+        let mut record = sample(number);
+        record.timestamp = timestamp;
+        record
+    }
+
+    #[test]
+    fn prune_keeps_a_block_inside_the_window_and_an_undecodable_value() {
+        let path = std::env::temp_dir().join(format!(
+            "ratatoskr-corpus-prune-{}-{}.redb",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut corpus = Corpus::create(&path).unwrap();
+        let now = 1_700_000_000_u64;
+        let window = 100_u64;
+        corpus
+            .put_blocks(&[timed(1, now - window - 1), timed(2, now - window)])
+            .unwrap();
+        corpus.write_hole(3).unwrap();
+        let txn = corpus.db.begin_write().unwrap();
+        {
+            let mut blocks = txn.open_table(BLOCKS).unwrap();
+            blocks.insert(4_u64, &[9_u8][..]).unwrap();
+        }
+        txn.commit().unwrap();
+        let kept = corpus.meta("bytes").unwrap().unwrap();
+        let removed = corpus
+            .prune_in_batches(
+                &config::Archival {
+                    blocks_secs: window,
+                },
+                now,
+                1,
+            )
+            .unwrap();
+        assert_eq!(removed, 2);
+        assert!(corpus.read_block(1).unwrap().is_none());
+        assert_eq!(
+            corpus.read_block(2).unwrap().unwrap().timestamp,
+            now - window
+        );
+        assert_eq!(corpus.meta("holes").unwrap(), Some(0));
+        assert_eq!(corpus.meta("bytes").unwrap(), Some(kept / 2));
+        let dropped = corpus
+            .prune_blocks(&config::Archival::default(), now)
+            .unwrap();
+        assert_eq!(dropped, 1);
+        assert!(corpus.read_block(2).unwrap().is_none());
+        assert_eq!(corpus.meta("bytes").unwrap(), Some(0));
+        let compacted = corpus.compact().unwrap();
+        let _ = compacted;
+        let mut seen = Vec::new();
+        corpus
+            .for_each_block(|number, bytes| {
+                seen.push((number, bytes.len()));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(seen, vec![(4, 1)]);
         drop(corpus);
         let _ = std::fs::remove_file(&path);
     }

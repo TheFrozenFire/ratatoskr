@@ -21,9 +21,9 @@ pub use feed::{
 pub use spot::Spot;
 
 pub use chain::{
-    decode_block_record, decode_block_records, decode_header_record, decode_header_records,
-    encode_block_record, encode_block_records, encode_header_record, encode_header_records,
-    BlockRecord, HeaderRecord, MAINNET_GENESIS_HASH,
+    block_record_timestamp, decode_block_record, decode_block_records, decode_header_record,
+    decode_header_records, encode_block_record, encode_block_records, encode_header_record,
+    encode_header_records, BlockRecord, HeaderRecord, MAINNET_GENESIS_HASH,
 };
 pub use receipt::{
     compress_receipt_bundle, decode_receipt_bundle, decompress_receipt_bundle,

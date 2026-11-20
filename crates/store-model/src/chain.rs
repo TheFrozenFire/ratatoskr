@@ -25,6 +25,21 @@ pub struct BlockRecord {
 
 const BLOCK_RECORD_VERSION: u8 = 1;
 const BLOCK_RECORD_HEADER: usize = 1 + 8 + 32 + 32 + 8 + 32 + 32 + 4;
+const BLOCK_RECORD_TIMESTAMP: usize = 1 + 8 + 32 + 32;
+
+/// Chain timestamp of an encoded block, without copying the receipt body.
+///
+/// `None` when the bytes are a hole or not a block record.
+pub fn block_record_timestamp(bytes: &[u8]) -> Option<u64> {
+    if bytes.len() < BLOCK_RECORD_HEADER || bytes[0] != BLOCK_RECORD_VERSION {
+        return None;
+    }
+    Some(u64::from_le_bytes(
+        bytes[BLOCK_RECORD_TIMESTAMP..BLOCK_RECORD_TIMESTAMP + 8]
+            .try_into()
+            .ok()?,
+    ))
+}
 
 /// Encode [`BlockRecord`] for the peer socket and for redb.
 pub fn encode_block_record(record: &BlockRecord) -> Vec<u8> {
@@ -170,6 +185,22 @@ pub fn decode_block_records(mut bytes: &[u8]) -> Result<Vec<BlockRecord>, &'stat
 mod tests {
     use super::*;
     use alloy_primitives::b256;
+
+    #[test]
+    fn block_record_timestamp_reads_the_header() {
+        let record = BlockRecord {
+            number: 12_369_621,
+            hash: b256!("1111111111111111111111111111111111111111111111111111111111111111"),
+            parent_hash: b256!("2222222222222222222222222222222222222222222222222222222222222222"),
+            timestamp: 1_620_000_000,
+            receipts_root: B256::ZERO,
+            transactions_root: B256::ZERO,
+            receipts_zstd: vec![9, 9, 9],
+        };
+        let bytes = encode_block_record(&record);
+        assert_eq!(block_record_timestamp(&bytes), Some(1_620_000_000));
+        assert_eq!(block_record_timestamp(&[]), None);
+    }
 
     #[test]
     fn block_record_roundtrip() {

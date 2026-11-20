@@ -1,7 +1,7 @@
 //! Receipt spans from the peer daemon, after the merge.
 
 use std::collections::BTreeMap;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use eyre::WrapErr;
 
@@ -26,12 +26,18 @@ pub(super) async fn fetch_peer<S, P>(
     hits: &[u64],
     end: u64,
     stop: &tokio::sync::watch::Receiver<bool>,
-    limits: &config::Venues,
+    fetch: &super::ReceiptFetch<'_>,
 ) -> eyre::Result<Walk>
 where
     S: CorpusStore + DiscoveryStore,
     P: HistoryPeer + Clone + 'static,
 {
+    let limits = fetch.limits;
+    let archival = fetch.archival;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
     let spans = hit_spans(hits, limits.chunk_max);
     let mut next_span = 0_usize;
     let mut pending: BTreeMap<u64, tokio::task::JoinHandle<Result<SpanOut, AskFail>>> =
@@ -46,7 +52,7 @@ where
     loop {
         if crate::hold_for_pause(stop).await {
             abort(&mut pending);
-            flush_bodies(store, &mut fresh).await?;
+            flush_bodies(store, &mut fresh, archival, now).await?;
             commit_rows(store, &job.job.name, cursor, &rows).await?;
             return Ok(Walk::Stopped {
                 at: cursor,
@@ -62,18 +68,19 @@ where
                 Ok(cached) => cached,
                 Err(fail) => {
                     abort(&mut pending);
-                    flush_bodies(store, &mut fresh).await?;
+                    flush_bodies(store, &mut fresh, archival, now).await?;
                     commit_rows(store, &job.job.name, cursor, &rows).await?;
                     return Ok(stop_ask(cursor, fail));
                 }
             };
             let peer = peer.clone();
             let filter = job.filter.clone();
+            let archival = *archival;
             pending.insert(
                 start,
-                tokio::spawn(
-                    async move { finish_span(&peer, start, count, cached, &filter).await },
-                ),
+                tokio::spawn(async move {
+                    finish_span(&peer, start, count, cached, &filter, archival, now).await
+                }),
             );
         }
         let Some(start) = pending.keys().next().copied() else {
@@ -84,13 +91,13 @@ where
             Ok(Ok(span)) => span,
             Ok(Err(fail)) => {
                 abort(&mut pending);
-                flush_bodies(store, &mut fresh).await?;
+                flush_bodies(store, &mut fresh, archival, now).await?;
                 commit_rows(store, &job.job.name, cursor, &rows).await?;
                 return Ok(stop_ask(cursor, fail));
             }
             Err(err) => {
                 abort(&mut pending);
-                flush_bodies(store, &mut fresh).await?;
+                flush_bodies(store, &mut fresh, archival, now).await?;
                 commit_rows(store, &job.job.name, cursor, &rows).await?;
                 return Ok(Walk::Stopped {
                     at: cursor,
@@ -100,7 +107,7 @@ where
         };
         if span.got == 0 {
             abort(&mut pending);
-            flush_bodies(store, &mut fresh).await?;
+            flush_bodies(store, &mut fresh, archival, now).await?;
             commit_rows(store, &job.job.name, cursor, &rows).await?;
             return Ok(Walk::Stopped {
                 at: cursor,
@@ -114,7 +121,7 @@ where
         cursor = start + span.got;
         since_commit += 1;
         if span.got < span.asked || since_commit >= limits.commit_spans {
-            flush_bodies(store, &mut fresh).await?;
+            flush_bodies(store, &mut fresh, archival, now).await?;
             let wrote = commit_rows(store, &job.job.name, cursor, &rows).await?;
             rows.clear();
             since_commit = 0;
@@ -140,18 +147,26 @@ where
             });
         }
     }
-    flush_bodies(store, &mut fresh).await?;
+    flush_bodies(store, &mut fresh, archival, now).await?;
     commit_rows(store, &job.job.name, end, &rows).await?;
     observability::info!(job = %job.job.name, at = end, fetched, cached = from_cache, "history caught up");
     Ok(Walk::Done)
 }
 
-/// Store receipt bodies before the discovery cursor moves past them.
-async fn flush_bodies<S: CorpusStore>(store: &S, fresh: &mut Vec<BlockRecord>) -> eyre::Result<()> {
+/// Store receipt bodies that are still inside the archival window.
+async fn flush_bodies<S: CorpusStore>(
+    store: &S,
+    fresh: &mut Vec<BlockRecord>,
+    archival: &config::Archival,
+    now: u64,
+) -> eyre::Result<()> {
     if fresh.is_empty() {
         return Ok(());
     }
-    store.put_blocks(fresh).await.wrap_err("cache receipts")?;
+    fresh.retain(|record| archival.keeps_block(record.timestamp, now));
+    if !fresh.is_empty() {
+        store.put_blocks(fresh).await.wrap_err("cache receipts")?;
+    }
     fresh.clear();
     Ok(())
 }
@@ -192,6 +207,8 @@ async fn finish_span<P: HistoryPeer>(
     count: u64,
     cached: Vec<BlockRecord>,
     filter: &filter::LogFilter,
+    archival: config::Archival,
+    now: u64,
 ) -> Result<SpanOut, AskFail> {
     let mut fresh = Vec::new();
     if (cached.len() as u64) < count {
@@ -201,8 +218,8 @@ async fn finish_span<P: HistoryPeer>(
         let got = record_prefix(&decoded, at);
         fresh.extend(decoded.into_iter().take(got));
     }
-    let mut rows = rows_of(&cached, filter)?;
-    rows.extend(rows_of(&fresh, filter)?);
+    let mut rows = rows_of(&cached, filter, archival, now)?;
+    rows.extend(rows_of(&fresh, filter, archival, now)?);
     Ok(SpanOut {
         asked: count,
         got: (cached.len() + fresh.len()) as u64,
@@ -236,13 +253,16 @@ async fn cached_prefix<S: CorpusStore>(
 fn rows_of(
     records: &[BlockRecord],
     filter: &filter::LogFilter,
+    archival: config::Archival,
+    now: u64,
 ) -> Result<Vec<crate::VenueRow>, AskFail> {
     let mut rows = Vec::new();
     for record in records {
         let logs = logs_in_block(record)
             .map_err(|err| AskFail::Failed(format!("block {}: {err:#}", record.number)))?;
+        let every_log = !archival.keeps_block(record.timestamp, now);
         for log in logs {
-            if filter.matches(log.address, &log.topics) {
+            if every_log || filter.matches(log.address, &log.topics) {
                 rows.extend(rows_from_log(&log));
             }
         }

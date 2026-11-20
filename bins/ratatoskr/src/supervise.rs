@@ -70,6 +70,7 @@ pub(crate) async fn supervise(args: Args, loaded: config::Config) -> eyre::Resul
         pin_block: args.pin_block,
         until_idle: args.until_idle,
         venues: loaded.venues.clone(),
+        archival: loaded.archival,
     };
     if pipelines.state {
         if let Some(store) = store.clone() {

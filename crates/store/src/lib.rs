@@ -14,8 +14,11 @@ use std::sync::Arc;
 use store_model::StateSummary;
 
 mod entity;
+mod maintain;
 pub mod service;
 pub mod storage;
+
+pub use maintain::{maintain, Compacted, Maintenance};
 
 pub use entity::{ChainStore, ConduitStore, CorpusStore, DiscoveryStore, TokenStore, VenueStore};
 pub use service::{FeedError, Feeds, SpotError, Spots};

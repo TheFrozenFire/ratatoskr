@@ -6,6 +6,7 @@ use eyre::WrapErr;
 mod cli;
 mod export;
 mod layout;
+mod maintain;
 mod oneshot;
 mod peer_cmd;
 mod sampler;
@@ -20,6 +21,13 @@ async fn main() -> eyre::Result<()> {
     observability::init(&loaded.process.log);
     match cli.command {
         Some(cli::Command::Peer(cmd)) => peer_cmd::run(cmd, &loaded).await,
+        Some(cli::Command::Maintain { data_dir }) => {
+            let data_dir = match data_dir.or(cli.args.data_dir) {
+                Some(dir) => dir,
+                None => config::expand_home(&loaded.process.data_dir)?,
+            };
+            maintain::run(&data_dir, &loaded.store, &loaded.archival).await
+        }
         None if cli.args.status => {
             let url = cli
                 .args

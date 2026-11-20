@@ -24,6 +24,13 @@ pub(crate) struct Cli {
 pub(crate) enum Command {
     /// Ask the running peer service. This does not dial.
     Peer(crate::peer_cmd::PeerArgs),
+    /// Prune receipt blocks outside the archival window and compact each database.
+    /// Stop the live process first.
+    Maintain {
+        /// Catalog directory. Omitted uses `--data-dir` or `process.data_dir`.
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, clap::Args)]
@@ -316,6 +323,7 @@ mod tests {
         cmd.write_long_help(&mut buf).unwrap();
         let text = String::from_utf8(buf).unwrap();
         assert!(text.contains("peer"), "{text}");
+        assert!(text.contains("maintain"), "{text}");
         assert!(!text.contains("era"), "{text}");
         assert!(!text.contains("univ3"), "{text}");
         assert!(!text.contains("spike"), "{text}");

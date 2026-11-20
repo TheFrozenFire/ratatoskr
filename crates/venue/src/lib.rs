@@ -133,6 +133,8 @@ pub struct RunOpts {
     /// four times is dropped and recorded.
     pub until_idle: bool,
     pub venues: config::Venues,
+    /// How long a fetched receipt block stays in the corpus.
+    pub archival: config::Archival,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -269,7 +271,16 @@ where
             })
             .unwrap_or_default();
         if !logs_wanted.is_empty() {
-            match history::ingest_all(store, peer, &logs_wanted, &stop, &opts.venues).await {
+            match history::ingest_all(
+                store,
+                peer,
+                &logs_wanted,
+                &stop,
+                &opts.venues,
+                &opts.archival,
+            )
+            .await
+            {
                 Ok(notes) => report.notes.extend(notes),
                 Err(err) => {
                     let note = format!("history: {err:#}");
@@ -365,12 +376,13 @@ pub async fn fetch_receipts<S, P>(
     scan: history::BloomScan,
     stop: &tokio::sync::watch::Receiver<bool>,
     limits: &config::Venues,
+    archival: &config::Archival,
 ) -> eyre::Result<Vec<String>>
 where
     S: CorpusStore + DiscoveryStore,
     P: HistoryPeer + Clone + 'static,
 {
-    history::fetch_receipts(store, peer, scan, stop, limits).await
+    history::fetch_receipts(store, peer, scan, stop, limits, archival).await
 }
 
 #[cfg(test)]

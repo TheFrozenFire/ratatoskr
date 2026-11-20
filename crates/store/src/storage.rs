@@ -76,6 +76,15 @@ impl Database {
     pub fn reading(&self) -> observability::cache::CacheReading {
         observability::cache::reading(&self.label, self.cache, self.inner.cache_stats())
     }
+
+    /// Rewrite the file so deleted pages are not left allocated.
+    ///
+    /// The handle must be the only owner. Closing it afterwards records allocator state.
+    pub fn compact(&mut self) -> eyre::Result<bool> {
+        let db = Arc::get_mut(&mut self.inner)
+            .ok_or_else(|| eyre::eyre!("database handle is shared"))?;
+        db.compact().wrap_err("compact database")
+    }
 }
 
 impl std::ops::Deref for Database {
@@ -143,6 +152,14 @@ impl File {
         match self {
             Self::Write(db) => db.reading(),
             Self::Read(db) => db.reading(),
+        }
+    }
+
+    /// Rewrite a writer so deleted pages are not left allocated.
+    pub fn compact(&mut self) -> eyre::Result<bool> {
+        match self {
+            Self::Write(db) => db.compact(),
+            Self::Read(db) => Err(eyre::eyre!("{} is open read-only", db.label)),
         }
     }
 }

@@ -3,8 +3,9 @@
 //! The local header chain already holds every logs bloom through the tip.
 //! Bloom hits are written to the venue catalog as they are found. Receipts
 //! for those hits come from era1 before the merge and from the peer daemon
-//! after it. Each downloaded payload is stored before the cursor moves, so a
-//! retry reads redb instead of the network.
+//! after it. A block inside the archival window is stored before the cursor
+//! moves. A block outside that window contributes its creation rows, and the
+//! body is not stored.
 
 mod era;
 mod peer;
@@ -33,19 +34,25 @@ use crate::{ChainStore, CorpusStore, DiscoveryStore};
 use ::peer::HistoryPeer;
 use eyre::eyre;
 
+struct ReceiptFetch<'a> {
+    limits: &'a config::Venues,
+    archival: &'a config::Archival,
+}
+
 pub async fn ingest_all<S, P>(
     store: &S,
     peer: Option<&P>,
     jobs: &[LogJob],
     stop: &tokio::sync::watch::Receiver<bool>,
     limits: &config::Venues,
+    archival: &config::Archival,
 ) -> eyre::Result<Vec<String>>
 where
     S: ChainStore + CorpusStore + DiscoveryStore,
     P: HistoryPeer + Clone + 'static,
 {
     let scan = scan_blooms(store, jobs, stop, limits).await?;
-    fetch_receipts(store, peer, scan, stop, limits).await
+    fetch_receipts(store, peer, scan, stop, limits, archival).await
 }
 
 pub(crate) async fn fetch_receipts<S, P>(
@@ -54,6 +61,7 @@ pub(crate) async fn fetch_receipts<S, P>(
     scan: BloomScan,
     stop: &tokio::sync::watch::Receiver<bool>,
     limits: &config::Venues,
+    archival: &config::Archival,
 ) -> eyre::Result<Vec<String>>
 where
     S: CorpusStore + DiscoveryStore,
@@ -81,7 +89,8 @@ where
             observability::info!(job = %job.job.name, at = job.at, end, "history caught up");
             continue;
         }
-        match fetch_job(store, peer, &mut era, &job, end, stop, limits).await {
+        let fetch = ReceiptFetch { limits, archival };
+        match fetch_job(store, peer, &mut era, &job, end, stop, &fetch).await {
             Ok(Walk::Done) => observability::info!(job = %job.job.name, "history finished"),
             Ok(Walk::Stopped { at, reason }) => {
                 let note = format!("{} stopped at {at}: {reason}", job.job.name);
@@ -105,13 +114,14 @@ async fn fetch_job<S, P, E>(
     job: &PendingJob,
     end: u64,
     stop: &tokio::sync::watch::Receiver<bool>,
-    limits: &config::Venues,
+    fetch: &ReceiptFetch<'_>,
 ) -> eyre::Result<Walk>
 where
     S: CorpusStore + DiscoveryStore,
     P: HistoryPeer + Clone + 'static,
     E: EraFetch,
 {
+    let limits = fetch.limits;
     let pre: Vec<u64> = job
         .hits
         .iter()
@@ -135,7 +145,7 @@ where
     if end <= MERGE_BLOCK {
         return Ok(Walk::Done);
     }
-    fetch_peer(store, peer, job, &post, end, stop, limits).await
+    fetch_peer(store, peer, job, &post, end, stop, fetch).await
 }
 
 #[cfg(test)]
@@ -388,6 +398,11 @@ mod tests {
         assert!(store.cursor(&peer_job.job.name).await.unwrap().is_none());
 
         let limits = config::Venues::default();
+        let archival = keep_blocks();
+        let fetch = ReceiptFetch {
+            limits: &limits,
+            archival: &archival,
+        };
         fetch_era(&store, &mut era, &era_job, &[cached_era], &stop(), &limits)
             .await
             .unwrap();
@@ -398,7 +413,7 @@ mod tests {
             &[cached_block],
             cached_block + 1,
             &stop(),
-            &limits,
+            &fetch,
         )
         .await
         .unwrap();
@@ -423,7 +438,7 @@ mod tests {
             &[cached_block + 2],
             cached_block + 3,
             &stop(),
-            &limits,
+            &fetch,
         )
         .await
         .unwrap();
@@ -453,6 +468,11 @@ mod tests {
             commit_spans: 4,
             ..config::Venues::default()
         };
+        let archival = keep_blocks();
+        let fetch = ReceiptFetch {
+            limits: &limits,
+            archival: &archival,
+        };
         fetch_peer(
             &store,
             &peer,
@@ -460,7 +480,7 @@ mod tests {
             &hits,
             start + 4,
             &stop(),
-            &limits,
+            &fetch,
         )
         .await
         .unwrap();
@@ -470,5 +490,49 @@ mod tests {
             assert_eq!(stored.number, number);
             assert!(!stored.receipts_zstd.is_empty());
         }
+    }
+
+    fn keep_blocks() -> config::Archival {
+        config::Archival {
+            blocks_secs: u64::MAX,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_zero_window_advances_the_cursor_without_storing_the_block() {
+        let dir = TempDir::new();
+        let puts = Arc::new(AtomicUsize::new(0));
+        let store = Files {
+            corpus: Corpus::create(&dir.0.join("corpus.redb")).unwrap(),
+            catalog: {
+                crate::install_catalog_hooks();
+                crate::Catalog::open(&dir.0.join("venues.redb")).unwrap()
+            },
+            puts: Arc::clone(&puts),
+        };
+        let peer = FakePeer {
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let start = MERGE_BLOCK;
+        let limits = config::Venues::default();
+        let archival = config::Archival::default();
+        let fetch = ReceiptFetch {
+            limits: &limits,
+            archival: &archival,
+        };
+        fetch_peer(
+            &store,
+            &peer,
+            &pending("peer-drop", start),
+            &[start],
+            start + 1,
+            &stop(),
+            &fetch,
+        )
+        .await
+        .unwrap();
+        assert_eq!(puts.load(Ordering::Relaxed), 0);
+        assert!(store.read_block(start).await.unwrap().is_none());
+        assert_eq!(store.cursor("peer-drop").await.unwrap(), Some(start + 1));
     }
 }
