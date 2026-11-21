@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# Build ratatoskr for the host named in build.local.yaml, then optionally
+# copy the binary there. That file is gitignored. Compile stays on this
+# machine. Pass "install" to copy the binary after it links.
+
+set -euo pipefail
+
+root=$(dirname "$(dirname "$(readlink -f "$0")")")
+cfg=$root/build.local.yaml
+if [[ ! -f $cfg ]]; then
+  echo "missing $cfg" >&2
+  exit 1
+fi
+
+val() {
+  awk -F': ' -v key="$1" '$1 == key { print $2; exit }' "$cfg"
+}
+
+target=$(val target)
+linker=$(val linker)
+cc=$(val cc)
+cxx=$(val cxx)
+ar=$(val ar)
+host=$(val host)
+remote=$(val remote_binary)
+glibc=$(val glibc)
+openssl_dir=$(val openssl_dir)
+if [[ -z $target || -z $linker || -z $cc || -z $cxx || -z $ar || -z $host || -z $remote || -z $glibc || -z $openssl_dir ]]; then
+  echo "build.local.yaml needs target, linker, cc, cxx, ar, host, remote_binary, glibc, and openssl_dir" >&2
+  exit 1
+fi
+if [[ $openssl_dir != /* ]]; then
+  openssl_dir=$root/$openssl_dir
+fi
+mkdir -p "$openssl_dir/include" "$openssl_dir/lib"
+if [[ ! -f $openssl_dir/include/openssl/ssl.h ]]; then
+  rsync -a "$host:/usr/include/openssl" "$openssl_dir/include/"
+fi
+if [[ ! -f $openssl_dir/lib/libssl.so || ! -f $openssl_dir/lib/libcrypto.so ]]; then
+  rsync -a "$host":/usr/lib/libssl.so "$host":/usr/lib/libssl.so.3 \
+    "$host":/usr/lib/libcrypto.so "$host":/usr/lib/libcrypto.so.3 \
+    "$openssl_dir/lib/"
+fi
+# libcrypto is linked to the host's compression libraries. Copy each NEEDED
+# soname, the file it points at, and the libraries those need in turn.
+# libc and libm stay on the cross toolchain. The cross linker does not
+# search -L for a shared library's own dependencies, so the gcc driver gets
+# an rpath-link. The wrapper's file name has to look like gcc: rustc reads
+# the linker name and otherwise passes raw ld options.
+declare -A copied=()
+copy_needed() {
+  local file=$1 lib real base dest
+  [[ -e $file ]] || return 0
+  while read -r lib; do
+    [[ -n ${copied[$lib]:-} ]] && continue
+    copied[$lib]=1
+    case $lib in
+      libc.so* | libdl.so* | libpthread.so* | libm.so* | ld-linux*) continue ;;
+    esac
+    dest=$openssl_dir/lib/$lib
+    if [[ ! -e $dest ]]; then
+      real=$(ssh -o BatchMode=yes "$host" "readlink -f -- /usr/lib/$lib")
+      rsync -a "$host:/usr/lib/$lib" "$openssl_dir/lib/"
+      base=$(basename "$real")
+      if [[ $base != "$lib" && ! -e $openssl_dir/lib/$base ]]; then
+        rsync -a "$host:$real" "$openssl_dir/lib/"
+      fi
+    fi
+    if [[ -L $dest ]]; then
+      copy_needed "$openssl_dir/lib/$(readlink "$dest")"
+    elif [[ -e $dest ]]; then
+      copy_needed "$dest"
+    fi
+  done < <(readelf -d "$file" | sed -n 's/.*Shared library: \[\([^]]*\)\].*/\1/p')
+}
+copy_needed "$openssl_dir/lib/libcrypto.so"
+copy_needed "$openssl_dir/lib/libssl.so"
+
+wrap=$root/.cross/$target/aarch64-linux-gnu-gcc
+mkdir -p "$(dirname "$wrap")"
+cat >"$wrap" <<EOF
+#!/bin/sh
+exec $(printf '%q' "$linker") "\$@" -Wl,-rpath-link,$(printf '%q' "$openssl_dir/lib")
+EOF
+chmod +x "$wrap"
+
+triple=${target//-/_}
+export "CARGO_TARGET_${triple^^}_LINKER=$wrap"
+export "CC_$triple=$cc"
+export "CXX_$triple=$cxx"
+export "AR_$triple=$ar"
+export OPENSSL_DIR=$openssl_dir
+export PKG_CONFIG_ALLOW_CROSS=1
+
+/usr/bin/cargo build --release --offline --bin ratatoskr \
+  --manifest-path "$root/Cargo.toml" \
+  --target "$target"
+
+bin=$root/target/$target/release/ratatoskr
+need=$(readelf -W -V "$bin" | sed -n 's/.*Name: GLIBC_\([0-9.]*\).*/\1/p' | sort -Vu | tail -1)
+if [[ -n $need && $(printf '%s\n%s\n' "$glibc" "$need" | sort -V | tail -1) != "$glibc" ]]; then
+  echo "$bin needs GLIBC_$need; $host has $glibc" >&2
+  exit 1
+fi
+file "$bin"
+
+if [[ ${1:-} == install ]]; then
+  ssh -o BatchMode=yes "$host" "mkdir -p -- $(printf '%q' "$(dirname "$remote")")"
+  rsync -a "$bin" "$host:$remote"
+fi

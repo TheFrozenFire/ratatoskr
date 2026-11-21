@@ -6,6 +6,8 @@
 .DS_Store
 .env
 *.local.yaml
+# Cross headers and libraries copied from the execution host.
+/.cross/
 /out
 /cache
 /broadcast
