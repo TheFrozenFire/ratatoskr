@@ -31,8 +31,16 @@ pub async fn run(
         let store = store.clone();
         let outcome =
             tokio::task::spawn_blocking(move || -> (eyre::Result<Option<Vec<Spot>>>, Held) {
-                let read = refresh(&store, &mut held).map(|edges| {
-                    edges.map(|edges| price(&edges, floor, limit, &mainnet_numeraires(), wrap))
+                let read = refresh(&store, &mut held).map(|changed| {
+                    changed.then(|| {
+                        price(
+                            held.edges.values(),
+                            floor,
+                            limit,
+                            &mainnet_numeraires(),
+                            wrap,
+                        )
+                    })
                 });
                 (read, held)
             })
@@ -75,8 +83,8 @@ struct Held {
     next: Option<u64>,
 }
 
-/// `None` means the stored conduits are unchanged since the last pass.
-fn refresh(store: &store::LocalStore, held: &mut Held) -> eyre::Result<Option<Vec<Edge>>> {
+/// `false` means the stored conduits are unchanged since the last pass.
+fn refresh(store: &store::LocalStore, held: &mut Held) -> eyre::Result<bool> {
     let tip = store.conduit_log_tip()?;
     if tip.overflow || held.next.is_none() {
         if tip.overflow {
@@ -111,7 +119,7 @@ fn refresh(store: &store::LocalStore, held: &mut Held) -> eyre::Result<Option<Ve
             full = true,
             "spots read"
         );
-        return Ok(Some(owned(held)));
+        return Ok(true);
     }
     let cursor = held
         .next
@@ -122,7 +130,7 @@ fn refresh(store: &store::LocalStore, held: &mut Held) -> eyre::Result<Option<Ve
         return refresh(store, held);
     }
     if notes.is_empty() && after.next == cursor {
-        return Ok(None);
+        return Ok(false);
     }
     let changed = notes.len();
     apply(held, &notes);
@@ -134,7 +142,7 @@ fn refresh(store: &store::LocalStore, held: &mut Held) -> eyre::Result<Option<Ve
         full = false,
         "spots read"
     );
-    Ok(Some(owned(held)))
+    Ok(true)
 }
 
 fn apply(held: &mut Held, notes: &[store::service::ConduitNote]) {
@@ -157,16 +165,6 @@ fn apply(held: &mut Held, notes: &[store::service::ConduitNote]) {
             }
         }
     }
-}
-
-fn owned(held: &Held) -> Vec<Edge> {
-    let mut edges: Vec<Edge> = held.edges.values().cloned().collect();
-    edges.sort_by(|left, right| {
-        left.token_in
-            .cmp(&right.token_in)
-            .then(left.token_out.cmp(&right.token_out))
-    });
-    edges
 }
 
 /// Stored pair conduits as spot edges. The block is the one the merge used.

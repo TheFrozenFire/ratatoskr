@@ -58,7 +58,11 @@ fn ints(values: &[u64]) -> Vec<BigInt> {
 ///
 /// Each direction counts for both of its tokens. A token below `floor` is left
 /// out. Equal counts keep the lower token. `limit` keeps the highest ranks.
-pub fn rank_hubs(edges: &[Edge], floor: usize, limit: usize) -> Vec<Address> {
+pub fn rank_hubs<'a>(
+    edges: impl IntoIterator<Item = &'a Edge>,
+    floor: usize,
+    limit: usize,
+) -> Vec<Address> {
     let mut score: HashMap<Address, usize> = HashMap::new();
     for edge in edges {
         if edge.token_in == edge.token_out || edge.segments.is_empty() {
@@ -81,20 +85,23 @@ pub fn rank_hubs(edges: &[Edge], floor: usize, limit: usize) -> Vec<Address> {
 /// Numeraires join the hub list even when they sit below `floor`. `wrap`
 /// inserts the one-for-one custodial wrap in both directions when that lane
 /// is not already a conduit. The result is ordered by token, then numeraire.
-pub fn price(
-    edges: &[Edge],
+/// The edges are borrowed. A pass over the live conduit set does not copy it.
+pub fn price<'a>(
+    edges: impl IntoIterator<Item = &'a Edge>,
     floor: usize,
     limit: usize,
     numeraires: &[Numeraire],
     wrap: Option<CustodialWrap>,
 ) -> Vec<Spot> {
-    let mut hubs = rank_hubs(edges, floor, limit);
+    let edges: Vec<&Edge> = edges.into_iter().collect();
+    let mut hubs = rank_hubs(edges.iter().copied(), floor, limit);
     for numeraire in numeraires {
         if !hubs.contains(&numeraire.token) {
             hubs.push(numeraire.token);
         }
     }
-    let book = Book::build(edges, wrap);
+    let wrap_segments = custodial_segments();
+    let book = Book::build(&edges, wrap, &wrap_segments);
     let mut tokens = BTreeSet::new();
     for (from, to) in book.lanes.keys() {
         tokens.insert(*from);
@@ -132,17 +139,33 @@ struct Hit {
     block: u64,
 }
 
-struct Lane {
+struct Lane<'a> {
     block: Option<u64>,
-    segments: Vec<SlopeSegment>,
+    segments: &'a [SlopeSegment],
 }
 
-struct Book {
-    lanes: HashMap<(Address, Address), Lane>,
+struct Book<'a> {
+    lanes: HashMap<(Address, Address), Lane<'a>>,
 }
 
-impl Book {
-    fn build(edges: &[Edge], wrap: Option<CustodialWrap>) -> Self {
+fn custodial_segments() -> Vec<SlopeSegment> {
+    let width: BigInt = BigInt::from(1) << 256;
+    vec![SlopeSegment {
+        width: width.clone(),
+        output: width,
+        action: routing::Action {
+            kind: 0,
+            pool: [0; 32],
+        },
+    }]
+}
+
+impl<'a> Book<'a> {
+    fn build(
+        edges: &[&'a Edge],
+        wrap: Option<CustodialWrap>,
+        wrap_segments: &'a [SlopeSegment],
+    ) -> Self {
         let mut lanes = HashMap::new();
         for edge in edges {
             if edge.token_in == edge.token_out || edge.segments.is_empty() {
@@ -152,24 +175,16 @@ impl Book {
                 (edge.token_in, edge.token_out),
                 Lane {
                     block: edge.block,
-                    segments: edge.segments.clone(),
+                    segments: &edge.segments,
                 },
             );
         }
         if let Some(wrap) = wrap {
             if wrap.native != wrap.wrapped {
-                let width: BigInt = BigInt::from(1) << 256;
                 for (from, to) in [(wrap.native, wrap.wrapped), (wrap.wrapped, wrap.native)] {
                     lanes.entry((from, to)).or_insert_with(|| Lane {
                         block: None,
-                        segments: vec![SlopeSegment {
-                            width: width.clone(),
-                            output: width.clone(),
-                            action: routing::Action {
-                                kind: 0,
-                                pool: [0; 32],
-                            },
-                        }],
+                        segments: wrap_segments,
                     });
                 }
             }
@@ -177,7 +192,7 @@ impl Book {
         Self { lanes }
     }
 
-    fn get(&self, from: Address, to: Address) -> Option<&Lane> {
+    fn get(&self, from: Address, to: Address) -> Option<&Lane<'_>> {
         self.lanes.get(&(from, to))
     }
 }
@@ -341,13 +356,13 @@ fn pay(lane: &Lane, input: &BigInt) -> Option<BigInt> {
         return None;
     }
     let mut width = BigInt::from(0);
-    for segment in &lane.segments {
+    for segment in lane.segments {
         width += &segment.width;
     }
     if &width < input {
         return None;
     }
-    let paid = routing::quote(&lane.segments, input);
+    let paid = routing::quote(lane.segments, input);
     if paid <= BigInt::from(0) {
         None
     } else {
