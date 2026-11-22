@@ -2,6 +2,7 @@
 //! `POST /pause` and `POST /resume` stop and start stage claims. Peer sessions
 //! stay connected.
 
+use serde_json::{json, Value};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::time::{Duration, Instant};
@@ -82,18 +83,73 @@ fn respond(method: &str, path: &str) -> (&'static str, String) {
     match (method, path) {
         ("POST", "/pause") => {
             venue::pause_work();
-            ("application/json", observability::status_json())
+            ("application/json", status_document())
         }
         ("POST", "/resume") => {
             venue::resume_work();
-            ("application/json", observability::status_json())
+            ("application/json", status_document())
         }
-        (_, "/metrics") => (
-            "text/plain; version=0.0.4",
-            observability::prometheus_text(),
-        ),
-        _ => ("application/json", observability::status_json()),
+        (_, "/metrics") => ("text/plain; version=0.0.4", metrics_document()),
+        _ => ("application/json", status_document()),
     }
+}
+
+fn status_document() -> String {
+    let Ok(mut value) = serde_json::from_str::<Value>(&observability::status_json()) else {
+        return observability::status_json();
+    };
+    if let Some(heap) = crate::alloc::heap() {
+        value["heap"] = json!({
+            "allocated": heap.allocated,
+            "active": heap.active,
+            "resident": heap.resident,
+            "retained": heap.retained,
+        });
+    }
+    value.to_string()
+}
+
+fn metrics_document() -> String {
+    let mut text = observability::prometheus_text();
+    let Some(heap) = crate::alloc::heap() else {
+        return text;
+    };
+    for (name, help, value) in [
+        (
+            "ratatoskr_heap_allocated_bytes",
+            "Bytes the application still owns.",
+            heap.allocated,
+        ),
+        (
+            "ratatoskr_heap_active_bytes",
+            "Bytes in active pages, including unused space in those pages.",
+            heap.active,
+        ),
+        (
+            "ratatoskr_heap_resident_bytes",
+            "Bytes in resident pages mapped by the allocator.",
+            heap.resident,
+        ),
+        (
+            "ratatoskr_heap_retained_bytes",
+            "Bytes in mappings kept after a purge.",
+            heap.retained,
+        ),
+    ] {
+        text.push_str("# HELP ");
+        text.push_str(name);
+        text.push(' ');
+        text.push_str(help);
+        text.push('\n');
+        text.push_str("# TYPE ");
+        text.push_str(name);
+        text.push_str(" gauge\n");
+        text.push_str(name);
+        text.push(' ');
+        text.push_str(&value.to_string());
+        text.push('\n');
+    }
+    text
 }
 
 fn finish(stream: &mut TcpStream) {
@@ -159,6 +215,21 @@ mod tests {
         );
         assert!(resumed.contains("\"paused\":false"));
         assert!(!venue::work_paused());
+    }
+
+    #[test]
+    fn status_reports_bytes_the_allocator_still_holds() {
+        let _one = one_at_a_time();
+        let body = exchange("GET /status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        assert!(body.contains("\"heap\":{"));
+        assert!(body.contains("\"allocated\":"));
+        assert!(body.contains("\"retained\":"));
+        let text =
+            exchange("GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        assert!(text.contains("ratatoskr_heap_allocated_bytes "));
+        assert!(text.contains("ratatoskr_heap_resident_bytes "));
+        assert!(text.contains("ratatoskr_heap_retained_bytes "));
+        assert!(tikv_jemalloc_ctl::background_thread::read().unwrap());
     }
 
     #[test]

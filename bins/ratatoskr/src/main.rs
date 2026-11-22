@@ -3,6 +3,7 @@
 use clap::Parser;
 use eyre::WrapErr;
 
+mod alloc;
 mod cli;
 mod export;
 mod layout;
