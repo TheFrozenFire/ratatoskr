@@ -2079,6 +2079,149 @@ fn the_basket_funds_the_last_pace_both_legs_can_meet() {
     assert_eq!(plan.tenders[1].input, z(6));
 }
 
+/// Both legs draw on one budget through a single wide chord. The pace jumps
+/// by the residual output, so the fill does not walk the raw amount.
+#[test]
+fn a_wide_shared_budget_funds_the_basket_in_chord_steps() {
+    use std::time::Instant;
+
+    let width = "1000000000000000000";
+    let problem = Problem {
+        inputs: vec![Input {
+            token: token(1),
+            amount: amount(width),
+        }],
+        outputs: vec![
+            Output {
+                token: token(2),
+                weight: z(1),
+            },
+            Output {
+                token: token(3),
+                weight: z(1),
+            },
+        ],
+        edges: vec![
+            wide_chord(1, 2, width, width, 1),
+            wide_chord(1, 3, width, width, 2),
+        ],
+        routes: vec![Route { edges: vec![0] }, Route { edges: vec![1] }],
+        hubs: Vec::new(),
+        gas: BTreeMap::new(),
+        gas_ceiling: None,
+    };
+    crate::fund::probe::reset();
+    let started = Instant::now();
+    let plan = optimize(&problem).expect("basket");
+    let elapsed = started.elapsed();
+    funded(&problem, &plan);
+    assert_eq!(plan.count, amount("500000000000000000"));
+    assert!(
+        crate::fund::probe::steps() <= 4,
+        "steps {}",
+        crate::fund::probe::steps()
+    );
+    assert!(elapsed.as_millis() < 1_000);
+}
+
+/// The downstream chord binds. The rank is that piece, so the path still
+/// beats a shallower direct curve.
+#[test]
+fn a_downstream_chord_keeps_the_path_steeper_than_its_source() {
+    let problem = problem(
+        &[(1, 10)],
+        &[(2, 1)],
+        vec![
+            conduit(1, 9, vec![segment(100, 100, 1)]),
+            conduit(9, 2, vec![segment(10, 10, 2)]),
+            conduit(1, 2, vec![segment(10, 5, 3)]),
+        ],
+        vec![vec![0, 1], vec![2]],
+    );
+    let plan = optimize(&problem).expect("path");
+    funded(&problem, &plan);
+    assert_eq!(plan.count, z(10));
+    assert_eq!(spent(&plan, 1), z(10));
+    assert_eq!(plan.flows.len(), 1);
+    assert_eq!(plan.flows[0].route, 0);
+    assert_eq!(plan.flows[0].input, z(10));
+    assert_eq!(plan.flows[0].output, z(10));
+}
+
+/// Ranking reads the open chord. It does not binary-search the raw amount
+/// once per route per chord.
+#[test]
+fn a_wide_basket_ranks_each_chord_without_searching_the_amount() {
+    let width = amount("1000000000000000000");
+    let routes_n = 8;
+    let chord_n = 3;
+    let mut edges = Vec::new();
+    let mut routes = Vec::new();
+    for (token_in, token_out, pool_base) in [(1_u8, 3_u8, 1_u8), (2, 4, 40)] {
+        for index in 0..routes_n {
+            let pool = pool_base + index as u8;
+            let slope = (routes_n - index) as i64;
+            let action = swap_action(token(token_in), token(token_out), pool);
+            let output = &width * slope;
+            edges.push(Edge {
+                action: action.clone(),
+                curve: Curve::Chords(
+                    (0..chord_n)
+                        .map(|_| Chord {
+                            width: width.clone(),
+                            output: output.clone(),
+                            action: action.clone(),
+                        })
+                        .collect(),
+                ),
+            });
+            routes.push(Route {
+                edges: vec![edges.len() - 1],
+            });
+        }
+    }
+    let budget = &width * (routes_n * chord_n) as i64;
+    let problem = Problem {
+        inputs: vec![
+            Input {
+                token: token(1),
+                amount: budget.clone(),
+            },
+            Input {
+                token: token(2),
+                amount: budget,
+            },
+        ],
+        outputs: vec![
+            Output {
+                token: token(3),
+                weight: z(1),
+            },
+            Output {
+                token: token(4),
+                weight: z(1),
+            },
+        ],
+        edges,
+        routes,
+        hubs: Vec::new(),
+        gas: BTreeMap::new(),
+        gas_ceiling: None,
+    };
+    crate::fund::probe::reset();
+    let plan = optimize(&problem).expect("basket");
+    funded(&problem, &plan);
+    // 3 chords on slopes 8+7+…+1, both legs funded in full.
+    assert_eq!(plan.count, &width * 108);
+    assert_eq!(spent(&plan, 1), &width * 24);
+    assert_eq!(spent(&plan, 2), &width * 24);
+    let steps = crate::fund::probe::steps();
+    let prices = crate::fund::probe::prices();
+    assert_eq!(steps, (routes_n * chord_n) as u64);
+    // One joint quote-search per step, not one amount-search per route.
+    assert!(prices <= steps * 80, "steps {steps} prices {prices}");
+}
+
 /// Forty direct routes. The budget covers two full chords and half of the next.
 #[test]
 fn the_steepest_of_many_routes_is_filled_first() {

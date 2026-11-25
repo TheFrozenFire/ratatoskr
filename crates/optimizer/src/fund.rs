@@ -112,11 +112,15 @@ impl State {
             if hi >= BigInt::one() {
                 if let Some(quote) = self.largest(problem, &choices, &pace, &hi) {
                     self.apply(problem, &quote);
+                    #[cfg(test)]
+                    probe::step();
                     return true;
                 }
             }
             if let Some(quote) = self.micro(problem, &choices) {
                 self.apply(problem, &quote);
+                #[cfg(test)]
+                probe::step();
                 return true;
             }
             let mut banned_one = false;
@@ -242,26 +246,117 @@ impl State {
     }
 
     /// Largest sink this route can pay while every take stays on its open chord.
+    ///
+    /// The residual output is pushed forward. The source spend is the least
+    /// input that pays that sink.
     fn piece(&self, problem: &Problem, route: usize) -> Option<Quote> {
-        let one = BigInt::one();
-        let mut best = self.price(problem, &[(route, one.clone())], true)?;
-        let mut proven = one;
-        let mut fail: BigInt = &proven * 2;
-        while let Some(quote) = self.price(problem, &[(route, fail.clone())], true) {
-            best = quote;
-            proven = fail.clone();
-            fail = &proven * 2;
+        let edges = &problem.routes.get(route)?.edges;
+        if edges.is_empty() {
+            return None;
         }
-        while &proven + 1 < fail {
-            let mid: BigInt = (&proven + &fail) / 2;
-            if let Some(quote) = self.price(problem, &[(route, mid.clone())], true) {
-                best = quote;
-                proven = mid;
+        let mut produced = BigInt::zero();
+        for (index, edge_index) in edges.iter().enumerate() {
+            let edge = problem.edges.get(*edge_index)?;
+            let token_in = token_in(edge)?;
+            let mut available = if index == 0 {
+                self.budget
+                    .get(&token_in)
+                    .cloned()
+                    .unwrap_or_else(BigInt::zero)
             } else {
-                fail = mid;
+                produced.clone()
+            };
+            if index > 0 && !self.inputs.contains(&token_in) {
+                if let Some(held) = self.held.get(&token_in) {
+                    available += held;
+                }
             }
+            if available.is_zero() {
+                produced = BigInt::zero();
+                continue;
+            }
+            let tender = &self.tender[*edge_index];
+            let take = match solve::chord_room(edge, tender) {
+                ChordRoom::Unlimited => available,
+                ChordRoom::Exhausted => {
+                    produced = BigInt::zero();
+                    continue;
+                }
+                ChordRoom::Open { rem_w } => {
+                    if available < rem_w {
+                        available
+                    } else {
+                        rem_w
+                    }
+                }
+            };
+            if take.is_zero() {
+                produced = BigInt::zero();
+                continue;
+            }
+            produced = solve::produce(edge, tender, &take);
         }
-        Some(best)
+        if produced.is_zero() {
+            return None;
+        }
+        let sink_out = produced;
+        let mut need = sink_out.clone();
+        for (index, edge_index) in edges.iter().enumerate().rev() {
+            if need.is_zero() {
+                return Some(Self::slope_quote(route, sink_out, HashMap::new()));
+            }
+            let edge = problem.edges.get(*edge_index)?;
+            let tender = &self.tender[*edge_index];
+            let take = solve::least_take(edge, tender, &need)?;
+            if spills(edge, tender, &take) {
+                return None;
+            }
+            if index == 0 {
+                let token_in = token_in(edge)?;
+                let mut spend = HashMap::new();
+                if self.inputs.contains(&token_in) && !take.is_zero() {
+                    let room = self
+                        .budget
+                        .get(&token_in)
+                        .cloned()
+                        .unwrap_or_else(BigInt::zero);
+                    if take > room {
+                        return None;
+                    }
+                    spend.insert(token_in, take);
+                }
+                return Some(Self::slope_quote(route, sink_out, spend));
+            }
+            let token_in = token_in(edge)?;
+            let cover = if self.inputs.contains(&token_in) {
+                BigInt::zero()
+            } else {
+                let have = self
+                    .held
+                    .get(&token_in)
+                    .cloned()
+                    .unwrap_or_else(BigInt::zero);
+                if have < take {
+                    have
+                } else {
+                    take.clone()
+                }
+            };
+            need = &take - &cover;
+        }
+        None
+    }
+
+    fn slope_quote(route: usize, sink_out: BigInt, spend: HashMap<Token, BigInt>) -> Quote {
+        let mut sink = HashMap::new();
+        sink.insert(route, sink_out);
+        Quote {
+            takes: HashMap::new(),
+            order: Vec::new(),
+            spend,
+            sink_out: sink,
+            gas: BigInt::zero(),
+        }
     }
 
     fn route_budget(&self, problem: &Problem, route: usize) -> BigInt {
@@ -381,6 +476,8 @@ impl State {
         demands: &[(usize, BigInt)],
         chord_cap: bool,
     ) -> Option<Quote> {
+        #[cfg(test)]
+        probe::price();
         let demands: Vec<(usize, BigInt)> = demands
             .iter()
             .filter(|(_, need)| !need.is_zero())
@@ -701,4 +798,35 @@ fn token_in(edge: &Edge) -> Option<Token> {
 
 fn token_out(edge: &Edge) -> Option<Token> {
     edge.token_out()
+}
+
+#[cfg(test)]
+pub(crate) mod probe {
+    use std::cell::Cell;
+
+    thread_local! {
+        static STEPS: Cell<u64> = const { Cell::new(0) };
+        static PRICES: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn reset() {
+        STEPS.with(|steps| steps.set(0));
+        PRICES.with(|prices| prices.set(0));
+    }
+
+    pub(crate) fn steps() -> u64 {
+        STEPS.with(Cell::get)
+    }
+
+    pub(crate) fn prices() -> u64 {
+        PRICES.with(Cell::get)
+    }
+
+    pub(crate) fn step() {
+        STEPS.with(|steps| steps.set(steps.get() + 1));
+    }
+
+    pub(crate) fn price() {
+        PRICES.with(|prices| prices.set(prices.get() + 1));
+    }
 }
