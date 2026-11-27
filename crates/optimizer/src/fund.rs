@@ -1,7 +1,7 @@
 //! Lockstep fill of the basket.
 //!
 //! The outputs are the inputs of the terminal edge. Each slice raises every
-//! output that is still at the minimum pace, on that output's steepest
+//! output that is still below the next open chord, on that output's steepest
 //! residual route. Downstream takes sum onto a shared edge, and that edge
 //! takes one inverse.
 
@@ -108,24 +108,25 @@ impl State {
 
     fn step(&mut self, problem: &Problem, ceiling: &BigInt) -> bool {
         let pace = self.pace(problem);
-        let needs = self.unit_needs(problem, &pace);
-        if needs.is_empty() {
-            return false;
-        }
         let mut banned: HashMap<usize, HashSet<usize>> = HashMap::new();
         loop {
+            if let Some((choices, hi)) = self.cohort(problem, ceiling, &pace, &banned) {
+                if hi >= BigInt::one() {
+                    if let Some(quote) = self.largest(problem, &choices, &pace, &hi) {
+                        self.apply(problem, &quote);
+                        #[cfg(test)]
+                        probe::step();
+                        return true;
+                    }
+                }
+            }
+            let needs = self.unit_needs(problem, &pace);
+            if needs.is_empty() {
+                return false;
+            }
             let Some(choices) = self.select(problem, &needs, &banned) else {
                 return false;
             };
-            let hi = self.slice_hi(problem, ceiling, &pace);
-            if hi >= BigInt::one() {
-                if let Some(quote) = self.largest(problem, &choices, &pace, &hi) {
-                    self.apply(problem, &quote);
-                    #[cfg(test)]
-                    probe::step();
-                    return true;
-                }
-            }
             if let Some(quote) = self.micro(problem, &choices) {
                 self.apply(problem, &quote);
                 #[cfg(test)]
@@ -167,23 +168,69 @@ impl State {
         needs
     }
 
-    fn slice_hi(&self, problem: &Problem, ceiling: &BigInt, pace: &BigInt) -> BigInt {
-        let mut hi = ceiling - pace;
-        for output in &problem.outputs {
+    /// Outputs still below the next open chord, and the pace that chord can add.
+    ///
+    /// An output with no residual route caps the slice at the pace it already
+    /// holds. The leader is included while its open chord can still follow.
+    fn cohort(
+        &self,
+        problem: &Problem,
+        ceiling: &BigInt,
+        pace: &BigInt,
+        banned: &HashMap<usize, HashSet<usize>>,
+    ) -> Option<(Vec<Choice>, BigInt)> {
+        let mut target = ceiling.clone();
+        let mut ranked = Vec::with_capacity(problem.outputs.len());
+        for (index, output) in problem.outputs.iter().enumerate() {
             let held = self
                 .held
                 .get(&output.token)
                 .cloned()
                 .unwrap_or_else(BigInt::zero);
             let floor = &held / &output.weight;
-            if floor > *pace {
-                let gap = floor - pace;
-                if gap < hi {
-                    hi = gap;
+            match self.best_route(problem, index, banned.get(&index)) {
+                Some((route, sink)) => {
+                    let reachable = (&held + &sink) / &output.weight;
+                    if reachable < target {
+                        target = reachable;
+                    }
+                    ranked.push(Some((route, sink, held)));
+                }
+                None => {
+                    if floor < target {
+                        target = floor;
+                    }
+                    ranked.push(None);
                 }
             }
         }
-        hi
+        if &target <= pace {
+            return None;
+        }
+        let mut choices = Vec::new();
+        for (index, rank) in ranked.into_iter().enumerate() {
+            let Some((route, sink, held)) = rank else {
+                continue;
+            };
+            let output = &problem.outputs[index];
+            if &held / &output.weight >= target {
+                continue;
+            }
+            let need = &target * &output.weight - &held;
+            if need <= BigInt::zero() {
+                continue;
+            }
+            choices.push(Choice {
+                output: index,
+                route,
+                need,
+                sink,
+            });
+        }
+        if choices.is_empty() {
+            return None;
+        }
+        Some((choices, &target - pace))
     }
 
     fn select(

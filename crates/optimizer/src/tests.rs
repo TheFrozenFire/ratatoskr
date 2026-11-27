@@ -2124,6 +2124,63 @@ fn a_wide_shared_budget_funds_the_basket_in_chord_steps() {
     assert!(elapsed.as_millis() < 1_000);
 }
 
+/// A one-unit overshoot leaves the other output ahead by less than the next
+/// chord pays. The fill still clears that chord in one slice.
+#[test]
+fn a_steep_gap_funds_the_basket_in_chord_steps() {
+    let chords = 8i64;
+    let width = 40i64;
+    let gain_a = width * 1000 + 3;
+    let gain_b = width * 1000 + 7;
+    let mut segments_a = Vec::new();
+    let mut segments_b = Vec::new();
+    for _ in 0..chords {
+        segments_a.push(segment(width, gain_a, 1));
+        segments_b.push(segment(width, gain_b, 2));
+    }
+    let budget = width * chords;
+    let problem = problem(
+        &[(1, budget), (2, budget)],
+        &[(3, 1), (4, 1)],
+        vec![conduit(1, 3, segments_a), conduit(2, 4, segments_b)],
+        vec![vec![0], vec![1]],
+    );
+    crate::fund::probe::reset();
+    let plan = optimize(&problem).expect("basket");
+    funded(&problem, &plan);
+    assert_eq!(plan.count, z(chords * gain_a));
+    assert_eq!(spent(&plan, 1), z(budget));
+    assert_eq!(spent(&plan, 2), z(budget));
+    let steps = crate::fund::probe::steps();
+    assert!(steps <= chords as u64 * 4, "steps {steps}");
+}
+
+/// The shared budget runs out inside the second chord. Both legs still take
+/// that chord, and the slice is not one input unit.
+#[test]
+fn a_steep_gap_splits_a_shared_budget_in_chord_steps() {
+    let width = 20i64;
+    let gain_a = width * 1000 + 3;
+    let gain_b = width * 1000 + 7;
+    let segments_a = vec![segment(width, gain_a, 1), segment(width, gain_a, 1)];
+    let segments_b = vec![segment(width, gain_b, 2), segment(width, gain_b, 2)];
+    let problem = problem(
+        &[(1, 50)],
+        &[(3, 1), (4, 1)],
+        vec![conduit(1, 3, segments_a), conduit(1, 4, segments_b)],
+        vec![vec![0], vec![1]],
+    );
+    crate::fund::probe::reset();
+    let plan = optimize(&problem).expect("basket");
+    funded(&problem, &plan);
+    assert_eq!(plan.count, z(gain_a + 5000));
+    assert_eq!(spent(&plan, 1), z(50));
+    assert_eq!(received(&plan, 3), z(gain_a + 5000));
+    assert_eq!(received(&plan, 4), z(gain_b + 5001));
+    let steps = crate::fund::probe::steps();
+    assert!(steps <= 4, "steps {steps}");
+}
+
 /// The downstream chord binds. The rank is that piece, so the path still
 /// beats a shallower direct curve.
 #[test]
