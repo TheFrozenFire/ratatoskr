@@ -2148,6 +2148,28 @@ fn a_downstream_chord_keeps_the_path_steeper_than_its_source() {
     assert_eq!(plan.flows[0].output, z(10));
 }
 
+/// A later chord is not walked while the open chord can still pay.
+#[test]
+fn a_long_curve_funds_the_open_chord_without_walking_the_tail() {
+    let chord_n = 40;
+    let chords: Vec<_> = (0..chord_n).map(|_| segment(100, 100, 1)).collect();
+    let problem = problem(
+        &[(1, 100 * chord_n)],
+        &[(2, 1)],
+        vec![conduit(1, 2, chords)],
+        vec![vec![0]],
+    );
+    crate::solve::reset_chord_visits();
+    crate::fund::probe::reset();
+    let plan = optimize(&problem).expect("curve");
+    funded(&problem, &plan);
+    assert_eq!(plan.count, z(100 * chord_n));
+    let steps = crate::fund::probe::steps();
+    let visits = crate::solve::chord_visits();
+    assert_eq!(steps, chord_n as u64);
+    assert!(visits <= steps * 16, "steps {steps} visits {visits}");
+}
+
 /// Ranking reads the open chord. It does not binary-search the raw amount
 /// once per route per chord.
 #[test]

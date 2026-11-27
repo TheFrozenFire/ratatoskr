@@ -184,6 +184,21 @@ pub(crate) fn least_take(edge: &Edge, tender: &BigInt, need: &BigInt) -> Option<
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static CHORD_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_chord_visits() {
+    CHORD_VISITS.with(|visits| visits.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn chord_visits() -> u64 {
+    CHORD_VISITS.with(std::cell::Cell::get)
+}
+
 fn least_across(segments: &[Chord], tender: &BigInt, need: &BigInt) -> Option<BigInt> {
     let (start, mut skip) = match resume(segments, tender) {
         Resume::Past => return None,
@@ -193,6 +208,8 @@ fn least_across(segments: &[Chord], tender: &BigInt, need: &BigInt) -> Option<Bi
     let mut need = need.clone();
     let mut spent = BigInt::from(0);
     for segment in segments.iter().skip(start) {
+        #[cfg(test)]
+        CHORD_VISITS.with(|visits| visits.set(visits.get() + 1));
         if skip >= segment.width {
             skip -= &segment.width;
             continue;
@@ -236,6 +253,32 @@ pub(crate) enum ChordRoom {
         rem_w: BigInt,
     },
     Exhausted,
+}
+
+pub(crate) enum OpenOut {
+    Unlimited,
+    /// Output the open chord can still pay.
+    Limited(BigInt),
+    Exhausted,
+}
+
+/// Output still available without leaving the open chord.
+pub(crate) fn open_output(edge: &Edge, tender: &BigInt) -> OpenOut {
+    match &edge.curve {
+        Curve::Unlimited => OpenOut::Unlimited,
+        Curve::Chords(chords) => match head(chords, tender) {
+            None => OpenOut::Exhausted,
+            Some(head) => {
+                let paid = (&head.output * &head.offset) / &head.width;
+                let rem = &head.output - &paid;
+                if rem <= BigInt::from(0) {
+                    OpenOut::Exhausted
+                } else {
+                    OpenOut::Limited(rem)
+                }
+            }
+        },
+    }
 }
 
 pub(crate) fn chord_room(edge: &Edge, tender: &BigInt) -> ChordRoom {

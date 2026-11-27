@@ -45,6 +45,8 @@ struct Choice {
     output: usize,
     route: usize,
     need: BigInt,
+    /// Output this route can still pay on its open chords.
+    sink: BigInt,
 }
 
 struct Quote {
@@ -53,6 +55,13 @@ struct Quote {
     spend: HashMap<Token, BigInt>,
     sink_out: HashMap<usize, BigInt>,
     gas: BigInt,
+}
+
+struct Draft {
+    takes: HashMap<usize, BigInt>,
+    order: Vec<usize>,
+    spend: HashMap<Token, BigInt>,
+    demands: Vec<(usize, BigInt)>,
 }
 
 struct Rank {
@@ -185,11 +194,12 @@ impl State {
     ) -> Option<Vec<Choice>> {
         let mut choices = Vec::with_capacity(needs.len());
         for (output, need) in needs {
-            let route = self.best_route(problem, *output, banned.get(output))?;
+            let (route, sink) = self.best_route(problem, *output, banned.get(output))?;
             choices.push(Choice {
                 output: *output,
                 route,
                 need: need.clone(),
+                sink,
             });
         }
         Some(choices)
@@ -200,7 +210,7 @@ impl State {
         problem: &Problem,
         output: usize,
         banned: Option<&HashSet<usize>>,
-    ) -> Option<usize> {
+    ) -> Option<(usize, BigInt)> {
         let token = problem.outputs[output].token;
         let mut best: Option<Rank> = None;
         for (index, route) in problem.routes.iter().enumerate() {
@@ -217,7 +227,7 @@ impl State {
                 best = Some(rank);
             }
         }
-        best.map(|rank| rank.route)
+        best.map(|rank| (rank.route, rank.slope_num))
     }
 
     fn rank(&self, problem: &Problem, route: usize) -> Option<Rank> {
@@ -376,20 +386,57 @@ impl State {
         pace: &BigInt,
         hi: &BigInt,
     ) -> Option<Quote> {
+        let hi = self.piece_hi(problem, choices, pace, hi);
+        if hi < BigInt::one() {
+            return None;
+        }
         let mut lo = BigInt::zero();
-        let mut right = hi + 1;
-        let mut best = None;
+        let mut right = &hi + 1;
+        let mut proven: Option<BigInt> = None;
         while &lo + 1 < right {
             let mid: BigInt = (&lo + &right) / 2;
             let demands = self.demands_at(problem, choices, pace, &mid);
-            if let Some(quote) = self.price(problem, &demands, true) {
+            if self.feasible(problem, &demands, true) {
+                proven = Some(mid.clone());
                 lo = mid;
-                best = Some(quote);
             } else {
                 right = mid;
             }
         }
-        best
+        let delta = proven?;
+        self.price(
+            problem,
+            &self.demands_at(problem, choices, pace, &delta),
+            true,
+        )
+    }
+
+    /// Largest pace the chosen routes can add without leaving their open chords.
+    fn piece_hi(
+        &self,
+        problem: &Problem,
+        choices: &[Choice],
+        pace: &BigInt,
+        hi: &BigInt,
+    ) -> BigInt {
+        let mut cap = hi.clone();
+        for choice in choices {
+            let output = &problem.outputs[choice.output];
+            let held = self
+                .held
+                .get(&output.token)
+                .cloned()
+                .unwrap_or_else(BigInt::zero);
+            let room = (&held + &choice.sink) / &output.weight;
+            if &room <= pace {
+                return BigInt::zero();
+            }
+            let delta = &room - pace;
+            if delta < cap {
+                cap = delta;
+            }
+        }
+        cap
     }
 
     fn demands_at(
@@ -415,59 +462,78 @@ impl State {
     }
 
     fn micro(&self, problem: &Problem, choices: &[Choice]) -> Option<Quote> {
-        let width = choices
+        let span = choices
             .iter()
             .map(|choice| choice.need.clone())
             .max()
             .unwrap_or_else(BigInt::zero);
-        if width <= BigInt::one() {
+        if span <= BigInt::one() {
             return None;
         }
         let mut lo = BigInt::zero();
-        let mut right = width.clone();
+        let mut right = span.clone();
         let mut best = None;
         while &lo + 1 < right {
             let mid: BigInt = (&lo + &right) / 2;
             let demands: Vec<(usize, BigInt)> = choices
                 .iter()
                 .map(|choice| {
-                    let need: BigInt = &choice.need * &mid / &width;
+                    let need: BigInt = &choice.need * &mid / &span;
                     (choice.route, need)
                 })
                 .filter(|(_, need)| !need.is_zero())
                 .collect();
-            if demands.len() == choices.len() {
-                if let Some(quote) = self.price(problem, &demands, true) {
-                    lo = mid;
-                    best = Some(quote);
-                    continue;
-                }
+            if demands.len() == choices.len() && self.feasible(problem, &demands, true) {
+                best = Some(mid.clone());
+                lo = mid;
+                continue;
             }
             right = mid;
         }
-        best
+        let found = best?;
+        let demands: Vec<(usize, BigInt)> = choices
+            .iter()
+            .map(|choice| {
+                let need: BigInt = &choice.need * &found / &span;
+                (choice.route, need)
+            })
+            .filter(|(_, need)| !need.is_zero())
+            .collect();
+        self.price(problem, &demands, true)
     }
 
     fn max_need(&self, problem: &Problem, route: usize, need: &BigInt) -> Option<Quote> {
         if need.is_zero() {
             return None;
         }
-        if let Some(quote) = self.price(problem, &[(route, need.clone())], true) {
-            return Some(quote);
+        if self.feasible(problem, &[(route, need.clone())], true) {
+            return self.price(problem, &[(route, need.clone())], true);
         }
         let mut lo = BigInt::zero();
         let mut right = need.clone();
-        let mut best = None;
+        let mut proven: Option<BigInt> = None;
         while &lo + 1 < right {
             let mid: BigInt = (&lo + &right) / 2;
-            if let Some(quote) = self.price(problem, &[(route, mid.clone())], true) {
+            if self.feasible(problem, &[(route, mid.clone())], true) {
+                proven = Some(mid.clone());
                 lo = mid;
-                best = Some(quote);
             } else {
                 right = mid;
             }
         }
-        best
+        let found = proven?;
+        self.price(problem, &[(route, found)], true)
+    }
+
+    fn feasible(&self, problem: &Problem, demands: &[(usize, BigInt)], chord_cap: bool) -> bool {
+        let Some(draft) = self.draft(problem, demands, chord_cap) else {
+            return false;
+        };
+        if problem.gas_ceiling.is_some() {
+            self.quote_gas(problem, &draft.takes).is_some()
+        } else {
+            true
+        }
     }
 
     fn price(
@@ -476,6 +542,30 @@ impl State {
         demands: &[(usize, BigInt)],
         chord_cap: bool,
     ) -> Option<Quote> {
+        let draft = self.draft(problem, demands, chord_cap)?;
+        let gas = self.quote_gas(problem, &draft.takes)?;
+        let mut sink_out = HashMap::new();
+        for (route_index, _) in &draft.demands {
+            let last = *problem.routes[*route_index].edges.last().unwrap();
+            let take = draft.takes.get(&last).cloned().unwrap_or_else(BigInt::zero);
+            let gained = solve::produce(&problem.edges[last], &self.tender[last], &take);
+            sink_out.insert(*route_index, gained);
+        }
+        Some(Quote {
+            takes: draft.takes,
+            order: draft.order,
+            spend: draft.spend,
+            sink_out,
+            gas,
+        })
+    }
+
+    fn draft(
+        &self,
+        problem: &Problem,
+        demands: &[(usize, BigInt)],
+        chord_cap: bool,
+    ) -> Option<Draft> {
         #[cfg(test)]
         probe::price();
         let demands: Vec<(usize, BigInt)> = demands
@@ -519,13 +609,18 @@ impl State {
             let take = if required.is_zero() {
                 BigInt::zero()
             } else {
-                let take = solve::least_take(
-                    &problem.edges[edge_index],
-                    &self.tender[edge_index],
-                    &required,
-                )?;
-                if chord_cap && spills(&problem.edges[edge_index], &self.tender[edge_index], &take)
-                {
+                let edge = &problem.edges[edge_index];
+                let tender = &self.tender[edge_index];
+                if chord_cap {
+                    match solve::open_output(edge, tender) {
+                        solve::OpenOut::Unlimited => {}
+                        solve::OpenOut::Exhausted => return None,
+                        solve::OpenOut::Limited(rem) if required > rem => return None,
+                        solve::OpenOut::Limited(_) => {}
+                    }
+                }
+                let take = solve::least_take(edge, tender, &required)?;
+                if chord_cap && spills(edge, tender, &take) {
                     return None;
                 }
                 take
@@ -572,20 +667,11 @@ impl State {
                 return None;
             }
         }
-        let gas = self.quote_gas(problem, &takes)?;
-        let mut sink_out = HashMap::new();
-        for (route_index, _) in &demands {
-            let last = *problem.routes[*route_index].edges.last().unwrap();
-            let take = takes.get(&last).cloned().unwrap_or_else(BigInt::zero);
-            let gained = solve::produce(&problem.edges[last], &self.tender[last], &take);
-            sink_out.insert(*route_index, gained);
-        }
-        Some(Quote {
+        Some(Draft {
             takes,
             order,
             spend,
-            sink_out,
-            gas,
+            demands,
         })
     }
 
