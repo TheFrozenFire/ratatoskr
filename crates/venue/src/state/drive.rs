@@ -604,7 +604,7 @@ async fn drive_ticks<S: VenueStore + ConduitStore>(
                 }
             })
             .collect();
-        store
+        if let Err(err) = store
             .put_tick_pages(&[TickPage {
                 kind: job.kind,
                 id: job.id,
@@ -612,7 +612,28 @@ async fn drive_ticks<S: VenueStore + ConduitStore>(
                 generation: book,
                 ticks,
             }])
-            .await?;
+            .await
+        {
+            let book_now = store
+                .read_state(job.kind, job.id)
+                .await?
+                .mutable
+                .as_ref()
+                .map(|row| row.book);
+            if tick_page_book_moved(&err, book_now, book) {
+                observability::warn!(
+                    stage = job.stage,
+                    kind = crate::catalog::kind_name(job.kind),
+                    id = %job.id,
+                    book,
+                    book_now,
+                    "tick page book moved"
+                );
+                done.push((job.stage, job.kind, job.id));
+                continue;
+            }
+            return Err(err);
+        }
         if more {
             let mut again = job.clone();
             again.lease_until = 0;
@@ -689,9 +710,28 @@ async fn drive_curves<S: VenueStore + ConduitStore>(
     Ok(())
 }
 
+/// The ticks were loaded for `book_read`. A generation miss is that book
+/// moving during the read, which the newer snapshot replaces.
+fn tick_page_book_moved(err: &eyre::Report, book_now: Option<u64>, book_read: u64) -> bool {
+    book_now != Some(book_read)
+        && err
+            .chain()
+            .any(|cause| cause.to_string() == "tick page generation")
+}
+
 #[cfg(test)]
 mod tests {
     use super::tagged_block;
+
+    #[test]
+    fn a_tick_page_for_a_moved_book_is_dropped() {
+        let err = eyre::eyre!("tick page generation");
+        assert!(super::tick_page_book_moved(&err, Some(9), 4));
+        assert!(super::tick_page_book_moved(&err, None, 4));
+        assert!(!super::tick_page_book_moved(&err, Some(4), 4));
+        let other = eyre::eyre!("tick lens row count");
+        assert!(!super::tick_page_book_moved(&other, Some(9), 4));
+    }
 
     #[test]
     fn the_read_block_follows_the_header_cursor() {
